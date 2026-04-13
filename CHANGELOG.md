@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - ExecuteDeferred instruction (disc=7): TX2 verifies hashes and executes via CPI with vault signing
 - ReclaimDeferred instruction (disc=8): closes expired DeferredExec accounts, refunds rent to original payer
 - DeferredExecAccount (176 bytes): stores instruction/account hashes, wallet, authority, payer, expiry
+- Devnet smoke test (`tests-sdk/tests/devnet-smoke.ts`): exercises all 9 instructions across Ed25519/Secp256r1/Session auth types and Owner/Admin/Spender roles, reporting CU/TX size/rent
 - Deferred execution benchmarks (CU + tx size measurements for TX1/TX2)
 - Error codes 3014-3018 for deferred execution (expired, hash mismatch, invalid expiry, unauthorized reclaim)
 - SDK builders: `createAuthorizeIx`, `createExecuteDeferredIx`, `createReclaimDeferredIx`
@@ -63,6 +64,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Counter size: u64 -> u32 (4 billion operations per authority is sufficient)
 - Execute Secp256r1 transaction size: 708 -> 658 bytes (50 bytes saved)
 - Execute Secp256r1 accounts: 8 -> 7 (SlotHashes sysvar removed)
+- Cost documentation: updated all CU numbers from local validator to devnet-measured actuals, expanded CU table to all 9 instructions across all auth types and roles
+- Shank IDL: fixed 4 instructions missing `rent_sysvar` accounts, added 3 missing deferred execution instructions (Authorize, ExecuteDeferred, ReclaimDeferred)
 
 ### Fixed
 

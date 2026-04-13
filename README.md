@@ -22,15 +22,15 @@ A high-performance smart wallet program on Solana with passkey (WebAuthn/Secp256
 
 ## LazorKit vs Normal SOL Transfer
 
-| Metric | Normal Transfer | LazorKit (Secp256r1) | LazorKit (Session) |
-|---|---|---|---|
-| Compute Units | 150 | 12,441 | 8,983 |
-| Transaction Size | 215 bytes | 658 bytes | 452 bytes |
-| Accounts | 2 | 7 | 7 |
-| Instructions | 1 | 2 | 1 |
-| Transaction Fee | 0.000005 SOL | 0.000005 SOL | 0.000005 SOL |
+| Metric | Normal Transfer | LazorKit (Secp256r1) | LazorKit (Ed25519) | LazorKit (Session) |
+|---|---|---|---|---|
+| Compute Units | 150 | 9,441 | 5,864 | 4,483-5,983 |
+| Transaction Size | 215 bytes | 658 bytes | 452 bytes | 452 bytes |
+| Accounts | 2 | 7 | 7 | 7 |
+| Instructions | 1 | 2 | 1 | 1 |
+| Transaction Fee | 0.000005 SOL | 0.000005 SOL | 0.000005 SOL | 0.000005 SOL |
 
-Session keys are ideal for frequent transactions -- they skip the Secp256r1 precompile and use a simple Ed25519 signer, resulting in lower CU and smaller transactions.
+Session keys are ideal for frequent transactions -- they skip the Secp256r1 precompile and use a simple Ed25519 signer, resulting in lower CU and smaller transactions. All CU measurements are from real devnet transactions.
 
 ### Deferred Execution (Large Payloads)
 
@@ -38,7 +38,7 @@ For operations exceeding the ~574 bytes available in a single Secp256r1 Execute 
 
 | Metric | Immediate Execute | Deferred (2 txs) |
 |---|---|---|
-| Total CU | 12,441 | 18,613 (11,709 + 6,904) |
+| Total CU | 9,441 | 15,613 (10,209 + 5,404) |
 | Inner Ix Capacity | ~574 bytes | ~1,100 bytes (1.9x) |
 | Tx Fee | 0.000005 SOL | 0.00001 SOL |
 | Temp Rent | -- | 0.00212 SOL (refunded) |

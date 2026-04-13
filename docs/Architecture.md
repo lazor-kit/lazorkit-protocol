@@ -241,8 +241,8 @@ For Secp256r1 Execute, the signed payload includes a SHA256 hash of all account 
 
 | Path | Inner Ix Capacity | Total CU | Tx Fee |
 |---|---|---|---|
-| Immediate Execute | ~574 bytes | 12,441 | 0.000005 SOL |
-| Deferred (2 txs) | ~1,100 bytes (1.9x) | 18,613 | 0.00001 SOL |
+| Immediate Execute | ~574 bytes | 9,441 | 0.000005 SOL |
+| Deferred (2 txs) | ~1,100 bytes (1.9x) | 15,613 | 0.00001 SOL |
 
 ### Security Properties
 
