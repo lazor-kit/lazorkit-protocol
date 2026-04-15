@@ -52,8 +52,13 @@ impl CompactInstructions {
     /// # Returns
     /// * `Vec<u8>` - Serialized instruction data
     pub fn into_bytes(&self) -> Vec<u8> {
+        // Callers must not exceed MAX_COMPACT_INSTRUCTIONS / 255 accounts per instruction.
+        // Lengths are encoded as u8 — values > 255 would silently truncate and corrupt
+        // the instruction stream on deserialization.
+        debug_assert!(self.inner_instructions.len() <= 255);
         let mut bytes = vec![self.inner_instructions.len() as u8];
         for ix in self.inner_instructions.iter() {
+            debug_assert!(ix.accounts.len() <= 255);
             bytes.push(ix.program_id_index);
             bytes.push(ix.accounts.len() as u8);
             bytes.extend(ix.accounts.iter());
@@ -105,6 +110,7 @@ impl CompactInstruction {
 
     /// Serialize this CompactInstruction to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
+        debug_assert!(self.accounts.len() <= 255, "account count exceeds u8 max");
         let mut bytes = Vec::with_capacity(4 + self.accounts.len() + self.data.len());
         bytes.push(self.program_id_index);
         bytes.push(self.accounts.len() as u8);
@@ -150,6 +156,10 @@ pub struct DecompressedInstruction<'a> {
     pub data: Vec<u8>, // Owned data to avoid lifetime issues
 }
 
+/// Maximum number of compact instructions per Execute call.
+/// Prevents compute-unit exhaustion DoS.
+pub const MAX_COMPACT_INSTRUCTIONS: usize = 16;
+
 /// Parse multiple CompactInstructions from bytes
 /// Format: [num_instructions: u8][instruction_0][instruction_1]...
 pub fn parse_compact_instructions(bytes: &[u8]) -> Result<Vec<CompactInstruction>, ProgramError> {
@@ -158,6 +168,10 @@ pub fn parse_compact_instructions(bytes: &[u8]) -> Result<Vec<CompactInstruction
     }
 
     let num_instructions = bytes[0] as usize;
+    if num_instructions > MAX_COMPACT_INSTRUCTIONS {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
     let mut instructions = Vec::with_capacity(num_instructions);
     let mut remaining = &bytes[1..];
 
