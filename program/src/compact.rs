@@ -52,13 +52,12 @@ impl CompactInstructions {
     /// # Returns
     /// * `Vec<u8>` - Serialized instruction data
     pub fn into_bytes(&self) -> Vec<u8> {
-        // Callers must not exceed MAX_COMPACT_INSTRUCTIONS / 255 accounts per instruction.
         // Lengths are encoded as u8 — values > 255 would silently truncate and corrupt
-        // the instruction stream on deserialization.
-        debug_assert!(self.inner_instructions.len() <= 255);
+        // the instruction stream on deserialization. Enforce at runtime, not just debug.
+        assert!(self.inner_instructions.len() <= 255, "instruction count exceeds u8 max");
         let mut bytes = vec![self.inner_instructions.len() as u8];
         for ix in self.inner_instructions.iter() {
-            debug_assert!(ix.accounts.len() <= 255);
+            assert!(ix.accounts.len() <= 255, "account count exceeds u8 max");
             bytes.push(ix.program_id_index);
             bytes.push(ix.accounts.len() as u8);
             bytes.extend(ix.accounts.iter());
@@ -110,7 +109,7 @@ impl CompactInstruction {
 
     /// Serialize this CompactInstruction to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        debug_assert!(self.accounts.len() <= 255, "account count exceeds u8 max");
+        assert!(self.accounts.len() <= 255, "account count exceeds u8 max");
         let mut bytes = Vec::with_capacity(4 + self.accounts.len() + self.data.len());
         bytes.push(self.program_id_index);
         bytes.push(self.accounts.len() as u8);
@@ -271,20 +270,31 @@ mod tests {
 
     #[test]
     fn test_max_accounts() {
-        // Test with maximum number of accounts (u8::MAX = 255)
-        let accounts: Vec<u8> = (0..=255).collect();
+        // Test with 255 accounts (the valid u8 max)
+        let accounts: Vec<u8> = (0..255).collect();
         let ix = CompactInstruction {
             program_id_index: 0,
-            accounts,
+            accounts: accounts.clone(),
             data: vec![1],
         };
 
         let bytes = ix.to_bytes();
         let (deserialized, _) = CompactInstruction::from_bytes(&bytes).unwrap();
+        assert_eq!(deserialized.accounts.len(), 255);
+    }
 
-        // Note: accounts.len() wraps to 0 when cast to u8!
-        // This is a known limitation - can't have exactly 256 accounts
-        assert_eq!(deserialized.accounts.len(), 0); // Wraps around!
+    #[test]
+    #[should_panic(expected = "account count exceeds u8 max")]
+    fn test_256_accounts_panics() {
+        // 256 accounts would silently truncate to 0 via `as u8`.
+        // The assert! guard must catch this.
+        let accounts: Vec<u8> = (0..=255).collect(); // 256 elements
+        let ix = CompactInstruction {
+            program_id_index: 0,
+            accounts,
+            data: vec![1],
+        };
+        let _ = ix.to_bytes(); // should panic
     }
 
     #[test]

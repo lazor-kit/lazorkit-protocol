@@ -64,6 +64,14 @@ impl ParsedCreateSessionArgs {
         if data.len() >= 42 {
             let actions_len = u16::from_le_bytes(data[40..42].try_into().unwrap()) as usize;
 
+            // Cap actions buffer size to prevent BPF heap exhaustion.
+            // 16 actions * max ~128 bytes each = 2048 is generous.
+            // The BPF heap is 32KB; allocating 64KB (u16 max) would OOM.
+            const MAX_ACTIONS_BUFFER_SIZE: usize = 2048;
+            if actions_len > MAX_ACTIONS_BUFFER_SIZE {
+                return Err(ProgramError::InvalidInstructionData);
+            }
+
             if actions_len > 0 {
                 let actions_start = 42;
                 let actions_end = actions_start + actions_len;

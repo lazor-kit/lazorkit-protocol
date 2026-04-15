@@ -100,10 +100,16 @@ pub enum ProgramIx {
         name = "new_owner_authority",
         desc = "New owner authority PDA to be created"
     )]
-    #[account(4, name = "system_program", desc = "System Program")]
-    #[account(5, name = "rent_sysvar", desc = "Rent Sysvar")]
     #[account(
-        6,
+        4,
+        writable,
+        name = "refund_destination",
+        desc = "Account to receive rent refund from closed current owner"
+    )]
+    #[account(5, name = "system_program", desc = "System Program")]
+    #[account(6, name = "rent_sysvar", desc = "Rent Sysvar")]
+    #[account(
+        7,
         signer,
         optional,
         name = "authorizer_signer",
@@ -386,7 +392,9 @@ pub enum LazorKitInstruction {
     /// 2. `[]` Wallet PDA
     /// 3. `[writable]` Current Owner Authority PDA
     /// 4. `[writable]` New Owner Authority PDA
-    /// 5. `[]` System Program
+    /// 5. `[writable]` Refund Destination
+    /// 6. `[]` System Program
+    /// 7. `[]` Rent Sysvar
     TransferOwnership {
         new_type: u8,
         new_pubkey: [u8; 33],

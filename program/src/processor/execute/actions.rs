@@ -518,6 +518,20 @@ mod tests {
         data
     }
 
+    /// Test helper: calls evaluate_post_actions with gross_out = before - after (single CPI).
+    fn eval_post(
+        session_data: &mut [u8],
+        accounts: &[AccountInfo],
+        vault_key: &Pubkey,
+        before: u64,
+        after: u64,
+        token_snapshots: &[TokenSnapshot],
+        slot: u64,
+    ) -> Result<(), ProgramError> {
+        let gross = before.saturating_sub(after);
+        evaluate_post_actions(session_data, accounts, vault_key, before, after, gross, token_snapshots, slot)
+    }
+
     fn build_sol_recurring(limit: u64, spent: u64, window: u64, last_reset: u64) -> Vec<u8> {
         let mut data = Vec::new();
         data.extend_from_slice(&limit.to_le_bytes());
@@ -533,7 +547,7 @@ mod tests {
     fn test_no_actions_passthrough() {
         let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
         session_data[0] = 3;
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             10_000_000, 0, &[], 100,
         );
@@ -547,7 +561,7 @@ mod tests {
         let original = session_data.clone();
 
         // vault gained lamports (before < after) → sol_spent = 0
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 2_000_000, // vault gained 1M
             &[], 100,
@@ -563,7 +577,7 @@ mod tests {
         let actions = build_action(3, 0, &500_000u64.to_le_bytes());
         let mut session_data = build_session_data(&actions);
 
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 5_000_000, // gained 4M
             &[], 100,
@@ -579,7 +593,7 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend exactly the remaining amount — should succeed
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_000_000, // spent exactly 1M
             &[], 100,
@@ -597,7 +611,7 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Tx 1: spend 600k
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_400_000, &[], 100,
         );
@@ -607,7 +621,7 @@ mod tests {
         assert_eq!(read_u64(&session_data[abs_offset..], 0), 400_000);
 
         // Tx 2: spend 400k (exact remaining) — OK
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_400_000, 1_000_000, &[], 101,
         );
@@ -615,7 +629,7 @@ mod tests {
         assert_eq!(read_u64(&session_data[abs_offset..], 0), 0);
 
         // Tx 3: spend 1 lamport — should fail (0 remaining)
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 999_999, &[], 102,
         );
@@ -628,7 +642,7 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Try to spend 1M + 1 — should fail
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 999_999, // spent 1_000_001
             &[], 100,
@@ -648,14 +662,14 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend exactly the max — OK
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_500_000, &[], 100,
         );
         assert!(result.is_ok());
 
         // Exceed by 1 — fail
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_499_999, &[], 101,
         );
@@ -669,7 +683,7 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         for slot in 100..110 {
-            let result = evaluate_post_actions(
+            let result = eval_post(
                 &mut session_data, &[], &Pubkey::default(),
                 2_000_000, 1_500_000, // 500k each time
                 &[], slot,
@@ -687,14 +701,14 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend 600k at slot 50
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_400_000, &[], 50,
         );
         assert!(result.is_ok());
 
         // Spend 500k more at slot 60 — total 1.1M > 1M limit
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_400_000, 900_000, &[], 60,
         );
@@ -708,13 +722,13 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend 900k at slot 50
-        evaluate_post_actions(
+        eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_100_000, &[], 50,
         ).unwrap();
 
         // At slot 150 (after window), 500k should work again
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_100_000, 600_000, &[], 150,
         );
@@ -733,7 +747,7 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // At slot 150 (fresh window), try to spend more than the full limit
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             5_000_000, 3_500_000, // 1.5M > 1M limit
             &[], 150,
@@ -748,14 +762,14 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend exactly the limit
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_000_000, &[], 50,
         );
         assert!(result.is_ok());
 
         // Spend 1 more in same window — fail
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 999_999, &[], 60,
         );
@@ -771,7 +785,7 @@ mod tests {
 
         // Spend 200 — would overflow spent + sol_spent without saturating_add
         // But limit is u64::MAX so it should be within limit
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 999_800, // spent 200
             &[], 50,
@@ -793,14 +807,14 @@ mod tests {
         let mut session_data = build_session_data(&actions_buf);
 
         // 400k — under both limits
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             5_000_000, 4_600_000, &[], 100,
         );
         assert!(result.is_ok());
 
         // 600k — under lifetime (1.6M left) but over per-tx (500k)
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             4_600_000, 4_000_000, &[], 101,
         );
@@ -818,19 +832,19 @@ mod tests {
         let mut session_data = build_session_data(&actions_buf);
 
         // 200k — OK
-        evaluate_post_actions(
+        eval_post(
             &mut session_data, &[], &Pubkey::default(),
             5_000_000, 4_800_000, &[], 50,
         ).unwrap();
 
         // 200k more — OK (400k total in window, under 1M; 200k under 300k per-tx)
-        evaluate_post_actions(
+        eval_post(
             &mut session_data, &[], &Pubkey::default(),
             4_800_000, 4_600_000, &[], 60,
         ).unwrap();
 
         // 350k — fails per-tx (350k > 300k) even though recurring has room
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             4_600_000, 4_250_000, &[], 70,
         );
@@ -840,14 +854,22 @@ mod tests {
     // ─── Action expiry ────────────────────────────────────────────
 
     #[test]
-    fn test_expired_action_skipped() {
+    fn test_expired_action_blocks_spending() {
+        // Expired spending limits are treated as fully exhausted (not skipped).
         let actions = build_action(3, 50, &500_000u64.to_le_bytes()); // Expires at slot 50
         let mut session_data = build_session_data(&actions);
 
-        // At slot 100, action expired — 600k spend should pass
-        let result = evaluate_post_actions(
+        // At slot 100, action expired — any spend should FAIL
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_400_000, &[], 100,
+        );
+        assert!(result.is_err());
+
+        // Zero spending is still OK even with expired action
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            2_000_000, 2_000_000, &[], 100,
         );
         assert!(result.is_ok());
     }
@@ -860,18 +882,18 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // At slot 50 — still active, 600k > 500k → fail
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_400_000, &[], 50,
         );
         assert!(result.is_err());
 
-        // At slot 51 — expired, 600k → pass
-        let result = evaluate_post_actions(
+        // At slot 51 — expired, any spend → also fail (expired = exhausted)
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_400_000, &[], 51,
         );
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -884,18 +906,24 @@ mod tests {
 
         let mut session_data = build_session_data(&actions_buf);
 
-        // At slot 100: MaxPerTx expired, but SolLimit still active
-        // 3M spend → exceeds SolLimit of 2M → fail
-        let result = evaluate_post_actions(
+        // At slot 100: MaxPerTx expired → any spend blocked by expired MaxPerTx
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             5_000_000, 2_000_000, &[], 100,
         );
         assert!(result.is_err());
 
-        // 1M spend → under SolLimit → OK (MaxPerTx expired, doesn't block)
-        let result = evaluate_post_actions(
+        // Even 1 lamport fails because expired MaxPerTx blocks all spending
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
-            5_000_000, 4_000_000, &[], 100,
+            5_000_000, 4_999_999, &[], 100,
+        );
+        assert!(result.is_err());
+
+        // Zero spend is OK
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            5_000_000, 5_000_000, &[], 100,
         );
         assert!(result.is_ok());
     }
@@ -914,7 +942,7 @@ mod tests {
         let original = session_data.clone();
 
         // 500k spend — passes SolLimit but fails SolMaxPerTx
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             5_000_000, 4_500_000, &[], 100,
         );
@@ -932,7 +960,7 @@ mod tests {
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
 
         // Spend 300k at slot 50
-        evaluate_post_actions(
+        eval_post(
             &mut session_data, &[], &Pubkey::default(),
             2_000_000, 1_700_000, &[], 50,
         ).unwrap();
@@ -941,7 +969,7 @@ mod tests {
         assert_eq!(read_u64(&session_data[abs_offset..], 24), 0); // last_reset (first window)
 
         // Spend 200k at slot 60
-        evaluate_post_actions(
+        eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_700_000, 1_500_000, &[], 60,
         ).unwrap();
@@ -949,7 +977,7 @@ mod tests {
         assert_eq!(read_u64(&session_data[abs_offset..], 8), 500_000); // cumulative
 
         // Window reset at slot 200
-        evaluate_post_actions(
+        eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_500_000, 1_300_000, &[], 200,
         ).unwrap();
@@ -966,14 +994,14 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Even 1 lamport should fail
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 999_999, &[], 100,
         );
         assert!(result.is_err());
 
         // But zero spending is OK
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 1_000_000, &[], 100,
         );
@@ -985,13 +1013,13 @@ mod tests {
         let actions = build_action(3, 0, &0u64.to_le_bytes());
         let mut session_data = build_session_data(&actions);
 
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 999_999, &[], 100,
         );
         assert!(result.is_err());
 
-        let result = evaluate_post_actions(
+        let result = eval_post(
             &mut session_data, &[], &Pubkey::default(),
             1_000_000, 1_000_000, &[], 100,
         );
