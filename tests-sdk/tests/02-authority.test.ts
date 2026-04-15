@@ -17,7 +17,7 @@ import {
   ed25519,
   secp256r1,
 } from '../../sdk/solita-client/src';
-import { AuthorityAccount } from '../../sdk/solita-client/src/generated/accounts';
+import { AuthorityAccount } from '../../sdk/solita-client/src/utils/accounts';
 
 describe('Authority Management', () => {
   let ctx: TestContext;

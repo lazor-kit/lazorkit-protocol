@@ -9,7 +9,7 @@ import {
   type TestContext,
 } from './common';
 import { LazorKitClient, ed25519 } from '../../sdk/solita-client/src';
-import { SessionAccount } from '../../sdk/solita-client/src/generated/accounts';
+import { SessionAccount } from '../../sdk/solita-client/src/utils/accounts';
 
 describe('CreateSession', () => {
   let ctx: TestContext;

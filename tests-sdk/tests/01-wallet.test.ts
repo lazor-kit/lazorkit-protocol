@@ -9,7 +9,7 @@ import {
   AUTH_TYPE_SECP256R1,
   PROGRAM_ID,
 } from '../../sdk/solita-client/src';
-import { AuthorityAccount } from '../../sdk/solita-client/src/generated/accounts';
+import { AuthorityAccount } from '../../sdk/solita-client/src/utils/accounts';
 
 describe('CreateWallet', () => {
   let ctx: TestContext;
