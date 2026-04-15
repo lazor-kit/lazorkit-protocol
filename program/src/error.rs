@@ -29,3 +29,21 @@ impl From<AuthError> for ProgramError {
         ProgramError::Custom(e as u32)
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+#[repr(u32)]
+pub enum ProtocolError {
+    ProtocolAlreadyInitialized = 4001,
+    InvalidProtocolAdmin = 4002,
+    ProtocolDisabled = 4003,
+    InvalidIntegratorRecord = 4004,
+    InsufficientFeeBalance = 4005,
+    IntegratorAlreadyRegistered = 4006,
+    InvalidTreasury = 4007,
+}
+
+impl From<ProtocolError> for ProgramError {
+    fn from(e: ProtocolError) -> Self {
+        ProgramError::Custom(e as u32)
+    }
+}

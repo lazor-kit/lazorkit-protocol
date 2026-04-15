@@ -11,73 +11,67 @@ import * as web3 from '@solana/web3.js';
 
 /**
  * @category Instructions
- * @category CreateWallet
+ * @category RegisterPayer
  * @category generated
  */
-export type CreateWalletInstructionArgs = {
-  userSeed: Uint8Array,
-  authType: number,
-  authPubkey: number[] /* size: 33 */,
-  credentialHash: number[] /* size: 32 */
+export type RegisterPayerInstructionArgs = {
+  targetPayer: number[] /* size: 32 */
 }
 /**
  * @category Instructions
- * @category CreateWallet
+ * @category RegisterPayer
  * @category generated
  */
-export const CreateWalletStruct = new beet.FixableBeetArgsStruct<CreateWalletInstructionArgs & {
+export const RegisterPayerStruct = new beet.BeetArgsStruct<RegisterPayerInstructionArgs & {
       instructionDiscriminator: number
   }
 >(
   [
     ['instructionDiscriminator', beet.u8],
-    ['userSeed', beet.bytes],
-    ['authType', beet.u8],
-    ['authPubkey', beet.uniformFixedSizeArray(beet.u8, 33)],
-    ['credentialHash', beet.uniformFixedSizeArray(beet.u8, 32)]
+    ['targetPayer', beet.uniformFixedSizeArray(beet.u8, 32)]
   ],
-  'CreateWalletInstructionArgs'
+  'RegisterPayerInstructionArgs'
 )
 /**
-  * Accounts required by the _CreateWallet_ instruction
+  * Accounts required by the _RegisterPayer_ instruction
  *
   * @property [_writable_, **signer**] payer  
-* @property [_writable_] wallet  
-* @property [_writable_] vault  
-* @property [_writable_] authority  
+* @property [] protocolConfig  
+* @property [**signer**] admin  
+* @property [_writable_] feeRecord  
 * @property [] rentSysvar   
   * @category Instructions
-  * @category CreateWallet
+  * @category RegisterPayer
   * @category generated
   */
-          export type CreateWalletInstructionAccounts = {
+          export type RegisterPayerInstructionAccounts = {
   payer: web3.PublicKey
-  wallet: web3.PublicKey
-  vault: web3.PublicKey
-  authority: web3.PublicKey
+  protocolConfig: web3.PublicKey
+  admin: web3.PublicKey
+  feeRecord: web3.PublicKey
   systemProgram?: web3.PublicKey
   rentSysvar: web3.PublicKey
   
         }
         
-    export const createWalletInstructionDiscriminator = 0;
+    export const registerPayerInstructionDiscriminator = 12;
 
     /**
-     * Creates a _CreateWallet_ instruction.
+     * Creates a _RegisterPayer_ instruction.
       *
   * @param accounts that will be accessed while the instruction is processed
  * @param args to provide as instruction data to the program
  * 
      * @category Instructions
-     * @category CreateWallet
+     * @category RegisterPayer
      * @category generated
      */
-    export function createCreateWalletInstruction(
-      accounts: CreateWalletInstructionAccounts, 
-args: CreateWalletInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao')
+    export function createRegisterPayerInstruction(
+      accounts: RegisterPayerInstructionAccounts, 
+args: RegisterPayerInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao')
     ) {
-      const [data] = CreateWalletStruct.serialize({
-        instructionDiscriminator: createWalletInstructionDiscriminator,
+      const [data] = RegisterPayerStruct.serialize({
+        instructionDiscriminator: registerPayerInstructionDiscriminator,
     ...args
     });
     const keys: web3.AccountMeta[] = [
@@ -87,17 +81,17 @@ args: CreateWalletInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA4
       isSigner: true,
     },
     {
-      pubkey: accounts.wallet,
-      isWritable: true,
+      pubkey: accounts.protocolConfig,
+      isWritable: false,
       isSigner: false,
     },
     {
-      pubkey: accounts.vault,
-      isWritable: true,
-      isSigner: false,
+      pubkey: accounts.admin,
+      isWritable: false,
+      isSigner: true,
     },
     {
-      pubkey: accounts.authority,
+      pubkey: accounts.feeRecord,
       isWritable: true,
       isSigner: false,
     },

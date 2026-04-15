@@ -63,7 +63,7 @@ describe('Security', () => {
       ownerKey = await generateMockSecp256r1Key();
       const userSeed = crypto.randomBytes(32);
 
-      const result = client.createWallet({
+      const result = await client.createWallet({
         payer: ctx.payer.publicKey,
         userSeed,
         owner: {
@@ -154,7 +154,7 @@ describe('Security', () => {
       const ownerKp = Keypair.generate();
       const userSeed = crypto.randomBytes(32);
 
-      const result = client.createWallet({
+      const result = await client.createWallet({
         payer: ctx.payer.publicKey,
         userSeed,
         owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
@@ -194,7 +194,7 @@ describe('Security', () => {
       // Create wallet A
       const ownerA = Keypair.generate();
       const seedA = crypto.randomBytes(32);
-      const resultA = client.createWallet({
+      const resultA = await client.createWallet({
         payer: ctx.payer.publicKey,
         userSeed: seedA,
         owner: { type: 'ed25519', publicKey: ownerA.publicKey },
@@ -206,7 +206,7 @@ describe('Security', () => {
       // Create wallet B
       const ownerB = Keypair.generate();
       const seedB = crypto.randomBytes(32);
-      const resultB = client.createWallet({
+      const resultB = await client.createWallet({
         payer: ctx.payer.publicKey,
         userSeed: seedB,
         owner: { type: 'ed25519', publicKey: ownerB.publicKey },
@@ -238,7 +238,7 @@ describe('Security', () => {
       const ownerKey = await generateMockSecp256r1Key();
       const userSeed = crypto.randomBytes(32);
 
-      const result = client.createWallet({
+      const result = await client.createWallet({
         payer: ctx.payer.publicKey,
         userSeed,
         owner: {

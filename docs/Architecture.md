@@ -1,8 +1,8 @@
-# LazorKit Architecture
+# LazorKit Protocol Architecture
 
 ## 1. Overview
 
-LazorKit is a high-performance smart wallet on Solana with passkey (WebAuthn) authentication, role-based access control, and session keys. Built with pinocchio for zero-copy serialization.
+LazorKit Protocol is a revenue-enabled smart wallet on Solana with passkey (WebAuthn) authentication, role-based access control, session keys, and an optional protocol fee system. Built with pinocchio for zero-copy serialization. Fork of open-source LazorKit V2 with protocol fee, sharded treasury, and integrator reward tracking.
 
 ## 2. Core Principles
 
@@ -49,6 +49,9 @@ pub enum AccountDiscriminator {
     Authority = 2,
     Session = 3,
     DeferredExec = 4,
+    ProtocolConfig = 5,  // Protocol fee system
+    FeeRecord = 6,       // Per-payer fee tracking
+    TreasuryShard = 7,   // Sharded treasury
 }
 ```
 
@@ -139,6 +142,63 @@ Seeds: `["vault", wallet_pubkey]`
 
 No data allocated. Holds SOL. Program signs for it via PDA seeds during Execute.
 
+### F. ProtocolConfig (88 bytes) — Protocol Fee System
+
+Seeds: `["protocol_config"]`
+
+```rust
+#[repr(C, align(8))]
+pub struct ProtocolConfig {
+    pub discriminator: u8,  // 5 = ProtocolConfig
+    pub version: u8,
+    pub bump: u8,
+    pub enabled: u8,        // 0=disabled, 1=enabled
+    pub num_shards: u8,     // Number of treasury shards (e.g. 16)
+    pub _padding: [u8; 3],
+    pub admin: Pubkey,      // Protocol admin
+    pub treasury: Pubkey,   // Withdrawal destination
+    pub creation_fee: u64,  // Lamports per CreateWallet
+    pub execution_fee: u64, // Lamports per Execute/ExecuteDeferred
+}
+// Total: 8+32+32+8+8 = 88 bytes
+```
+
+### G. FeeRecord (32 bytes) — Per-Payer Fee Tracking
+
+Seeds: `["fee_record", payer_pubkey]`
+
+```rust
+#[repr(C, align(8))]
+pub struct FeeRecord {
+    pub discriminator: u8,  // 6 = FeeRecord
+    pub bump: u8,
+    pub version: u8,
+    pub _padding: [u8; 5],
+    pub total_fees_paid: u64, // Cumulative fees (for token reward distribution)
+    pub tx_count: u32,        // Fee-eligible transactions
+    pub wallet_count: u32,    // Wallets created by this payer
+    pub registered_at: u64,   // Slot when registered
+}
+// Total: 8+8+4+4+8 = 32 bytes
+```
+
+### H. TreasuryShard (8 bytes) — Sharded Fee Collection
+
+Seeds: `["treasury_shard", shard_id(u8)]`
+
+```rust
+#[repr(C, align(8))]
+pub struct TreasuryShard {
+    pub discriminator: u8,  // 7 = TreasuryShard
+    pub bump: u8,
+    pub shard_id: u8,
+    pub _padding: [u8; 5],
+}
+// Total: 8 bytes. SOL accumulates as lamport balance.
+```
+
+Multiple shards (e.g. 16) spread write contention — different transactions hit different shards, preserving parallel execution.
+
 ## Parallel Execution
 
 A key design property: **different authorities on the same wallet can execute transactions in parallel** on Solana's runtime.
@@ -168,7 +228,7 @@ Since each authority is a separate PDA, Solana's scheduler sees no writable over
 
 This enables high-throughput wallets where multiple authorized parties (e.g., an admin managing permissions while a spender sends payments, or multiple session keys operating concurrently) never block each other. The per-authority odometer counter provides replay protection without creating a shared bottleneck.
 
-## 5. Instructions (10 total)
+## 5. Instructions (15 total — 10 wallet + 5 protocol)
 
 ### CreateWallet (discriminator: 0)
 
@@ -245,6 +305,51 @@ This enables high-throughput wallets where multiple authorized parties (e.g., an
 - Signature bound to specific session PDA + refund destination (prevents replay).
 - Accounts: payer, wallet, admin_authority, session, refund_destination [+ auth_extra].
 
+### InitializeProtocol (discriminator: 10)
+
+- Creates the global ProtocolConfig PDA. One-time setup.
+- Instruction data: `[admin(32)][treasury(32)][creation_fee(8)][execution_fee(8)][num_shards(1)]`.
+- Accounts: payer, protocol_config, system_program, rent_sysvar.
+
+### UpdateProtocol (discriminator: 11)
+
+- Updates fees, treasury address, or enabled flag. Admin must sign.
+- Instruction data: `[creation_fee(8)][execution_fee(8)][enabled(1)][padding(7)][new_treasury(32)]`.
+- Accounts: admin, protocol_config.
+
+### RegisterPayer (discriminator: 12)
+
+- Creates a FeeRecord PDA for a specific payer pubkey. Admin-gated.
+- Instruction data: `[target_payer(32)]`.
+- Accounts: payer, protocol_config, admin, fee_record, system_program, rent_sysvar.
+
+### WithdrawTreasury (discriminator: 13)
+
+- Sweeps accumulated SOL from a TreasuryShard to the treasury address. Admin-gated.
+- Keeps rent-exempt minimum in the shard. Direct lamport manipulation (program owns shard).
+- No instruction data (discriminator only).
+- Accounts: admin, protocol_config, treasury_shard, treasury, rent_sysvar.
+
+### InitializeTreasuryShard (discriminator: 14)
+
+- Creates a single TreasuryShard PDA. Call once per shard (0..num_shards-1). Admin-gated.
+- Instruction data: `[shard_id(1)]`.
+- Accounts: payer, protocol_config, admin, treasury_shard, system_program, rent_sysvar.
+
+### Protocol Fee Collection (Entrypoint Level)
+
+Fee collection happens at the entrypoint, before processor dispatch. For CreateWallet (0), Execute (4), and ExecuteDeferred (7):
+
+1. SDK appends 4 accounts: `[protocol_config, fee_record, treasury_shard, system_program]`
+2. Entrypoint detects by checking last 4 accounts' discriminators
+3. System Transfer: payer -> treasury_shard (random)
+4. Update FeeRecord counters
+5. Strip 4 accounts, pass remainder to processor (unchanged)
+
+If accounts don't match or payer has no FeeRecord, all accounts pass through unchanged. Fully backwards compatible.
+
+See [ProtocolFee.md](ProtocolFee.md) for full protocol fee architecture.
+
 ## 6. CompactInstructions Format
 
 Binary format for packing multiple instructions into Execute:
@@ -318,35 +423,48 @@ program/
         webauthn.rs           ClientDataJSON reconstruction + AuthDataParser
       traits.rs               Authenticator trait
     processor/
-      create_wallet.rs
+      create_wallet.rs        Wallet + vault + authority creation
       manage_authority.rs     AddAuthority + RemoveAuthority
       execute.rs              CompactInstruction execution (immediate)
       authorize.rs            Deferred execution TX1 (creates DeferredExec PDA)
       execute_deferred.rs     Deferred execution TX2 (verifies + executes)
       reclaim_deferred.rs     Closes expired DeferredExec accounts
-      create_session.rs
-      transfer_ownership.rs
+      create_session.rs       Ephemeral session key creation
+      transfer_ownership.rs   Atomic owner swap
+      revoke_session.rs       Early session revocation
+      initialize_protocol.rs  Protocol config setup (disc 10)
+      update_protocol.rs      Update fees/treasury/enabled (disc 11)
+      register_integrator.rs  Register payer for fee tracking (disc 12)
+      withdraw_treasury.rs    Sweep fees from shard to treasury (disc 13)
+      initialize_treasury_shard.rs  Create treasury shard PDA (disc 14)
     state/
       wallet.rs               WalletAccount (8 bytes)
       authority.rs            AuthorityAccountHeader (48 bytes)
       session.rs              SessionAccount (80 bytes)
       deferred.rs             DeferredExecAccount (176 bytes)
+      protocol_config.rs      ProtocolConfig (88 bytes)
+      integrator_record.rs    FeeRecord (32 bytes)
+      treasury_shard.rs       TreasuryShard (8 bytes)
     compact.rs                CompactInstruction serialization
     utils.rs                  PDA initialization, stack_height check
-    error.rs                  AuthError enum (3001-3018)
-    entrypoint.rs             Instruction routing
+    error.rs                  AuthError (3001-3019) + ProtocolError (4001-4007)
+    entrypoint.rs             Instruction routing + fee collection
 sdk/solita-client/
   src/
     generated/                Solita-generated instructions, accounts, errors
     utils/
-      instructions.ts         Low-level instruction builders
-      client.ts               LazorKitClient high-level API (unified)
-      types.ts                Discriminated union signer types + helper constructors
+      instructions.ts         Low-level instruction builders (15 instructions)
+      client.ts               LazorKitClient API (wallet ops + protocol + wallet lookup)
+      types.ts                Discriminated union signer types
       signing.ts              Secp256r1 signing utilities
       compact.ts              CompactInstruction layout builder
-      pdas.ts                 PDA derivation helpers
+      pdas.ts                 PDA derivation (wallet, vault, authority, session, deferred, protocol, fee_record, treasury_shard)
       secp256r1.ts            Challenge hash + auth payload builders
       packing.ts              CompactInstruction packing
       errors.ts               Error code mapping
-tests-sdk/                    Integration + security tests (vitest, 56 tests)
+tests-sdk/                    Integration + security tests (vitest, 70 tests, 12 suites)
+docs/
+  Architecture.md             This document
+  Costs.md                    CU benchmarks, rent costs
+  ProtocolFee.md              Protocol fee system architecture
 ```

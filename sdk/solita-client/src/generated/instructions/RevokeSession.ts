@@ -12,58 +12,58 @@ import * as web3 from '@solana/web3.js';
 
 /**
  * @category Instructions
- * @category RemoveAuthority
+ * @category RevokeSession
  * @category generated
  */
-export const RemoveAuthorityStruct = new beet.BeetArgsStruct<{ instructionDiscriminator: number }>(
+export const RevokeSessionStruct = new beet.BeetArgsStruct<{ instructionDiscriminator: number }>(
   [
     ['instructionDiscriminator', beet.u8],
     
   ],
-  'RemoveAuthorityInstructionArgs'
+  'RevokeSessionInstructionArgs'
 )
 /**
-  * Accounts required by the _RemoveAuthority_ instruction
+  * Accounts required by the _RevokeSession_ instruction
  *
   * @property [**signer**] payer  
 * @property [] wallet  
-* @property [**signer**] adminAuthority  
-* @property [_writable_] targetAuthority  
+* @property [_writable_] adminAuthority  
+* @property [_writable_] session  
 * @property [_writable_] refundDestination  
 * @property [] authExtra (optional)   
   * @category Instructions
-  * @category RemoveAuthority
+  * @category RevokeSession
   * @category generated
   */
-          export type RemoveAuthorityInstructionAccounts = {
+          export type RevokeSessionInstructionAccounts = {
   payer: web3.PublicKey
   wallet: web3.PublicKey
   adminAuthority: web3.PublicKey
-  targetAuthority: web3.PublicKey
+  session: web3.PublicKey
   refundDestination: web3.PublicKey
   authExtra?: web3.PublicKey
   
         }
         
-    export const removeAuthorityInstructionDiscriminator = 2;
+    export const revokeSessionInstructionDiscriminator = 9;
 
     /**
-     * Creates a _RemoveAuthority_ instruction.
+     * Creates a _RevokeSession_ instruction.
      * 
  * Optional accounts that are not provided default to the program ID since 
  * this was indicated in the IDL from which this instruction was generated.
   *
   * @param accounts that will be accessed while the instruction is processed
      * @category Instructions
-     * @category RemoveAuthority
+     * @category RevokeSession
      * @category generated
      */
-    export function createRemoveAuthorityInstruction(
-      accounts: RemoveAuthorityInstructionAccounts, 
+    export function createRevokeSessionInstruction(
+      accounts: RevokeSessionInstructionAccounts, 
 programId = new web3.PublicKey('FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao')
     ) {
-      const [data] = RemoveAuthorityStruct.serialize({
-        instructionDiscriminator: removeAuthorityInstructionDiscriminator,
+      const [data] = RevokeSessionStruct.serialize({
+        instructionDiscriminator: revokeSessionInstructionDiscriminator,
     
     });
     const keys: web3.AccountMeta[] = [
@@ -79,11 +79,11 @@ programId = new web3.PublicKey('FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao')
     },
     {
       pubkey: accounts.adminAuthority,
-      isWritable: false,
-      isSigner: true,
+      isWritable: true,
+      isSigner: false,
     },
     {
-      pubkey: accounts.targetAuthority,
+      pubkey: accounts.session,
       isWritable: true,
       isSigner: false,
     },

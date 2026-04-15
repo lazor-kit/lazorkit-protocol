@@ -45,6 +45,7 @@ export const AddAuthorityStruct = new beet.BeetArgsStruct<AddAuthorityInstructio
 * @property [] wallet  
 * @property [**signer**] adminAuthority  
 * @property [_writable_] newAuthority  
+* @property [] rentSysvar  
 * @property [**signer**] authorizerSigner (optional)   
   * @category Instructions
   * @category AddAuthority
@@ -56,6 +57,7 @@ export const AddAuthorityStruct = new beet.BeetArgsStruct<AddAuthorityInstructio
   adminAuthority: web3.PublicKey
   newAuthority: web3.PublicKey
   systemProgram?: web3.PublicKey
+  rentSysvar: web3.PublicKey
   authorizerSigner?: web3.PublicKey
   
         }
@@ -106,6 +108,11 @@ args: AddAuthorityInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA4
     },
     {
       pubkey: accounts.systemProgram ?? web3.SystemProgram.programId,
+      isWritable: false,
+      isSigner: false,
+    },
+    {
+      pubkey: accounts.rentSysvar,
       isWritable: false,
       isSigner: false,
     },

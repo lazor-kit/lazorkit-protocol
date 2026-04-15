@@ -20,11 +20,11 @@ describe('CreateWallet', () => {
     client = new LazorKitClient(ctx.connection);
   });
 
-  it('creates a wallet with Ed25519 owner', async () => {
+  it('creates a wallet with Ed25519 owner and finds it back', async () => {
     const ownerKp = Keypair.generate();
     const userSeed = crypto.randomBytes(32);
 
-    const { instructions, walletPda, authorityPda } = client.createWallet({
+    const { instructions, walletPda, authorityPda } = await client.createWallet({
       payer: ctx.payer.publicKey,
       userSeed,
       owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
@@ -46,13 +46,21 @@ describe('CreateWallet', () => {
     expect(authority.role).toBe(0); // Owner
     expect(Number(authority.counter)).toBe(0);
     expect(authority.wallet.equals(walletPda)).toBe(true);
+
+    // === Simulate "user comes back" — find wallet by pubkey ===
+    const [found] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+    expect(found).toBeDefined();
+    expect(found.walletPda.equals(walletPda)).toBe(true);
+    expect(found.authorityPda.equals(authorityPda)).toBe(true);
+    expect(found.authorityType).toBe(AUTH_TYPE_ED25519);
+    expect(found.role).toBe(0);
   });
 
-  it('creates a wallet with Secp256r1 owner', async () => {
+  it('creates a wallet with Secp256r1 owner and finds it back', async () => {
     const key = await generateMockSecp256r1Key();
     const userSeed = crypto.randomBytes(32);
 
-    const { instructions, authorityPda } = client.createWallet({
+    const { instructions, walletPda, authorityPda } = await client.createWallet({
       payer: ctx.payer.publicKey,
       userSeed,
       owner: {
@@ -73,13 +81,26 @@ describe('CreateWallet', () => {
     expect(authority.authorityType).toBe(AUTH_TYPE_SECP256R1);
     expect(authority.role).toBe(0); // Owner
     expect(Number(authority.counter)).toBe(0);
+
+    // === Simulate "user comes back" — only has credentialIdHash ===
+    const [found] = await client.findWalletsByAuthority(key.credentialIdHash);
+    expect(found).toBeDefined();
+    expect(found.walletPda.equals(walletPda)).toBe(true);
+    expect(found.authorityPda.equals(authorityPda)).toBe(true);
+    expect(found.authorityType).toBe(AUTH_TYPE_SECP256R1);
+  });
+
+  it('returns empty array for unknown credential', async () => {
+    const unknownCred = crypto.randomBytes(32);
+    const results = await client.findWalletsByAuthority(unknownCred);
+    expect(results).toHaveLength(0);
   });
 
   it('rejects duplicate wallet creation', async () => {
     const ownerKp = Keypair.generate();
     const userSeed = crypto.randomBytes(32);
 
-    const { instructions } = client.createWallet({
+    const { instructions } = await client.createWallet({
       payer: ctx.payer.publicKey,
       userSeed,
       owner: { type: 'ed25519', publicKey: ownerKp.publicKey },

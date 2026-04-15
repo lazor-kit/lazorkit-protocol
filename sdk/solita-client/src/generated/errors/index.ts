@@ -297,6 +297,160 @@ createErrorFromCodeLookup.set(0xbc5, () => new SelfReentrancyNotAllowedError())
 createErrorFromNameLookup.set('SelfReentrancyNotAllowed', () => new SelfReentrancyNotAllowedError())
 
 
+
+/**
+ * ProtocolAlreadyInitialized: 'Protocol config already initialized'
+ *
+ * @category Errors
+ * @category generated
+ */
+export class ProtocolAlreadyInitializedError extends Error {
+  readonly code: number = 0xfa1;
+  readonly name: string = 'ProtocolAlreadyInitialized';
+  constructor() {
+    super('Protocol config already initialized');
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, ProtocolAlreadyInitializedError);
+    }
+  }
+}
+
+createErrorFromCodeLookup.set(0xfa1, () => new ProtocolAlreadyInitializedError())
+createErrorFromNameLookup.set('ProtocolAlreadyInitialized', () => new ProtocolAlreadyInitializedError())
+
+
+
+/**
+ * InvalidProtocolAdmin: 'Invalid protocol admin'
+ *
+ * @category Errors
+ * @category generated
+ */
+export class InvalidProtocolAdminError extends Error {
+  readonly code: number = 0xfa2;
+  readonly name: string = 'InvalidProtocolAdmin';
+  constructor() {
+    super('Invalid protocol admin');
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, InvalidProtocolAdminError);
+    }
+  }
+}
+
+createErrorFromCodeLookup.set(0xfa2, () => new InvalidProtocolAdminError())
+createErrorFromNameLookup.set('InvalidProtocolAdmin', () => new InvalidProtocolAdminError())
+
+
+
+/**
+ * ProtocolDisabled: 'Protocol fee collection is disabled'
+ *
+ * @category Errors
+ * @category generated
+ */
+export class ProtocolDisabledError extends Error {
+  readonly code: number = 0xfa3;
+  readonly name: string = 'ProtocolDisabled';
+  constructor() {
+    super('Protocol fee collection is disabled');
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, ProtocolDisabledError);
+    }
+  }
+}
+
+createErrorFromCodeLookup.set(0xfa3, () => new ProtocolDisabledError())
+createErrorFromNameLookup.set('ProtocolDisabled', () => new ProtocolDisabledError())
+
+
+
+/**
+ * InvalidIntegratorRecord: 'Invalid integrator/fee record'
+ *
+ * @category Errors
+ * @category generated
+ */
+export class InvalidIntegratorRecordError extends Error {
+  readonly code: number = 0xfa4;
+  readonly name: string = 'InvalidIntegratorRecord';
+  constructor() {
+    super('Invalid integrator/fee record');
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, InvalidIntegratorRecordError);
+    }
+  }
+}
+
+createErrorFromCodeLookup.set(0xfa4, () => new InvalidIntegratorRecordError())
+createErrorFromNameLookup.set('InvalidIntegratorRecord', () => new InvalidIntegratorRecordError())
+
+
+
+/**
+ * InsufficientFeeBalance: 'Insufficient fee balance'
+ *
+ * @category Errors
+ * @category generated
+ */
+export class InsufficientFeeBalanceError extends Error {
+  readonly code: number = 0xfa5;
+  readonly name: string = 'InsufficientFeeBalance';
+  constructor() {
+    super('Insufficient fee balance');
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, InsufficientFeeBalanceError);
+    }
+  }
+}
+
+createErrorFromCodeLookup.set(0xfa5, () => new InsufficientFeeBalanceError())
+createErrorFromNameLookup.set('InsufficientFeeBalance', () => new InsufficientFeeBalanceError())
+
+
+
+/**
+ * IntegratorAlreadyRegistered: 'Payer already registered'
+ *
+ * @category Errors
+ * @category generated
+ */
+export class IntegratorAlreadyRegisteredError extends Error {
+  readonly code: number = 0xfa6;
+  readonly name: string = 'IntegratorAlreadyRegistered';
+  constructor() {
+    super('Payer already registered');
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, IntegratorAlreadyRegisteredError);
+    }
+  }
+}
+
+createErrorFromCodeLookup.set(0xfa6, () => new IntegratorAlreadyRegisteredError())
+createErrorFromNameLookup.set('IntegratorAlreadyRegistered', () => new IntegratorAlreadyRegisteredError())
+
+
+
+/**
+ * InvalidTreasury: 'Invalid treasury address'
+ *
+ * @category Errors
+ * @category generated
+ */
+export class InvalidTreasuryError extends Error {
+  readonly code: number = 0xfa7;
+  readonly name: string = 'InvalidTreasury';
+  constructor() {
+    super('Invalid treasury address');
+    if (typeof Error.captureStackTrace === 'function') {
+      Error.captureStackTrace(this, InvalidTreasuryError);
+    }
+  }
+}
+
+createErrorFromCodeLookup.set(0xfa7, () => new InvalidTreasuryError())
+createErrorFromNameLookup.set('InvalidTreasury', () => new InvalidTreasuryError())
+
+
 /**
  * Attempts to resolve a custom program error from the provided error code.
  * @category Errors

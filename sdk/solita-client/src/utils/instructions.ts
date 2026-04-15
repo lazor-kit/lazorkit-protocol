@@ -23,6 +23,11 @@ export const DISC_AUTHORIZE = 6;
 export const DISC_EXECUTE_DEFERRED = 7;
 export const DISC_RECLAIM_DEFERRED = 8;
 export const DISC_REVOKE_SESSION = 9;
+export const DISC_INITIALIZE_PROTOCOL = 10;
+export const DISC_UPDATE_PROTOCOL = 11;
+export const DISC_REGISTER_PAYER = 12;
+export const DISC_WITHDRAW_TREASURY = 13;
+export const DISC_INITIALIZE_TREASURY_SHARD = 14;
 
 // ─── Authority types ─────────────────────────────────────────────────
 export const AUTH_TYPE_ED25519 = 0;
@@ -54,6 +59,8 @@ export function createCreateWalletIx(params: {
   secp256r1Pubkey?: Uint8Array;
   /** Secp256r1 only: RP ID string (stored on-chain for per-tx savings) */
   rpId?: string;
+  /** Optional protocol fee accounts (integrator opt-in) */
+  protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
   programId?: PublicKey;
 }): TransactionInstruction {
   const pid = params.programId ?? PROGRAM_ID;
@@ -73,16 +80,21 @@ export function createCreateWalletIx(params: {
     }
   }
 
+  const keys = [
+    { pubkey: params.payer, isSigner: true, isWritable: true },
+    { pubkey: params.walletPda, isSigner: false, isWritable: true },
+    { pubkey: params.vaultPda, isSigner: false, isWritable: true },
+    { pubkey: params.authorityPda, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+  ];
+  if (params.protocolFee) {
+    appendProtocolFeeAccounts(keys, params.protocolFee.protocolConfigPda, params.protocolFee.feeRecordPda, params.protocolFee.treasuryShardPda);
+  }
+
   return new TransactionInstruction({
     programId: pid,
-    keys: [
-      { pubkey: params.payer, isSigner: true, isWritable: true },
-      { pubkey: params.walletPda, isSigner: false, isWritable: true },
-      { pubkey: params.vaultPda, isSigner: false, isWritable: true },
-      { pubkey: params.authorityPda, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
-    ],
+    keys,
     data: Buffer.from(concatBytes(parts)),
   });
 }
@@ -278,6 +290,8 @@ export function createExecuteIx(params: {
   authorizerSigner?: PublicKey;
   /** Additional account metas for the inner CPI instructions */
   remainingAccounts?: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
+  /** Optional protocol fee accounts (integrator opt-in) */
+  protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
   programId?: PublicKey;
 }): TransactionInstruction {
   const pid = params.programId ?? PROGRAM_ID;
@@ -306,6 +320,11 @@ export function createExecuteIx(params: {
   // Remaining accounts for CPI targets
   if (params.remainingAccounts) {
     keys.push(...params.remainingAccounts);
+  }
+
+  // Protocol fee accounts appended at the end
+  if (params.protocolFee) {
+    appendProtocolFeeAccounts(keys, params.protocolFee.protocolConfigPda, params.protocolFee.feeRecordPda, params.protocolFee.treasuryShardPda);
   }
 
   return new TransactionInstruction({
@@ -424,6 +443,8 @@ export function createExecuteDeferredIx(params: {
   packedInstructions: Uint8Array;
   /** Additional account metas for the inner CPI instructions */
   remainingAccounts?: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
+  /** Optional protocol fee accounts (integrator opt-in) */
+  protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
   programId?: PublicKey;
 }): TransactionInstruction {
   const pid = params.programId ?? PROGRAM_ID;
@@ -442,6 +463,11 @@ export function createExecuteDeferredIx(params: {
 
   if (params.remainingAccounts) {
     keys.push(...params.remainingAccounts);
+  }
+
+  // Protocol fee accounts appended at the end
+  if (params.protocolFee) {
+    appendProtocolFeeAccounts(keys, params.protocolFee.protocolConfigPda, params.protocolFee.feeRecordPda, params.protocolFee.treasuryShardPda);
   }
 
   return new TransactionInstruction({
@@ -516,6 +542,193 @@ export function createRevokeSessionIx(params: {
     keys,
     data: Buffer.from(concatBytes(parts)),
   });
+}
+
+// ─── InitializeProtocol ─────────────────────────────────────────────
+/**
+ * Instruction data layout (after discriminator):
+ *   [admin(32)][treasury(32)][creation_fee(8)][execution_fee(8)][num_shards(1)]
+ */
+export function createInitializeProtocolIx(params: {
+  payer: PublicKey;
+  protocolConfigPda: PublicKey;
+  admin: PublicKey;
+  treasury: PublicKey;
+  creationFee: bigint;
+  executionFee: bigint;
+  numShards: number;
+  programId?: PublicKey;
+}): TransactionInstruction {
+  const pid = params.programId ?? PROGRAM_ID;
+  const creationFeeBuf = Buffer.alloc(8);
+  creationFeeBuf.writeBigUInt64LE(params.creationFee);
+  const executionFeeBuf = Buffer.alloc(8);
+  executionFeeBuf.writeBigUInt64LE(params.executionFee);
+
+  const parts: Uint8Array[] = [
+    new Uint8Array([DISC_INITIALIZE_PROTOCOL]),
+    params.admin.toBytes(),
+    params.treasury.toBytes(),
+    new Uint8Array(creationFeeBuf),
+    new Uint8Array(executionFeeBuf),
+    new Uint8Array([params.numShards]),
+  ];
+
+  return new TransactionInstruction({
+    programId: pid,
+    keys: [
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.protocolConfigPda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(concatBytes(parts)),
+  });
+}
+
+// ─── UpdateProtocol ─────────────────────────────────────────────────
+/**
+ * Instruction data layout (after discriminator):
+ *   [creation_fee(8)][execution_fee(8)][enabled(1)][padding(7)][new_treasury(32)]
+ */
+export function createUpdateProtocolIx(params: {
+  admin: PublicKey;
+  protocolConfigPda: PublicKey;
+  creationFee: bigint;
+  executionFee: bigint;
+  enabled: boolean;
+  newTreasury: PublicKey;
+  programId?: PublicKey;
+}): TransactionInstruction {
+  const pid = params.programId ?? PROGRAM_ID;
+  const creationFeeBuf = Buffer.alloc(8);
+  creationFeeBuf.writeBigUInt64LE(params.creationFee);
+  const executionFeeBuf = Buffer.alloc(8);
+  executionFeeBuf.writeBigUInt64LE(params.executionFee);
+
+  const parts: Uint8Array[] = [
+    new Uint8Array([DISC_UPDATE_PROTOCOL]),
+    new Uint8Array(creationFeeBuf),
+    new Uint8Array(executionFeeBuf),
+    new Uint8Array([params.enabled ? 1 : 0]),
+    new Uint8Array(7), // padding
+    params.newTreasury.toBytes(),
+  ];
+
+  return new TransactionInstruction({
+    programId: pid,
+    keys: [
+      { pubkey: params.admin, isSigner: true, isWritable: false },
+      { pubkey: params.protocolConfigPda, isSigner: false, isWritable: true },
+    ],
+    data: Buffer.from(concatBytes(parts)),
+  });
+}
+
+// ─── RegisterPayer ──────────────────────────────────────────────────
+/**
+ * Instruction data layout (after discriminator):
+ *   [target_payer(32)]
+ */
+export function createRegisterPayerIx(params: {
+  payer: PublicKey;
+  protocolConfigPda: PublicKey;
+  admin: PublicKey;
+  feeRecordPda: PublicKey;
+  targetPayer: PublicKey;
+  programId?: PublicKey;
+}): TransactionInstruction {
+  const pid = params.programId ?? PROGRAM_ID;
+
+  const parts: Uint8Array[] = [
+    new Uint8Array([DISC_REGISTER_PAYER]),
+    params.targetPayer.toBytes(),
+  ];
+
+  return new TransactionInstruction({
+    programId: pid,
+    keys: [
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.protocolConfigPda, isSigner: false, isWritable: false },
+      { pubkey: params.admin, isSigner: true, isWritable: false },
+      { pubkey: params.feeRecordPda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(concatBytes(parts)),
+  });
+}
+
+// ─── WithdrawTreasury ───────────────────────────────────────────────
+/**
+ * Sweep accumulated SOL from a treasury shard to the treasury wallet.
+ * Instruction data: discriminator only.
+ */
+export function createWithdrawTreasuryIx(params: {
+  admin: PublicKey;
+  protocolConfigPda: PublicKey;
+  treasuryShardPda: PublicKey;
+  treasury: PublicKey;
+  programId?: PublicKey;
+}): TransactionInstruction {
+  const pid = params.programId ?? PROGRAM_ID;
+
+  return new TransactionInstruction({
+    programId: pid,
+    keys: [
+      { pubkey: params.admin, isSigner: true, isWritable: false },
+      { pubkey: params.protocolConfigPda, isSigner: false, isWritable: false },
+      { pubkey: params.treasuryShardPda, isSigner: false, isWritable: true },
+      { pubkey: params.treasury, isSigner: false, isWritable: true },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([DISC_WITHDRAW_TREASURY]),
+  });
+}
+
+// ─── InitializeTreasuryShard ────────────────────────────────────────
+/**
+ * Instruction data layout (after discriminator):
+ *   [shard_id(1)]
+ */
+export function createInitializeTreasuryShardIx(params: {
+  payer: PublicKey;
+  protocolConfigPda: PublicKey;
+  admin: PublicKey;
+  treasuryShardPda: PublicKey;
+  shardId: number;
+  programId?: PublicKey;
+}): TransactionInstruction {
+  const pid = params.programId ?? PROGRAM_ID;
+
+  return new TransactionInstruction({
+    programId: pid,
+    keys: [
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.protocolConfigPda, isSigner: false, isWritable: false },
+      { pubkey: params.admin, isSigner: true, isWritable: false },
+      { pubkey: params.treasuryShardPda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([DISC_INITIALIZE_TREASURY_SHARD, params.shardId]),
+  });
+}
+
+// ─── Protocol Fee Account Helpers ───────────────────────────────────
+/** Append protocol fee accounts to an existing keys array (for fee-eligible instructions) */
+export function appendProtocolFeeAccounts(
+  keys: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[],
+  protocolConfigPda: PublicKey,
+  feeRecordPda: PublicKey,
+  treasuryShardPda: PublicKey,
+): void {
+  keys.push(
+    { pubkey: protocolConfigPda, isSigner: false, isWritable: false },
+    { pubkey: feeRecordPda, isSigner: false, isWritable: true },
+    { pubkey: treasuryShardPda, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  );
 }
 
 // ─── Helper ──────────────────────────────────────────────────────────

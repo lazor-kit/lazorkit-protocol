@@ -55,7 +55,7 @@ The generate.mjs script reads the Shank IDL, enriches it with accounts/errors/ty
 # Terminal 1: Start local validator with program loaded
 cd tests-sdk && npm run validator:start
 
-# Terminal 2: Run all 56 tests
+# Terminal 2: Run all 70 tests (12 suites)
 cd tests-sdk && npm test
 ```
 

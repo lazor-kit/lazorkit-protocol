@@ -14,7 +14,11 @@ export enum AccountDiscriminator {
   Uninitialized,
   Wallet,
   Authority,
-  Session    
+  Session,
+  DeferredExec,
+  ProtocolConfig,
+  FeeRecord,
+  TreasuryShard    
 }
 
 /**

@@ -43,6 +43,35 @@ export function findSessionPda(
   );
 }
 
+export function findProtocolConfigPda(
+  programId: PublicKey = PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from('protocol_config')],
+    programId,
+  );
+}
+
+export function findFeeRecordPda(
+  payerPubkey: PublicKey,
+  programId: PublicKey = PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from('fee_record'), payerPubkey.toBuffer()],
+    programId,
+  );
+}
+
+export function findTreasuryShardPda(
+  shardId: number,
+  programId: PublicKey = PROGRAM_ID,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from('treasury_shard'), Buffer.from([shardId])],
+    programId,
+  );
+}
+
 export function findDeferredExecPda(
   walletPda: PublicKey,
   authorityPda: PublicKey,
