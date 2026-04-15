@@ -6,7 +6,7 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js';
 import { PROGRAM_ID } from '../constants';
-import { findWalletPda, findVaultPda, findAuthorityPda, findSessionPda, findDeferredExecPda } from './pdas';
+import { findWalletPda, findVaultPda, findAuthorityPda, findSessionPda, findDeferredExecPda, findProtocolConfigPda, findFeeRecordPda, findTreasuryShardPda } from './pdas';
 import { readAuthorityCounter } from './secp256r1';
 import { packCompactInstructions, computeAccountsHash, computeInstructionsHash, type CompactInstruction } from './packing';
 import {
