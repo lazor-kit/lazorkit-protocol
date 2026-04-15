@@ -26,10 +26,10 @@ LazorKit Protocol is a revenue-enabled smart wallet on Solana with passkey (WebA
 ### Challenge Hash (Secp256r1)
 
 ```
-SHA256(discriminator || auth_payload || signed_payload || slot || payer || counter || program_id)
+SHA256(discriminator || auth_payload || signed_payload || payer || counter || program_id)
 ```
 
-7 elements, computed on-chain via `sol_sha256` syscall.
+6 elements, computed on-chain via `sol_sha256` syscall. Note: slot is already encoded as the first 8 bytes of `auth_payload`, so it is not repeated as a separate element.
 
 ### WebAuthn Passkey Support
 
@@ -95,7 +95,7 @@ Variable data after header:
 - **Ed25519**: `[pubkey: [u8; 32]]` -- total 80 bytes.
 - **Secp256r1**: `[credential_id_hash: [u8; 32]] [compressed_pubkey: [u8; 33]] [rpIdLen: u8] [rpId: [u8; N]]` -- total 114+ bytes (rpId stored on-chain to avoid per-tx transmission).
 
-### C. SessionAccount (80 bytes)
+### C. SessionAccount (80 bytes header + optional actions)
 
 Seeds: `["session", wallet_pubkey, session_key]`
 
@@ -110,8 +110,28 @@ pub struct SessionAccount {
     pub session_key: Pubkey, // 32 bytes
     pub expires_at: u64,     // Absolute slot height
 }
-// Total: 1+1+1+5+32+32+8 = 80 bytes
+// Header: 1+1+1+5+32+32+8 = 80 bytes
+// Optional actions buffer appended after header (variable length, max 2048 bytes)
 ```
+
+#### Session Actions
+
+Optional permission rules attached at creation time as a flat byte buffer after the 80-byte header. Each action has an 11-byte header `[type: u8][data_len: u16 LE][expires_at: u64 LE]` followed by type-specific data. Max 16 actions per session.
+
+| Type | ID | Data | Description |
+|---|---|---|---|
+| SolLimit | 1 | remaining(8) | Lifetime SOL spending cap |
+| SolRecurringLimit | 2 | limit(8)+spent(8)+window(8)+last_reset(8) | Per-window SOL cap |
+| SolMaxPerTx | 3 | max(8) | Max SOL gross outflow per execute |
+| TokenLimit | 4 | mint(32)+remaining(8) | Lifetime token spending cap per mint |
+| TokenRecurringLimit | 5 | mint(32)+limit(8)+spent(8)+window(8)+last_reset(8) | Per-window token cap |
+| TokenMaxPerTx | 6 | mint(32)+max(8) | Max tokens per execute per mint |
+| ProgramWhitelist | 10 | program_id(32) | Allow CPI only to this program (repeatable) |
+| ProgramBlacklist | 11 | program_id(32) | Block CPI to this program (repeatable) |
+
+**Expired action policy**: Expired spending limits are treated as **fully exhausted** (any spend is rejected). Expired whitelists are treated as **hard deny** (all programs blocked). Expired blacklist entries are silently dropped (the ban has lifted).
+
+**SolMaxPerTx gross outflow**: Uses per-CPI lamport snapshotting so DeFi round-trips that return most lamports cannot bypass the per-tx cap.
 
 ### D. DeferredExecAccount (176 bytes)
 
@@ -252,7 +272,8 @@ This enables high-throughput wallets where multiple authorized parties (e.g., an
 ### TransferOwnership (discriminator: 3)
 
 - Atomically closes old owner and creates new owner.
-- Accounts: payer, wallet, current_owner, new_owner_authority, system_program, rent_sysvar.
+- Refunds closed owner's rent to an explicit `refund_destination` account (signed in auth payload).
+- Accounts: payer, wallet, current_owner, new_owner_authority, refund_destination, system_program, rent_sysvar.
 
 ### Execute (discriminator: 4)
 
@@ -266,6 +287,7 @@ This enables high-throughput wallets where multiple authorized parties (e.g., an
 - Creates ephemeral Session PDA with slot-based expiry.
 - Requires Admin or Owner.
 - Validates expires_at: must be in future, max ~30 days.
+- Optional actions buffer (spending limits, whitelist/blacklist) validated and stored at creation time (max 2048 bytes).
 - Accounts: payer, wallet, authorizer, session, system_program, rent_sysvar.
 
 ### Authorize (discriminator: 6) — Deferred Execution TX1
@@ -423,46 +445,50 @@ program/
         webauthn.rs           ClientDataJSON reconstruction + AuthDataParser
       traits.rs               Authenticator trait
     processor/
-      create_wallet.rs        Wallet + vault + authority creation
-      manage_authority.rs     AddAuthority + RemoveAuthority
-      execute.rs              CompactInstruction execution (immediate)
-      authorize.rs            Deferred execution TX1 (creates DeferredExec PDA)
-      execute_deferred.rs     Deferred execution TX2 (verifies + executes)
-      reclaim_deferred.rs     Closes expired DeferredExec accounts
-      create_session.rs       Ephemeral session key creation
-      transfer_ownership.rs   Atomic owner swap
-      revoke_session.rs       Early session revocation
-      initialize_protocol.rs  Protocol config setup (disc 10)
-      update_protocol.rs      Update fees/treasury/enabled (disc 11)
-      register_integrator.rs  Register payer for fee tracking (disc 12)
-      withdraw_treasury.rs    Sweep fees from shard to treasury (disc 13)
-      initialize_treasury_shard.rs  Create treasury shard PDA (disc 14)
+      authority/
+        manage.rs             AddAuthority + RemoveAuthority
+        transfer_ownership.rs Atomic owner swap with refund_dest
+      execute/
+        immediate.rs          CompactInstruction execution (direct)
+        actions.rs            Session action pre/post-CPI enforcement
+        authorize.rs          Deferred execution TX1
+        deferred.rs           Deferred execution TX2
+        reclaim.rs            Closes expired DeferredExec accounts
+      session/
+        create.rs             Session creation with optional actions
+        revoke.rs             Close session early, refund rent
+      wallet/
+        create.rs             Wallet + vault + authority creation
+      protocol/               Protocol fee processors (disc 10-14)
     state/
       wallet.rs               WalletAccount (8 bytes)
       authority.rs            AuthorityAccountHeader (48 bytes)
-      session.rs              SessionAccount (80 bytes)
+      session.rs              SessionAccount (80 bytes + optional actions)
+      action.rs               Session action types, parsing, validation
       deferred.rs             DeferredExecAccount (176 bytes)
       protocol_config.rs      ProtocolConfig (88 bytes)
       integrator_record.rs    FeeRecord (32 bytes)
       treasury_shard.rs       TreasuryShard (8 bytes)
-    compact.rs                CompactInstruction serialization
+    compact.rs                CompactInstruction serialization (max 16 instructions)
     utils.rs                  PDA initialization, stack_height check
-    error.rs                  AuthError (3001-3019) + ProtocolError (4001-4007)
+    error.rs                  AuthError (3001-3029) + ProtocolError (4001-4007)
     entrypoint.rs             Instruction routing + fee collection
 sdk/solita-client/
   src/
-    generated/                Solita-generated instructions, accounts, errors
+    constants.ts              Program ID + PDA seeds
     utils/
-      instructions.ts         Low-level instruction builders (15 instructions)
+      instructions.ts         Hand-written instruction builders
       client.ts               LazorKitClient API (wallet ops + protocol + wallet lookup)
       types.ts                Discriminated union signer types
-      signing.ts              Secp256r1 signing utilities
+      signing.ts              Secp256r1 signing utilities + data payload builders
       compact.ts              CompactInstruction layout builder
-      pdas.ts                 PDA derivation (wallet, vault, authority, session, deferred, protocol, fee_record, treasury_shard)
+      pdas.ts                 PDA derivation helpers
       secp256r1.ts            Challenge hash + auth payload builders
       packing.ts              CompactInstruction packing
-      errors.ts               Error code mapping
-tests-sdk/                    Integration + security tests (vitest, 70 tests, 12 suites)
+      actions.ts              Session action serializer
+      accounts.ts             On-chain account decoders
+      errors.ts               Error code mapping (3001-3029 + 4001-4007)
+tests-sdk/                    Integration + security tests (vitest, ~75 tests, 12 suites)
 docs/
   Architecture.md             This document
   Costs.md                    CU benchmarks, rent costs

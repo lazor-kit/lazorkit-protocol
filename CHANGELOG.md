@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Session Actions & Security Hardening)
+
+- Session Actions: 8 permission types enforced pre/post-CPI (SolLimit, SolRecurringLimit, SolMaxPerTx, TokenLimit, TokenRecurringLimit, TokenMaxPerTx, ProgramWhitelist, ProgramBlacklist)
+- `state/action.rs`: action type definitions, buffer parsing, creation-time validation
+- `processor/execute/actions.rs`: pre-CPI whitelist/blacklist enforcement, post-CPI spending limit enforcement
+- Expired action policy: expired limits = fully exhausted (deny), expired whitelist = hard deny, expired blacklist = silently dropped
+- SolMaxPerTx gross outflow: per-CPI lamport snapshotting prevents DeFi round-trip bypass
+- TransferOwnership: explicit `refund_destination` account (signed in auth payload)
+- `actions_len` cap at 2048 bytes (BPF heap exhaustion prevention)
+- `compact.rs`: `assert!` guards (not `debug_assert!`) for u8 truncation
+- 129 Rust tests + ~75 SDK tests covering financial logic, attacker patterns, token limits
+
+### Changed (SDK Rewrite & Program Restructure)
+
+- SDK: replaced Solita-generated code with hand-written instruction builders
+- Program: restructured into subdirectories: `processor/authority/`, `processor/execute/`, `processor/session/`, `processor/wallet/`
+- Secp256r1 challenge hash: 7 elements -> 6 elements (removed redundant slot)
+
 ### Added
 
 - Unified SDK API with discriminated union signer types (`ed25519()`, `secp256r1()`, `session()` helper constructors)

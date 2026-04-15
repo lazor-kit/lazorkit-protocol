@@ -1,8 +1,8 @@
 # @lazorkit/solita-client
 
-TypeScript SDK for the LazorKit Protocol smart wallet program on Solana. Built with `@solana/web3.js` v1 and Solita-generated instruction builders.
+TypeScript SDK for the LazorKit Protocol smart wallet program on Solana. Built with `@solana/web3.js` v1 and hand-written instruction builders.
 
-Includes protocol fee support (auto-detected), wallet lookup by credential, and sharded treasury.
+Includes protocol fee support (auto-detected), wallet lookup by credential, sharded treasury, and session action permissions (spending limits, program whitelist/blacklist).
 
 ## Installation
 
@@ -149,10 +149,15 @@ const { instructions } = await client.transferOwnership({
   newOwner: { type: 'secp256r1', credentialIdHash, compressedPubkey, rpId },
 });
 
-// Create session
+// Create session (with optional spending limits / whitelist)
 const { instructions, sessionPda } = await client.createSession({
   payer, walletPda, adminSigner: ed25519(ownerKp.publicKey),
   sessionKey: sessionKp.publicKey, expiresAt: currentSlot + 9000n,
+  actions: [  // optional — omit for unrestricted session
+    { type: 'SolMaxPerTx', max: 1_000_000_000n },
+    { type: 'SolLimit', remaining: 10_000_000_000n },
+    { type: 'ProgramWhitelist', programId: SystemProgram.programId },
+  ],
 });
 
 // Revoke session

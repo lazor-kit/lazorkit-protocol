@@ -125,7 +125,8 @@ Solana requires accounts to maintain a minimum balance (rent-exempt) based on da
 | Wallet PDA | 8 | 0.000946560 | 946,560 |
 | Authority (Ed25519) | 80 | 0.001447680 | 1,447,680 |
 | Authority (Secp256r1) | ~125 | 0.001760880 | 1,760,880 |
-| Session | 80 | 0.001447680 | 1,447,680 |
+| Session (no actions) | 80 | 0.001447680 | 1,447,680 |
+| Session (with actions) | 80 + N | variable | Depends on actions buffer size (max 2048 bytes) |
 | DeferredExec | 176 | 0.002116320 | 2,116,320 |
 | Vault PDA | 0 | 0 | 0 |
 
@@ -193,7 +194,7 @@ At $150/SOL, session setup costs ~$0.22 USD. Each subsequent execute costs $0.00
 | WalletAccount | 8 bytes | 0 | **8 bytes** |
 | Authority (Ed25519) | 48 bytes | 32 bytes (pubkey) | **80 bytes** |
 | Authority (Secp256r1) | 48 bytes | 32 (cred_hash) + 33 (pubkey) + 1 (rpIdLen) + N (rpId) | **114+ bytes** |
-| SessionAccount | 80 bytes | 0 | **80 bytes** |
+| SessionAccount | 80 bytes | 0-2048 (actions) | **80-2128 bytes** |
 | DeferredExecAccount | 176 bytes | 0 | **176 bytes** |
 
 The compact data sizes are achieved through:

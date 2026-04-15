@@ -13,8 +13,8 @@ This document outlines the standard procedures for building, deploying, and test
 
 ```
 /program           Rust smart contract (pinocchio, zero-copy)
-/sdk/solita-client  TypeScript SDK (Solita-generated + hand-written utils)
-/tests-sdk          Integration tests (vitest, @solana/web3.js v1)
+/sdk/solita-client  TypeScript SDK (hand-written instruction builders + client API)
+/tests-sdk          Integration tests (vitest, @solana/web3.js v1, ~75 tests)
 /scripts            Build/deploy automation
 /audits             Audit reports
 /no-padding         Custom NoPadding derive macro
@@ -41,13 +41,9 @@ cargo test
 cd program && shank idl -o . --out-filename idl.json -p FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao
 ```
 
-### D. SDK Generation (using Solita)
+### D. SDK
 
-```bash
-cd sdk/solita-client && node generate.mjs
-```
-
-The generate.mjs script reads the Shank IDL, enriches it with accounts/errors/types, and runs Solita to produce TypeScript code in `src/generated/`.
+The SDK is fully hand-written (no code generation). After modifying program instruction layouts, update `sdk/solita-client/src/utils/instructions.ts` manually.
 
 ### E. Running Integration Tests
 
@@ -55,7 +51,7 @@ The generate.mjs script reads the Shank IDL, enriches it with accounts/errors/ty
 # Terminal 1: Start local validator with program loaded
 cd tests-sdk && npm run validator:start
 
-# Terminal 2: Run all 70 tests (12 suites)
+# Terminal 2: Run all ~75 tests across 12 files
 cd tests-sdk && npm test
 ```
 

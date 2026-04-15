@@ -46,8 +46,8 @@ Thank you for your interest in contributing to LazorKit.
 
 All PRs must:
 
-1. Pass `cargo test` (35+ Rust tests)
-2. Pass `npm test` in `tests-sdk/` (56+ tests: integration, security, permissions, sessions)
+1. Pass `cargo test` (129 Rust unit + integration tests)
+2. Pass `npm test` in `tests-sdk/` (~75 tests: integration, security, permissions, sessions, session actions)
 3. Not break the benchmark script (`npm run benchmark`)
 
 ## Security

@@ -57,7 +57,7 @@ FeeRecord tracks cumulative `total_fees_paid` per payer. To distribute token rew
 |---|---|---|---|---|
 | Wallet PDA | `["wallet", user_seed]` | 1 | 8 | Identity anchor |
 | Authority PDA | `["authority", wallet, id_hash]` | 2 | 48+ | Per-key auth with role + counter |
-| Session PDA | `["session", wallet, session_key]` | 3 | 80 | Ephemeral sub-key with expiry |
+| Session PDA | `["session", wallet, session_key]` | 3 | 80+ | Ephemeral sub-key with expiry + optional actions |
 | DeferredExec PDA | `["deferred", wallet, authority, counter]` | 4 | 176 | Temporary pre-authorized execution |
 | ProtocolConfig PDA | `["protocol_config"]` | 5 | 88 | Fee config, admin, treasury, num_shards |
 | FeeRecord PDA | `["fee_record", payer_pubkey]` | 6 | 32 | Per-payer fee tracking |
@@ -72,7 +72,7 @@ FeeRecord tracks cumulative `total_fees_paid` per payer. To distribute token rew
 | 2 | RemoveAuthority | Remove authority, refund rent |
 | 3 | TransferOwnership | Atomic owner swap |
 | 4 | Execute | Execute instructions via CPI (fee-eligible) |
-| 5 | CreateSession | Create ephemeral session key |
+| 5 | CreateSession | Create ephemeral session key (optional spending limits/whitelist) |
 | 6 | Authorize | Deferred execution TX1 |
 | 7 | ExecuteDeferred | Deferred execution TX2 (fee-eligible) |
 | 8 | ReclaimDeferred | Reclaim expired deferred auth |
@@ -182,12 +182,11 @@ for (let i = 0; i < 16; i++) {
 ```
 program/src/              Rust smart contract (pinocchio, zero-copy)
   auth/                   Ed25519 + Secp256r1/WebAuthn authentication
-  processor/              14 instruction handlers (9 original + 5 protocol)
-  state/                  7 account data structures (4 original + 3 protocol)
-sdk/solita-client/        TypeScript SDK
-  src/generated/          Auto-generated (Solita) instructions, accounts, errors
-  src/utils/              Instruction builders, PDA helpers, signing, wallet lookup
-tests-sdk/                Integration tests (vitest, 70 tests)
+  processor/              15 instruction handlers (authority/, execute/, session/, wallet/, protocol/)
+  state/                  7 account data structures + session action types
+sdk/solita-client/        TypeScript SDK (hand-written instruction builders + client API)
+  src/utils/              Instruction builders, PDA helpers, signing, actions, wallet lookup
+tests-sdk/                Integration tests (vitest, ~75 tests across 12 files)
 docs/                     Architecture, cost analysis, protocol fee docs
 ```
 
@@ -196,20 +195,23 @@ docs/                     Architecture, cost analysis, protocol fee docs
 ## Testing
 
 ```bash
+# Rust unit tests (129 tests)
+cargo test
+
 # Start local validator
 cd tests-sdk && npm run validator:start
 
-# Run all 70 tests
+# Run all ~75 SDK tests across 12 files
 npm test
 ```
 
-12 test suites covering: wallet lifecycle, authority management, execute, deferred execution, sessions, replay protection, counter edge cases, E2E workflows, permission boundaries, session execution, security vectors, and protocol fees.
+Test coverage: wallet lifecycle, authority management, execute, deferred execution, sessions, replay protection, counter edge cases, E2E workflows, permission boundaries, session actions (spending limits, whitelist/blacklist), security vectors (reentrancy, cross-wallet isolation, expired action denial, gross outflow), and protocol fees.
 
 ---
 
 ## Security
 
-Based on LazorKit V2, audited by **Accretion** (Solana Foundation funded). 17/17 issues resolved.
+Based on LazorKit V2, audited by **Accretion** (Solana Foundation funded) and internally audited pre-mainnet. See [AUDIT.md](AUDIT.md) for full internal audit report.
 
 Protocol fee additions preserve all original security:
 - **Zero changes** to existing processors, auth, or signing logic
