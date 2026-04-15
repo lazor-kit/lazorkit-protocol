@@ -41,6 +41,7 @@ export const CreateSessionStruct = new beet.BeetArgsStruct<CreateSessionInstruct
 * @property [] wallet  
 * @property [**signer**] adminAuthority  
 * @property [_writable_] session  
+* @property [] rentSysvar  
 * @property [**signer**] authorizerSigner (optional)   
   * @category Instructions
   * @category CreateSession
@@ -52,6 +53,7 @@ export const CreateSessionStruct = new beet.BeetArgsStruct<CreateSessionInstruct
   adminAuthority: web3.PublicKey
   session: web3.PublicKey
   systemProgram?: web3.PublicKey
+  rentSysvar: web3.PublicKey
   authorizerSigner?: web3.PublicKey
   
         }
@@ -102,6 +104,11 @@ args: CreateSessionInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA
     },
     {
       pubkey: accounts.systemProgram ?? web3.SystemProgram.programId,
+      isWritable: false,
+      isSigner: false,
+    },
+    {
+      pubkey: accounts.rentSysvar,
       isWritable: false,
       isSigner: false,
     },

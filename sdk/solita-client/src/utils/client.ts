@@ -7,7 +7,7 @@ import {
 } from '@solana/web3.js';
 import { PROGRAM_ID } from '../generated';
 import { AuthorityAccount } from '../generated/accounts';
-import { findWalletPda, findVaultPda, findAuthorityPda, findSessionPda, findDeferredExecPda } from './pdas';
+import { findWalletPda, findVaultPda, findAuthorityPda, findSessionPda, findDeferredExecPda, findProtocolConfigPda, findFeeRecordPda, findTreasuryShardPda } from './pdas';
 import { readAuthorityCounter } from './secp256r1';
 import { packCompactInstructions, computeAccountsHash, computeInstructionsHash, type CompactInstruction } from './packing';
 import {
@@ -21,6 +21,11 @@ import {
   createExecuteDeferredIx,
   createReclaimDeferredIx,
   createRevokeSessionIx,
+  createInitializeProtocolIx,
+  createUpdateProtocolIx,
+  createRegisterPayerIx,
+  createWithdrawTreasuryIx,
+  createInitializeTreasuryShardIx,
   AUTH_TYPE_ED25519,
   AUTH_TYPE_SECP256R1,
   DISC_ADD_AUTHORITY,
@@ -71,6 +76,9 @@ function ownerCredentialBytes(owner: CreateWalletOwner): Uint8Array {
 }
 
 export class LazorKitClient {
+  /** Cached protocol config (fetched on first fee-eligible call) */
+  private _protocolConfig: { numShards: number; enabled: boolean } | null | undefined;
+
   constructor(
     public readonly connection: Connection,
     public readonly programId: PublicKey = PROGRAM_ID,
@@ -89,6 +97,53 @@ export class LazorKitClient {
   findDeferredExec(walletPda: PublicKey, authorityPda: PublicKey, counter: number) {
     return findDeferredExecPda(walletPda, authorityPda, counter, this.programId);
   }
+  findProtocolConfig() { return findProtocolConfigPda(this.programId); }
+  findFeeRecord(payerPubkey: PublicKey) { return findFeeRecordPda(payerPubkey, this.programId); }
+  findTreasuryShard(shardId: number) { return findTreasuryShardPda(shardId, this.programId); }
+
+  /**
+   * Fetch and cache the on-chain ProtocolConfig. Returns null if not initialized.
+   * Cached after first fetch — call `invalidateProtocolCache()` to refresh.
+   */
+  async getProtocolConfig(): Promise<{ numShards: number; enabled: boolean } | null> {
+    if (this._protocolConfig !== undefined) return this._protocolConfig;
+    const [configPda] = this.findProtocolConfig();
+    const info = await this.connection.getAccountInfo(configPda);
+    if (!info || info.data.length < 88 || info.data[0] !== 5) {
+      this._protocolConfig = null;
+      return null;
+    }
+    this._protocolConfig = {
+      enabled: info.data[3] !== 0,
+      numShards: info.data[4],
+    };
+    return this._protocolConfig;
+  }
+
+  /** Clear cached protocol config (e.g. after UpdateProtocol) */
+  invalidateProtocolCache(): void {
+    this._protocolConfig = undefined;
+  }
+
+  /**
+   * Auto-resolve protocol fee accounts for a payer.
+   * Fetches ProtocolConfig (cached) and checks if payer has a FeeRecord.
+   * If everything checks out, returns the 3 accounts to append + a random shard.
+   * Returns undefined if protocol not initialized, disabled, or payer not registered.
+   */
+  async resolveProtocolFee(payer: PublicKey): Promise<{ protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey } | undefined> {
+    const config = await this.getProtocolConfig();
+    if (!config || !config.enabled) return undefined;
+
+    const [feeRecordPda] = this.findFeeRecord(payer);
+    const info = await this.connection.getAccountInfo(feeRecordPda);
+    if (!info || info.data[0] !== 6) return undefined;
+
+    const [protocolConfigPda] = this.findProtocolConfig();
+    const shardId = Math.floor(Math.random() * config.numShards);
+    const [treasuryShardPda] = this.findTreasuryShard(shardId);
+    return { protocolConfigPda, feeRecordPda, treasuryShardPda };
+  }
 
   // ─── Account readers ─────────────────────────────────────────────
 
@@ -98,6 +153,69 @@ export class LazorKitClient {
 
   async readCounter(authorityPda: PublicKey): Promise<number> {
     return readAuthorityCounter(this.connection, authorityPda);
+  }
+
+  // ─── Wallet lookup ─────────────────────────────────────────────────
+
+  /**
+   * Look up wallets by credential.
+   *
+   * @param credential - 32 bytes: Ed25519 pubkey or Secp256r1 credentialIdHash
+   * @param authorityType - `'secp256r1'` (default) or `'ed25519'`
+   * @returns array of matching wallets (one credential can be authority on multiple wallets)
+   *
+   * @example Passkey user returns
+   * ```typescript
+   * const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
+   * ```
+   *
+   * @example Ed25519 lookup
+   * ```typescript
+   * const [wallet] = await client.findWalletsByAuthority(pubkeyBytes, 'ed25519');
+   * ```
+   */
+  async findWalletsByAuthority(
+    credential: Uint8Array,
+    authorityType: 'ed25519' | 'secp256r1' = 'secp256r1',
+  ): Promise<Array<{
+    walletPda: PublicKey;
+    authorityPda: PublicKey;
+    vaultPda: PublicKey;
+    role: number;
+    authorityType: number;
+  }>> {
+    if (credential.length !== 32) {
+      throw new Error('credential must be 32 bytes');
+    }
+
+    const typeValue = authorityType === 'ed25519' ? AUTH_TYPE_ED25519 : AUTH_TYPE_SECP256R1;
+
+    // Filters:
+    //   offset 0: discriminator == 2 (Authority)
+    //   offset 1: authority_type == typeValue
+    //   offset 48: credential bytes match
+    const discAndType = Buffer.from([2, typeValue]);
+
+    const accounts = await this.connection.getProgramAccounts(this.programId, {
+      encoding: 'base64',
+      filters: [
+        { memcmp: { offset: 0, bytes: discAndType.toString('base64'), encoding: 'base64' } },
+        { memcmp: { offset: 48, bytes: Buffer.from(credential).toString('base64'), encoding: 'base64' } },
+      ],
+    });
+
+    return accounts.map(({ pubkey: authorityPda, account }) => {
+      const data = account.data;
+      const walletPda = new PublicKey(data.slice(16, 48));
+      const [vaultPda] = this.findVault(walletPda);
+      return {
+        walletPda,
+        authorityPda,
+        vaultPda,
+        role: data[2],
+        authorityType: data[1],
+      };
+    });
   }
 
   // ─── CreateWallet ────────────────────────────────────────────────
@@ -128,20 +246,23 @@ export class LazorKitClient {
    * });
    * ```
    */
-  createWallet(params: {
+  async createWallet(params: {
     payer: PublicKey;
     userSeed: Uint8Array;
     owner: CreateWalletOwner;
-  }): { instructions: TransactionInstruction[]; walletPda: PublicKey; vaultPda: PublicKey; authorityPda: PublicKey } {
+  }): Promise<{ instructions: TransactionInstruction[]; walletPda: PublicKey; vaultPda: PublicKey; authorityPda: PublicKey }> {
     const [walletPda] = this.findWallet(params.userSeed);
     const [vaultPda] = this.findVault(walletPda);
     const { authType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(params.owner);
     const [authorityPda, authBump] = this.findAuthority(walletPda, credentialOrPubkey);
 
+    const protocolFee = await this.resolveProtocolFee(params.payer);
+
     const ix = createCreateWalletIx({
       payer: params.payer, walletPda, vaultPda, authorityPda,
       userSeed: params.userSeed, authType, authBump,
       credentialOrPubkey, secp256r1Pubkey, rpId,
+      protocolFee,
       programId: this.programId,
     });
     return { instructions: [ix], walletPda, vaultPda, authorityPda };
@@ -414,6 +535,7 @@ export class LazorKitClient {
   }): Promise<{ instructions: TransactionInstruction[] }> {
     const [vaultPda] = this.findVault(params.walletPda);
     const s = params.signer;
+    const protocolFee = await this.resolveProtocolFee(params.payer);
 
     switch (s.type) {
       case 'ed25519': {
@@ -427,7 +549,8 @@ export class LazorKitClient {
           payer: params.payer, walletPda: params.walletPda,
           authorityPda, vaultPda, packedInstructions: packed,
           authorizerSigner: s.publicKey,
-          remainingAccounts, programId: this.programId,
+          remainingAccounts, protocolFee,
+          programId: this.programId,
         });
         return { instructions: [ix] };
       }
@@ -464,7 +587,8 @@ export class LazorKitClient {
         const ix = createExecuteIx({
           payer: params.payer, walletPda: params.walletPda,
           authorityPda, vaultPda, packedInstructions: packed,
-          authPayload, remainingAccounts, programId: this.programId,
+          authPayload, remainingAccounts, protocolFee,
+          programId: this.programId,
         });
         return { instructions: [precompileIx, ix] };
       }
@@ -482,7 +606,8 @@ export class LazorKitClient {
         const ix = createExecuteIx({
           payer: params.payer, walletPda: params.walletPda,
           authorityPda: s.sessionPda, vaultPda, packedInstructions: packed,
-          remainingAccounts: allRemaining, programId: this.programId,
+          remainingAccounts: allRemaining, protocolFee,
+          programId: this.programId,
         });
         return { instructions: [ix] };
       }
@@ -599,19 +724,21 @@ export class LazorKitClient {
   /**
    * Build TX2 from the payload returned by `authorize()`.
    */
-  executeDeferredFromPayload(params: {
+  async executeDeferredFromPayload(params: {
     payer: PublicKey;
     deferredPayload: DeferredPayload;
     refundDestination?: PublicKey;
-  }): { instructions: TransactionInstruction[] } {
+  }): Promise<{ instructions: TransactionInstruction[] }> {
     const [vaultPda] = this.findVault(params.deferredPayload.walletPda);
     const refundDest = params.refundDestination ?? params.payer;
     const packed = packCompactInstructions(params.deferredPayload.compactInstructions);
+    const protocolFee = await this.resolveProtocolFee(params.payer);
     const ix = createExecuteDeferredIx({
       payer: params.payer, walletPda: params.deferredPayload.walletPda, vaultPda,
       deferredExecPda: params.deferredPayload.deferredExecPda,
       refundDestination: refundDest, packedInstructions: packed,
       remainingAccounts: params.deferredPayload.remainingAccounts,
+      protocolFee,
       programId: this.programId,
     });
     return { instructions: [ix] };
@@ -690,5 +817,93 @@ export class LazorKitClient {
       authPayload, programId: this.programId,
     });
     return { instructions: [precompileIx, ix] };
+  }
+
+  // ─── Protocol Fee Management ──────────────────────────────────────
+
+  /** Initialize protocol fee configuration (one-time) */
+  initializeProtocol(params: {
+    payer: PublicKey;
+    admin: PublicKey;
+    treasury: PublicKey;
+    creationFee: bigint;
+    executionFee: bigint;
+    numShards: number;
+  }): { instructions: TransactionInstruction[]; protocolConfigPda: PublicKey } {
+    const [protocolConfigPda] = this.findProtocolConfig();
+    const ix = createInitializeProtocolIx({
+      payer: params.payer, protocolConfigPda,
+      admin: params.admin, treasury: params.treasury,
+      creationFee: params.creationFee, executionFee: params.executionFee,
+      numShards: params.numShards,
+      programId: this.programId,
+    });
+    return { instructions: [ix], protocolConfigPda };
+  }
+
+  /** Update protocol fee configuration */
+  updateProtocol(params: {
+    admin: PublicKey;
+    creationFee: bigint;
+    executionFee: bigint;
+    enabled: boolean;
+    newTreasury: PublicKey;
+  }): { instructions: TransactionInstruction[] } {
+    const [protocolConfigPda] = this.findProtocolConfig();
+    const ix = createUpdateProtocolIx({
+      admin: params.admin, protocolConfigPda,
+      creationFee: params.creationFee, executionFee: params.executionFee,
+      enabled: params.enabled, newTreasury: params.newTreasury,
+      programId: this.programId,
+    });
+    return { instructions: [ix] };
+  }
+
+  /** Initialize a treasury shard (call once per shard 0..numShards-1) */
+  initializeTreasuryShard(params: {
+    payer: PublicKey;
+    admin: PublicKey;
+    shardId: number;
+  }): { instructions: TransactionInstruction[]; treasuryShardPda: PublicKey } {
+    const [protocolConfigPda] = this.findProtocolConfig();
+    const [treasuryShardPda] = this.findTreasuryShard(params.shardId);
+    const ix = createInitializeTreasuryShardIx({
+      payer: params.payer, protocolConfigPda, admin: params.admin,
+      treasuryShardPda, shardId: params.shardId,
+      programId: this.programId,
+    });
+    return { instructions: [ix], treasuryShardPda };
+  }
+
+  /** Register a payer for fee tracking (admin-gated) */
+  registerPayer(params: {
+    payer: PublicKey;
+    admin: PublicKey;
+    targetPayer: PublicKey;
+  }): { instructions: TransactionInstruction[]; feeRecordPda: PublicKey } {
+    const [protocolConfigPda] = this.findProtocolConfig();
+    const [feeRecordPda] = this.findFeeRecord(params.targetPayer);
+    const ix = createRegisterPayerIx({
+      payer: params.payer, protocolConfigPda, admin: params.admin,
+      feeRecordPda, targetPayer: params.targetPayer,
+      programId: this.programId,
+    });
+    return { instructions: [ix], feeRecordPda };
+  }
+
+  /** Withdraw accumulated fees from a treasury shard */
+  withdrawTreasury(params: {
+    admin: PublicKey;
+    shardId: number;
+    treasury: PublicKey;
+  }): { instructions: TransactionInstruction[] } {
+    const [protocolConfigPda] = this.findProtocolConfig();
+    const [treasuryShardPda] = this.findTreasuryShard(params.shardId);
+    const ix = createWithdrawTreasuryIx({
+      admin: params.admin, protocolConfigPda,
+      treasuryShardPda, treasury: params.treasury,
+      programId: this.programId,
+    });
+    return { instructions: [ix] };
   }
 }

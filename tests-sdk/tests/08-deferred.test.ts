@@ -114,8 +114,11 @@ describe('Deferred Execution', () => {
       ];
       const accountsHash = computeAccountsHash(tx2AccountMetas, compactIxs);
 
-      // Build signed_payload = instructions_hash || accounts_hash
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash]);
+      // Build signed_payload = instructions_hash || accounts_hash || expiry_offset(2 LE)
+      const expiryOffset = 300;
+      const expiryBuf = Buffer.alloc(2);
+      expiryBuf.writeUInt16LE(expiryOffset);
+      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
 
       // Sign with Secp256r1
       const { authPayload, precompileIx } = await signSecp256r1({
@@ -235,7 +238,10 @@ describe('Deferred Execution', () => {
         { pubkey: recipient3, isSigner: false, isWritable: true },
       ];
       const accountsHash = computeAccountsHash(tx2AccountMetas, compactIxs);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash]);
+      const expiryOffset = 300;
+      const expiryBuf = Buffer.alloc(2);
+      expiryBuf.writeUInt16LE(expiryOffset);
+      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
 
       // Counter is now 2 (after first test incremented to 1)
       const { authPayload, precompileIx } = await signSecp256r1({
@@ -370,7 +376,10 @@ describe('Deferred Execution', () => {
         { pubkey: recipient, isSigner: false, isWritable: true },
       ];
       const accountsHash = computeAccountsHash(tx2AccountMetas, compactIxs);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash]);
+      const expiryOffset = 300;
+      const expiryBuf = Buffer.alloc(2);
+      expiryBuf.writeUInt16LE(expiryOffset);
+      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
 
       const { authPayload, precompileIx } = await signSecp256r1({
         key: ownerKey,
@@ -490,7 +499,10 @@ describe('Deferred Execution', () => {
         { pubkey: recipient, isSigner: false, isWritable: true },
       ];
       const accountsHash = computeAccountsHash(tx2AccountMetas, compactIxs);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash]);
+      const expiryOffset = 300;
+      const expiryBuf = Buffer.alloc(2);
+      expiryBuf.writeUInt16LE(expiryOffset);
+      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
 
       const { authPayload, precompileIx } = await signSecp256r1({
         key: ownerKey,
@@ -592,7 +604,10 @@ describe('Deferred Execution', () => {
         { pubkey: recipient, isSigner: false, isWritable: true },
       ];
       const accountsHash = computeAccountsHash(tx2AccountMetas, compactIxs);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash]);
+      const expiryOffset = 9000;
+      const expiryBuf = Buffer.alloc(2);
+      expiryBuf.writeUInt16LE(expiryOffset);
+      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
 
       const { authPayload, precompileIx } = await signSecp256r1({
         key: ownerKey,
@@ -688,7 +703,10 @@ describe('Deferred Execution', () => {
         { pubkey: recipient, isSigner: false, isWritable: true },
       ];
       const accountsHash = computeAccountsHash(tx2AccountMetas, compactIxs);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash]);
+      const expiryOffset = 10;
+      const expiryBuf = Buffer.alloc(2);
+      expiryBuf.writeUInt16LE(expiryOffset);
+      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
 
       const { authPayload, precompileIx } = await signSecp256r1({
         key: ownerKey,

@@ -11,73 +11,73 @@ import * as web3 from '@solana/web3.js';
 
 /**
  * @category Instructions
- * @category CreateWallet
+ * @category Authorize
  * @category generated
  */
-export type CreateWalletInstructionArgs = {
-  userSeed: Uint8Array,
-  authType: number,
-  authPubkey: number[] /* size: 33 */,
-  credentialHash: number[] /* size: 32 */
+export type AuthorizeInstructionArgs = {
+  instructionsHash: number[] /* size: 32 */,
+  accountsHash: number[] /* size: 32 */,
+  expiryOffset: number
 }
 /**
  * @category Instructions
- * @category CreateWallet
+ * @category Authorize
  * @category generated
  */
-export const CreateWalletStruct = new beet.FixableBeetArgsStruct<CreateWalletInstructionArgs & {
+export const AuthorizeStruct = new beet.BeetArgsStruct<AuthorizeInstructionArgs & {
       instructionDiscriminator: number
   }
 >(
   [
     ['instructionDiscriminator', beet.u8],
-    ['userSeed', beet.bytes],
-    ['authType', beet.u8],
-    ['authPubkey', beet.uniformFixedSizeArray(beet.u8, 33)],
-    ['credentialHash', beet.uniformFixedSizeArray(beet.u8, 32)]
+    ['instructionsHash', beet.uniformFixedSizeArray(beet.u8, 32)],
+    ['accountsHash', beet.uniformFixedSizeArray(beet.u8, 32)],
+    ['expiryOffset', beet.u16]
   ],
-  'CreateWalletInstructionArgs'
+  'AuthorizeInstructionArgs'
 )
 /**
-  * Accounts required by the _CreateWallet_ instruction
+  * Accounts required by the _Authorize_ instruction
  *
   * @property [_writable_, **signer**] payer  
-* @property [_writable_] wallet  
-* @property [_writable_] vault  
+* @property [] wallet  
 * @property [_writable_] authority  
-* @property [] rentSysvar   
+* @property [_writable_] deferredExec  
+* @property [] rentSysvar  
+* @property [] sysvarInstructions   
   * @category Instructions
-  * @category CreateWallet
+  * @category Authorize
   * @category generated
   */
-          export type CreateWalletInstructionAccounts = {
+          export type AuthorizeInstructionAccounts = {
   payer: web3.PublicKey
   wallet: web3.PublicKey
-  vault: web3.PublicKey
   authority: web3.PublicKey
+  deferredExec: web3.PublicKey
   systemProgram?: web3.PublicKey
   rentSysvar: web3.PublicKey
+  sysvarInstructions: web3.PublicKey
   
         }
         
-    export const createWalletInstructionDiscriminator = 0;
+    export const authorizeInstructionDiscriminator = 6;
 
     /**
-     * Creates a _CreateWallet_ instruction.
+     * Creates a _Authorize_ instruction.
       *
   * @param accounts that will be accessed while the instruction is processed
  * @param args to provide as instruction data to the program
  * 
      * @category Instructions
-     * @category CreateWallet
+     * @category Authorize
      * @category generated
      */
-    export function createCreateWalletInstruction(
-      accounts: CreateWalletInstructionAccounts, 
-args: CreateWalletInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao')
+    export function createAuthorizeInstruction(
+      accounts: AuthorizeInstructionAccounts, 
+args: AuthorizeInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao')
     ) {
-      const [data] = CreateWalletStruct.serialize({
-        instructionDiscriminator: createWalletInstructionDiscriminator,
+      const [data] = AuthorizeStruct.serialize({
+        instructionDiscriminator: authorizeInstructionDiscriminator,
     ...args
     });
     const keys: web3.AccountMeta[] = [
@@ -88,16 +88,16 @@ args: CreateWalletInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA4
     },
     {
       pubkey: accounts.wallet,
-      isWritable: true,
-      isSigner: false,
-    },
-    {
-      pubkey: accounts.vault,
-      isWritable: true,
+      isWritable: false,
       isSigner: false,
     },
     {
       pubkey: accounts.authority,
+      isWritable: true,
+      isSigner: false,
+    },
+    {
+      pubkey: accounts.deferredExec,
       isWritable: true,
       isSigner: false,
     },
@@ -108,6 +108,11 @@ args: CreateWalletInstructionArgs , programId = new web3.PublicKey('FLb7fyAtkfA4
     },
     {
       pubkey: accounts.rentSysvar,
+      isWritable: false,
+      isSigner: false,
+    },
+    {
+      pubkey: accounts.sysvarInstructions,
       isWritable: false,
       isSigner: false,
     }

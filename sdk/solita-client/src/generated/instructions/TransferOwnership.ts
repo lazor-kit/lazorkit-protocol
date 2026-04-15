@@ -43,6 +43,7 @@ export const TransferOwnershipStruct = new beet.BeetArgsStruct<TransferOwnership
 * @property [] wallet  
 * @property [_writable_] currentOwnerAuthority  
 * @property [_writable_] newOwnerAuthority  
+* @property [] rentSysvar  
 * @property [**signer**] authorizerSigner (optional)   
   * @category Instructions
   * @category TransferOwnership
@@ -54,6 +55,7 @@ export const TransferOwnershipStruct = new beet.BeetArgsStruct<TransferOwnership
   currentOwnerAuthority: web3.PublicKey
   newOwnerAuthority: web3.PublicKey
   systemProgram?: web3.PublicKey
+  rentSysvar: web3.PublicKey
   authorizerSigner?: web3.PublicKey
   
         }
@@ -104,6 +106,11 @@ args: TransferOwnershipInstructionArgs , programId = new web3.PublicKey('FLb7fyA
     },
     {
       pubkey: accounts.systemProgram ?? web3.SystemProgram.programId,
+      isWritable: false,
+      isSigner: false,
+    },
+    {
+      pubkey: accounts.rentSysvar,
       isWritable: false,
       isSigner: false,
     },

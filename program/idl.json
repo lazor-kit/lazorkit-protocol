@@ -703,6 +703,308 @@
         "type": "u8",
         "value": 9
       }
+    },
+    {
+      "name": "InitializeProtocol",
+      "accounts": [
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Payer and rent contributor"
+          ]
+        },
+        {
+          "name": "protocolConfig",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "ProtocolConfig PDA"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "System Program"
+          ]
+        },
+        {
+          "name": "rentSysvar",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Rent Sysvar"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "admin",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "creationFee",
+          "type": "u64"
+        },
+        {
+          "name": "executionFee",
+          "type": "u64"
+        },
+        {
+          "name": "numShards",
+          "type": "u8"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 10
+      }
+    },
+    {
+      "name": "UpdateProtocol",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true,
+          "docs": [
+            "Protocol admin"
+          ]
+        },
+        {
+          "name": "protocolConfig",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "ProtocolConfig PDA"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "creationFee",
+          "type": "u64"
+        },
+        {
+          "name": "executionFee",
+          "type": "u64"
+        },
+        {
+          "name": "enabled",
+          "type": "u8"
+        },
+        {
+          "name": "newTreasury",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 11
+      }
+    },
+    {
+      "name": "RegisterPayer",
+      "accounts": [
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Payer and rent contributor"
+          ]
+        },
+        {
+          "name": "protocolConfig",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "ProtocolConfig PDA"
+          ]
+        },
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true,
+          "docs": [
+            "Protocol admin"
+          ]
+        },
+        {
+          "name": "feeRecord",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "FeeRecord PDA"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "System Program"
+          ]
+        },
+        {
+          "name": "rentSysvar",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Rent Sysvar"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "targetPayer",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 12
+      }
+    },
+    {
+      "name": "WithdrawTreasury",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true,
+          "docs": [
+            "Protocol admin"
+          ]
+        },
+        {
+          "name": "protocolConfig",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "ProtocolConfig PDA"
+          ]
+        },
+        {
+          "name": "treasuryShard",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "TreasuryShard PDA"
+          ]
+        },
+        {
+          "name": "treasury",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Treasury destination"
+          ]
+        },
+        {
+          "name": "rentSysvar",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Rent Sysvar"
+          ]
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 13
+      }
+    },
+    {
+      "name": "InitializeTreasuryShard",
+      "accounts": [
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Payer and rent contributor"
+          ]
+        },
+        {
+          "name": "protocolConfig",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "ProtocolConfig PDA"
+          ]
+        },
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true,
+          "docs": [
+            "Protocol admin"
+          ]
+        },
+        {
+          "name": "treasuryShard",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "TreasuryShard PDA"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "System Program"
+          ]
+        },
+        {
+          "name": "rentSysvar",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Rent Sysvar"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "shardId",
+          "type": "u8"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 14
+      }
     }
   ],
   "metadata": {

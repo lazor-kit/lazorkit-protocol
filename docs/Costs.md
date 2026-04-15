@@ -1,8 +1,8 @@
-# LazorKit Cost Analysis
+# LazorKit Protocol Cost Analysis
 
-This document provides comprehensive cost data for the LazorKit smart wallet program on Solana. All compute unit (CU) measurements are from real transactions on devnet. Rent costs use Solana's standard formula.
+This document provides comprehensive cost data for the LazorKit Protocol smart wallet program on Solana. All compute unit (CU) measurements are from real transactions on devnet. Rent costs use Solana's standard formula.
 
-> Program ID: `FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao`
+> Deployed and managed by the LazorKit team. Integrators use the program directly via the SDK.
 
 ---
 
@@ -211,4 +211,32 @@ The compact data sizes are achieved through:
 cd tests-sdk && npx tsx tests/devnet-smoke.ts
 ```
 
-The devnet smoke test exercises all 9 instructions across all authority types (Ed25519, Secp256r1, Session) and roles (Owner, Admin, Spender), reporting CU consumption, TX size, and rent costs from real devnet transactions.
+The devnet smoke test exercises all instructions across all authority types (Ed25519, Secp256r1, Session) and roles (Owner, Admin, Spender), reporting CU consumption, TX size, and rent costs from real devnet transactions.
+
+---
+
+## Protocol Fee Costs
+
+When protocol fee is active (payer has FeeRecord), fee-eligible instructions (CreateWallet, Execute, ExecuteDeferred) incur additional overhead:
+
+### Per-Transaction Overhead
+
+| Item | Cost |
+|---|---|
+| Protocol fee (CreateWallet) | Configurable (e.g. 5,000 lamports = 0.000005 SOL) |
+| Protocol fee (Execute/ExecuteDeferred) | Configurable (e.g. 2,000 lamports = 0.000002 SOL) |
+| Extra CU (fee collection) | ~3,000 CU |
+| Extra TX size | +128 bytes (4 additional accounts) |
+
+### One-Time Setup Costs
+
+| Account | Data | Rent (SOL) | Quantity |
+|---|---|---|---|
+| ProtocolConfig | 88 bytes | 0.001503 | 1 global |
+| TreasuryShard | 8 bytes | 0.000947 | N shards (e.g. 16) |
+| FeeRecord | 32 bytes | 0.001114 | 1 per payer |
+| **Total setup (16 shards)** | | **~0.017** | |
+
+### No Overhead When Not Opted In
+
+If payer has no FeeRecord, the SDK does not append protocol accounts and no additional CU, TX size, or fee is incurred. The program works identically to open-source LazorKit.

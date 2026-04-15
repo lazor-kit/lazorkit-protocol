@@ -67,8 +67,54 @@ idl.accounts = [
       ],
     },
   },
+  {
+    name: 'ProtocolConfigAccount',
+    type: {
+      kind: 'struct',
+      fields: [
+        { name: 'discriminator', type: 'u8' },
+        { name: 'version', type: 'u8' },
+        { name: 'bump', type: 'u8' },
+        { name: 'enabled', type: 'u8' },
+        { name: 'numShards', type: 'u8' },
+        { name: 'padding', type: { array: ['u8', 3] } },
+        { name: 'admin', type: 'publicKey' },
+        { name: 'treasury', type: 'publicKey' },
+        { name: 'creationFee', type: 'u64' },
+        { name: 'executionFee', type: 'u64' },
+      ],
+    },
+  },
+  {
+    name: 'FeeRecordAccount',
+    type: {
+      kind: 'struct',
+      fields: [
+        { name: 'discriminator', type: 'u8' },
+        { name: 'bump', type: 'u8' },
+        { name: 'version', type: 'u8' },
+        { name: 'padding', type: { array: ['u8', 5] } },
+        { name: 'totalFeesPaid', type: 'u64' },
+        { name: 'txCount', type: 'u32' },
+        { name: 'walletCount', type: 'u32' },
+        { name: 'registeredAt', type: 'u64' },
+      ],
+    },
+  },
+  {
+    name: 'TreasuryShardAccount',
+    type: {
+      kind: 'struct',
+      fields: [
+        { name: 'discriminator', type: 'u8' },
+        { name: 'bump', type: 'u8' },
+        { name: 'shardId', type: 'u8' },
+        { name: 'padding', type: { array: ['u8', 5] } },
+      ],
+    },
+  },
 ];
-console.log('Added 3 account types');
+console.log('Added 6 account types');
 
 // ─── 4. Add error codes ─────────────────────────────────────────
 idl.errors = [
@@ -85,8 +131,15 @@ idl.errors = [
   { code: 3011, name: 'InvalidAuthenticationKind', msg: 'Invalid authentication kind' },
   { code: 3012, name: 'InvalidMessage', msg: 'Invalid message' },
   { code: 3013, name: 'SelfReentrancyNotAllowed', msg: 'Self-reentrancy is not allowed' },
+  { code: 4001, name: 'ProtocolAlreadyInitialized', msg: 'Protocol config already initialized' },
+  { code: 4002, name: 'InvalidProtocolAdmin', msg: 'Invalid protocol admin' },
+  { code: 4003, name: 'ProtocolDisabled', msg: 'Protocol fee collection is disabled' },
+  { code: 4004, name: 'InvalidIntegratorRecord', msg: 'Invalid integrator/fee record' },
+  { code: 4005, name: 'InsufficientFeeBalance', msg: 'Insufficient fee balance' },
+  { code: 4006, name: 'IntegratorAlreadyRegistered', msg: 'Payer already registered' },
+  { code: 4007, name: 'InvalidTreasury', msg: 'Invalid treasury address' },
 ];
-console.log('Added 13 error codes');
+console.log('Added 20 error codes');
 
 // ─── 5. Add enum types ──────────────────────────────────────────
 if (!idl.types) idl.types = [];
@@ -121,6 +174,10 @@ idl.types.push(
         { name: 'Wallet' },
         { name: 'Authority' },
         { name: 'Session' },
+        { name: 'DeferredExec' },
+        { name: 'ProtocolConfig' },
+        { name: 'FeeRecord' },
+        { name: 'TreasuryShard' },
       ],
     },
   },

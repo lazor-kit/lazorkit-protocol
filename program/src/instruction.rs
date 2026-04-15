@@ -202,13 +202,7 @@ pub enum ProgramIx {
     ///
     /// Verifies compact instructions against stored hashes, executes via CPI
     /// with vault PDA signing, then closes the DeferredExec account.
-    #[account(
-        0,
-        signer,
-        writable,
-        name = "payer",
-        desc = "Transaction payer"
-    )]
+    #[account(0, signer, writable, name = "payer", desc = "Transaction payer")]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(2, writable, name = "vault", desc = "Vault PDA (signer for CPI)")]
     #[account(
@@ -223,9 +217,7 @@ pub enum ProgramIx {
         name = "refund_destination",
         desc = "Account to receive rent refund from closed DeferredExec"
     )]
-    ExecuteDeferred {
-        instructions: Vec<u8>,
-    },
+    ExecuteDeferred { instructions: Vec<u8> },
 
     /// Reclaim an expired DeferredExec account and refund rent
     ///
@@ -253,29 +245,15 @@ pub enum ProgramIx {
     /// Revoke a session key early (before expiry)
     ///
     /// Only Owner or Admin can revoke. Closes the session account and refunds rent.
-    #[account(
-        0,
-        signer,
-        name = "payer",
-        desc = "Transaction payer"
-    )]
-    #[account(
-        1,
-        name = "wallet",
-        desc = "Wallet PDA"
-    )]
+    #[account(0, signer, name = "payer", desc = "Transaction payer")]
+    #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,
         writable,
         name = "admin_authority",
         desc = "Owner/Admin authority PDA (counter incremented for Secp256r1)"
     )]
-    #[account(
-        3,
-        writable,
-        name = "session",
-        desc = "Session PDA to revoke"
-    )]
+    #[account(3, writable, name = "session", desc = "Session PDA to revoke")]
     #[account(
         4,
         writable,
@@ -289,6 +267,73 @@ pub enum ProgramIx {
         desc = "Ed25519: signer keypair | Secp256r1: sysvar_instructions"
     )]
     RevokeSession,
+
+    /// Initialize the protocol fee configuration (one-time setup)
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Payer and rent contributor"
+    )]
+    #[account(1, writable, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    #[account(2, name = "system_program", desc = "System Program")]
+    #[account(3, name = "rent_sysvar", desc = "Rent Sysvar")]
+    InitializeProtocol {
+        admin: [u8; 32],
+        treasury: [u8; 32],
+        creation_fee: u64,
+        execution_fee: u64,
+        num_shards: u8,
+    },
+
+    /// Update protocol fee configuration
+    #[account(0, signer, name = "admin", desc = "Protocol admin")]
+    #[account(1, writable, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    UpdateProtocol {
+        creation_fee: u64,
+        execution_fee: u64,
+        enabled: u8,
+        new_treasury: [u8; 32],
+    },
+
+    /// Register a payer for fee tracking
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Payer and rent contributor"
+    )]
+    #[account(1, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    #[account(2, signer, name = "admin", desc = "Protocol admin")]
+    #[account(3, writable, name = "fee_record", desc = "FeeRecord PDA")]
+    #[account(4, name = "system_program", desc = "System Program")]
+    #[account(5, name = "rent_sysvar", desc = "Rent Sysvar")]
+    RegisterPayer { target_payer: [u8; 32] },
+
+    /// Withdraw accumulated fees from a treasury shard
+    #[account(0, signer, name = "admin", desc = "Protocol admin")]
+    #[account(1, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    #[account(2, writable, name = "treasury_shard", desc = "TreasuryShard PDA")]
+    #[account(3, writable, name = "treasury", desc = "Treasury destination")]
+    #[account(4, name = "rent_sysvar", desc = "Rent Sysvar")]
+    WithdrawTreasury,
+
+    /// Initialize a treasury shard
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Payer and rent contributor"
+    )]
+    #[account(1, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    #[account(2, signer, name = "admin", desc = "Protocol admin")]
+    #[account(3, writable, name = "treasury_shard", desc = "TreasuryShard PDA")]
+    #[account(4, name = "system_program", desc = "System Program")]
+    #[account(5, name = "rent_sysvar", desc = "Rent Sysvar")]
+    InitializeTreasuryShard { shard_id: u8 },
 }
 
 #[repr(C)]

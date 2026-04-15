@@ -33,22 +33,22 @@ describe('Execute', () => {
       ownerKp = Keypair.generate();
       const userSeed = crypto.randomBytes(32);
 
-      const result = client.createWallet({
+      const result = await client.createWallet({
         payer: ctx.payer.publicKey,
         userSeed,
         owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
       });
-      walletPda = result.walletPda;
-      vaultPda = result.vaultPda;
-      ownerAuthorityPda = result.authorityPda;
 
       await sendTx(ctx, result.instructions);
 
+      // === User comes back — find wallet by pubkey ===
+      const [found] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+      walletPda = found.walletPda;
+      vaultPda = found.vaultPda;
+      ownerAuthorityPda = found.authorityPda;
+
       // Fund the vault so it can transfer SOL
-      const sig = await ctx.connection.requestAirdrop(
-        result.vaultPda,
-        2 * LAMPORTS_PER_SOL,
-      );
+      const sig = await ctx.connection.requestAirdrop(vaultPda, 2 * LAMPORTS_PER_SOL);
       await ctx.connection.confirmTransaction(sig, 'confirmed');
     });
 
@@ -86,7 +86,7 @@ describe('Execute', () => {
       ownerKey = await generateMockSecp256r1Key();
       const userSeed = crypto.randomBytes(32);
 
-      const result = client.createWallet({
+      const result = await client.createWallet({
         payer: ctx.payer.publicKey,
         userSeed,
         owner: {
@@ -96,17 +96,17 @@ describe('Execute', () => {
           rpId: ownerKey.rpId,
         },
       });
-      walletPda = result.walletPda;
-      vaultPda = result.vaultPda;
-      ownerAuthorityPda = result.authorityPda;
 
       await sendTx(ctx, result.instructions);
 
+      // === User comes back — only has credentialIdHash ===
+      const [found] = await client.findWalletsByAuthority(ownerKey.credentialIdHash);
+      walletPda = found.walletPda;
+      vaultPda = found.vaultPda;
+      ownerAuthorityPda = found.authorityPda;
+
       // Fund the vault
-      const sig = await ctx.connection.requestAirdrop(
-        vaultPda,
-        2 * LAMPORTS_PER_SOL,
-      );
+      const sig = await ctx.connection.requestAirdrop(vaultPda, 2 * LAMPORTS_PER_SOL);
       await ctx.connection.confirmTransaction(sig, 'confirmed');
     });
 
