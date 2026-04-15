@@ -1,24 +1,6 @@
 /**
- * Friendly error code map for LazorKit program errors.
- * Re-exports Solita-generated error classes and provides a lookup utility.
+ * Error code map for LazorKit program errors.
  */
-export {
-  errorFromCode,
-  errorFromName,
-  InvalidAuthorityPayloadError,
-  PermissionDeniedError,
-  InvalidInstructionError,
-  InvalidPubkeyError,
-  InvalidMessageHashError,
-  SignatureReusedError,
-  InvalidSignatureAgeError,
-  InvalidSessionDurationError,
-  SessionExpiredError,
-  AuthorityDoesNotSupportSessionError,
-  InvalidAuthenticationKindError,
-  InvalidMessageError,
-  SelfReentrancyNotAllowedError,
-} from '../generated/errors';
 
 /** Map of error code → human-readable name */
 export const ERROR_NAMES: Record<number, string> = {
@@ -40,7 +22,26 @@ export const ERROR_NAMES: Record<number, string> = {
   3016: 'InvalidExpiryWindow',
   3017: 'UnauthorizedReclaim',
   3018: 'DeferredAuthorizationNotExpired',
+  3019: 'InvalidSessionAccount',
+  // Session action errors
+  3020: 'ActionBufferInvalid',
+  3021: 'ActionProgramNotWhitelisted',
+  3022: 'ActionProgramBlacklisted',
+  3023: 'ActionSolMaxPerTxExceeded',
+  3024: 'ActionSolLimitExceeded',
+  3025: 'ActionSolRecurringLimitExceeded',
+  3026: 'ActionTokenLimitExceeded',
+  3027: 'ActionTokenRecurringLimitExceeded',
+  3028: 'ActionWhitelistBlacklistConflict',
+  3029: 'ActionTokenMaxPerTxExceeded',
 };
+
+/**
+ * Look up error name from code.
+ */
+export function errorFromCode(code: number): string | undefined {
+  return ERROR_NAMES[code];
+}
 
 /**
  * Extracts the custom program error code from a Solana SendTransactionError.

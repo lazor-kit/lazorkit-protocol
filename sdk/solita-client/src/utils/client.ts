@@ -5,9 +5,8 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   TransactionInstruction,
 } from '@solana/web3.js';
-import { PROGRAM_ID } from '../generated';
-import { AuthorityAccount } from '../generated/accounts';
-import { findWalletPda, findVaultPda, findAuthorityPda, findSessionPda, findDeferredExecPda, findProtocolConfigPda, findFeeRecordPda, findTreasuryShardPda } from './pdas';
+import { PROGRAM_ID } from '../constants';
+import { findWalletPda, findVaultPda, findAuthorityPda, findSessionPda, findDeferredExecPda } from './pdas';
 import { readAuthorityCounter } from './secp256r1';
 import { packCompactInstructions, computeAccountsHash, computeInstructionsHash, type CompactInstruction } from './packing';
 import {
@@ -38,13 +37,14 @@ import {
 } from './instructions';
 import { signWithSecp256r1, buildDataPayloadForAdd, buildDataPayloadForTransfer, buildDataPayloadForSession, concatParts } from './signing';
 import { buildCompactLayout } from './compact';
+import { serializeActions, type SessionAction } from './actions';
 import type { CreateWalletOwner, AdminSigner, ExecuteSigner, Secp256r1SignerConfig, DeferredPayload } from './types';
 
 // ─── Sysvar instruction indexes (auto-computed from account layouts) ──
 
 const SYSVAR_IX_INDEX_ADD_AUTHORITY = 6;
 const SYSVAR_IX_INDEX_REMOVE_AUTHORITY = 5;
-const SYSVAR_IX_INDEX_TRANSFER_OWNERSHIP = 6;
+const SYSVAR_IX_INDEX_TRANSFER_OWNERSHIP = 7; // account layout: payer,wallet,currentOwner,newOwner,refundDest,system,rent,sysvarIx
 const SYSVAR_IX_INDEX_EXECUTE = 4;
 const SYSVAR_IX_INDEX_CREATE_SESSION = 6;
 const SYSVAR_IX_INDEX_AUTHORIZE = 6;
@@ -146,10 +146,6 @@ export class LazorKitClient {
   }
 
   // ─── Account readers ─────────────────────────────────────────────
-
-  async fetchAuthority(authorityPda: PublicKey): Promise<AuthorityAccount> {
-    return AuthorityAccount.fromAccountAddress(this.connection, authorityPda);
-  }
 
   async readCounter(authorityPda: PublicKey): Promise<number> {
     return readAuthorityCounter(this.connection, authorityPda);
@@ -407,16 +403,20 @@ export class LazorKitClient {
     walletPda: PublicKey;
     ownerSigner: AdminSigner;
     newOwner: CreateWalletOwner;
+    /** Where the current owner account's rent goes. Defaults to payer if omitted. */
+    refundDestination?: PublicKey;
   }): Promise<{ instructions: TransactionInstruction[]; newOwnerAuthorityPda: PublicKey }> {
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(params.newOwner);
     const [newOwnerAuthorityPda] = this.findAuthority(params.walletPda, credentialOrPubkey);
+    const refundDest = params.refundDestination ?? params.payer;
     const s = params.ownerSigner;
 
     if (s.type === 'ed25519') {
       const ix = createTransferOwnershipIx({
         payer: params.payer, walletPda: params.walletPda,
         currentOwnerAuthorityPda: s.authorityPda ?? this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
-        newOwnerAuthorityPda, newType, credentialOrPubkey, secp256r1Pubkey, rpId,
+        newOwnerAuthorityPda, refundDestination: refundDest,
+        newType, credentialOrPubkey, secp256r1Pubkey, rpId,
         authorizerSigner: s.publicKey, programId: this.programId,
       });
       return { instructions: [ix], newOwnerAuthorityPda };
@@ -428,7 +428,8 @@ export class LazorKitClient {
     const counter = (await this.readCounter(currentOwnerAuthorityPda)) + 1;
 
     const dataPayload = buildDataPayloadForTransfer(newType, credentialOrPubkey, secp256r1Pubkey, rpId);
-    const signedPayload = concatParts([dataPayload, params.payer.toBytes()]);
+    // Sign over dataPayload + payer + refundDest to prevent substitution attacks.
+    const signedPayload = concatParts([dataPayload, params.payer.toBytes(), refundDest.toBytes()]);
 
     const { authPayload, precompileIx } = await signWithSecp256r1({
       signer: s.signer, discriminator: new Uint8Array([DISC_TRANSFER_OWNERSHIP]),
@@ -438,8 +439,8 @@ export class LazorKitClient {
 
     const ix = createTransferOwnershipIx({
       payer: params.payer, walletPda: params.walletPda,
-      currentOwnerAuthorityPda, newOwnerAuthorityPda, newType,
-      credentialOrPubkey, secp256r1Pubkey, rpId,
+      currentOwnerAuthorityPda, newOwnerAuthorityPda, refundDestination: refundDest,
+      newType, credentialOrPubkey, secp256r1Pubkey, rpId,
       authPayload, programId: this.programId,
     });
     return { instructions: [precompileIx, ix], newOwnerAuthorityPda };
@@ -467,16 +468,22 @@ export class LazorKitClient {
     adminSigner: AdminSigner;
     sessionKey: PublicKey;
     expiresAt: bigint;
+    /** Optional permission actions to restrict this session. Empty/omitted = unrestricted. */
+    actions?: SessionAction[];
   }): Promise<{ instructions: TransactionInstruction[]; sessionPda: PublicKey }> {
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
     const s = params.adminSigner;
+    const actionsBuffer = params.actions && params.actions.length > 0
+      ? serializeActions(params.actions)
+      : undefined;
 
     if (s.type === 'ed25519') {
       const ix = createCreateSessionIx({
         payer: params.payer, walletPda: params.walletPda,
         adminAuthorityPda: s.authorityPda ?? this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
         sessionPda, sessionKey: sessionKeyBytes, expiresAt: params.expiresAt,
+        actionsBuffer,
         authorizerSigner: s.publicKey, programId: this.programId,
       });
       return { instructions: [ix], sessionPda };
@@ -487,7 +494,7 @@ export class LazorKitClient {
     const slot = s.slotOverride ?? BigInt(await this.connection.getSlot());
     const counter = (await this.readCounter(adminAuthorityPda)) + 1;
 
-    const dataPayload = buildDataPayloadForSession(sessionKeyBytes, params.expiresAt);
+    const dataPayload = buildDataPayloadForSession(sessionKeyBytes, params.expiresAt, actionsBuffer);
     const signedPayload = concatParts([dataPayload, params.payer.toBytes()]);
 
     const { authPayload, precompileIx } = await signWithSecp256r1({
@@ -499,7 +506,7 @@ export class LazorKitClient {
     const ix = createCreateSessionIx({
       payer: params.payer, walletPda: params.walletPda, adminAuthorityPda, sessionPda,
       sessionKey: sessionKeyBytes, expiresAt: params.expiresAt,
-      authPayload, programId: this.programId,
+      actionsBuffer, authPayload, programId: this.programId,
     });
     return { instructions: [precompileIx, ix], sessionPda };
   }

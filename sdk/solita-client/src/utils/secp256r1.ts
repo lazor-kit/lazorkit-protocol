@@ -1,6 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { createHash } from 'crypto';
-import { PROGRAM_ID } from '../generated';
+import { PROGRAM_ID } from '../constants';
 
 /**
  * Generates WebAuthn authenticator data for a given RP ID.
@@ -97,8 +97,10 @@ export function buildAuthPayload(params: {
 /**
  * Computes the SHA-256 challenge hash that must be signed by the passkey.
  *
- * Hash = SHA256(discriminator || auth_payload || signed_payload || slot_le || payer || counter_le(4) || program_id)
+ * Hash = SHA256(discriminator || auth_payload || signed_payload || payer || counter_le(4) || program_id)
  *
+ * Note: slot is already encoded as the first 8 bytes of auth_payload, so it is NOT hashed again
+ * here. The previous redundant `slot_le` field was removed to keep hash inputs non-repetitive.
  * This must exactly match the on-chain `sol_sha256` call in secp256r1/mod.rs.
  */
 export function buildSecp256r1Challenge(params: {
@@ -111,8 +113,6 @@ export function buildSecp256r1Challenge(params: {
   programId?: PublicKey;
 }): Uint8Array {
   const pid = params.programId ?? PROGRAM_ID;
-  const slotBuf = Buffer.alloc(8);
-  slotBuf.writeBigUInt64LE(params.slot);
   const counterBuf = Buffer.alloc(4);
   counterBuf.writeUInt32LE(params.counter);
 
@@ -120,7 +120,6 @@ export function buildSecp256r1Challenge(params: {
   hash.update(params.discriminator);
   hash.update(params.authPayload);
   hash.update(params.signedPayload);
-  hash.update(slotBuf);
   hash.update(params.payer.toBuffer());
   hash.update(counterBuf);
   hash.update(pid.toBuffer());

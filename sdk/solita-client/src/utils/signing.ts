@@ -112,17 +112,24 @@ export function buildDataPayloadForTransfer(
 }
 
 /**
- * CreateSession data payload: [session_key(32)][expires_at(8)]
+ * CreateSession data payload: [session_key(32)][expires_at(8)][actions_len(2)][actions(N)]
  */
 export function buildDataPayloadForSession(
   sessionKey: Uint8Array,
   expiresAt: bigint,
+  actionsBuffer?: Uint8Array,
 ): Uint8Array {
-  const buf = new Uint8Array(40);
+  const actionsLen = actionsBuffer?.length ?? 0;
+  const buf = new Uint8Array(42 + actionsLen);
   buf.set(sessionKey, 0);
   const expiresAtBuf = Buffer.alloc(8);
   expiresAtBuf.writeBigInt64LE(expiresAt);
   buf.set(new Uint8Array(expiresAtBuf), 32);
+  buf[40] = actionsLen & 0xff;
+  buf[41] = (actionsLen >> 8) & 0xff;
+  if (actionsBuffer && actionsLen > 0) {
+    buf.set(actionsBuffer, 42);
+  }
   return buf;
 }
 

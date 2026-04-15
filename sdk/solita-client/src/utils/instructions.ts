@@ -10,7 +10,7 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   SYSVAR_RENT_PUBKEY,
 } from '@solana/web3.js';
-import { PROGRAM_ID } from '../generated';
+import { PROGRAM_ID } from '../constants';
 
 // ─── Discriminators ──────────────────────────────────────────────────
 export const DISC_CREATE_WALLET = 0;
@@ -216,12 +216,24 @@ export function createRemoveAuthorityIx(params: {
  *   [auth_type(1)]
  *   Ed25519:   [pubkey(32)]
  *   Secp256r1: [credential_id_hash(32)][pubkey(33)][rpIdLen(1)][rpId(N)] + [auth_payload(...)]
+ *
+ * Account layout:
+ *   0: payer (signer, writable)
+ *   1: wallet_pda
+ *   2: current_owner (writable)
+ *   3: new_owner (writable)
+ *   4: refund_dest (writable) — receives current_owner rent
+ *   5: system_program
+ *   6: rent_sysvar
+ *   7: (optional) authorizerSigner or SYSVAR_INSTRUCTIONS
  */
 export function createTransferOwnershipIx(params: {
   payer: PublicKey;
   walletPda: PublicKey;
   currentOwnerAuthorityPda: PublicKey;
   newOwnerAuthorityPda: PublicKey;
+  /** Where the current owner account's rent goes. Defaults to payer if omitted. */
+  refundDestination: PublicKey;
   newType: number;
   /** Ed25519: 32-byte pubkey. Secp256r1: 32-byte credential_id_hash */
   credentialOrPubkey: Uint8Array;
@@ -256,6 +268,7 @@ export function createTransferOwnershipIx(params: {
     { pubkey: params.walletPda, isSigner: false, isWritable: false },
     { pubkey: params.currentOwnerAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: params.newOwnerAuthorityPda, isSigner: false, isWritable: true },
+    { pubkey: params.refundDestination, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
   ];
@@ -347,6 +360,8 @@ export function createCreateSessionIx(params: {
   sessionPda: PublicKey;
   sessionKey: Uint8Array;
   expiresAt: bigint;
+  /** Serialized actions buffer (from serializeActions). Empty/omitted = no actions. */
+  actionsBuffer?: Uint8Array;
   authPayload?: Uint8Array;
   authorizerSigner?: PublicKey;
   programId?: PublicKey;
@@ -360,6 +375,17 @@ export function createCreateSessionIx(params: {
     params.sessionKey,
     new Uint8Array(expiresAtBuf),
   ];
+
+  // Append actions length prefix + buffer
+  const actionsBuffer = params.actionsBuffer ?? new Uint8Array(0);
+  const actionsLenBuf = new Uint8Array(2);
+  actionsLenBuf[0] = actionsBuffer.length & 0xff;
+  actionsLenBuf[1] = (actionsBuffer.length >> 8) & 0xff;
+  parts.push(actionsLenBuf);
+  if (actionsBuffer.length > 0) {
+    parts.push(actionsBuffer);
+  }
+
   if (params.authPayload) {
     parts.push(params.authPayload);
   }

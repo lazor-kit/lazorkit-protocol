@@ -1,5 +1,5 @@
 import { PublicKey } from '@solana/web3.js';
-import { PROGRAM_ID } from '../generated';
+import { PROGRAM_ID } from '../constants';
 
 export function findWalletPda(
   userSeed: Uint8Array,

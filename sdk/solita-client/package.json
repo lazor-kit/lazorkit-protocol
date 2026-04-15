@@ -1,21 +1,17 @@
 {
   "name": "@lazorkit/solita-client",
-  "version": "0.2.0",
-  "description": "LazorKit Smart Wallet TypeScript SDK (Solita-generated + hand-written utils)",
+  "version": "0.3.0",
+  "description": "LazorKit Smart Wallet TypeScript SDK",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "generate": "node generate.mjs",
     "build": "tsc",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.95.0",
-    "@metaplex-foundation/beet": "^0.7.2",
-    "@metaplex-foundation/beet-solana": "^0.4.1"
+    "@solana/web3.js": "^1.95.0"
   },
   "devDependencies": {
-    "@metaplex-foundation/solita": "^0.20.1",
     "typescript": "^5.9.3"
   }
 }
