@@ -295,7 +295,7 @@ After modifying program instructions:
 
 ```bash
 # 1. Regenerate IDL
-cd program && shank idl -o . --out-filename idl.json -p FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao
+cd program && shank idl -o . --out-filename idl.json -p 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
 
 # 2. Regenerate SDK
 cd sdk/sdk-legacy && node generate.mjs

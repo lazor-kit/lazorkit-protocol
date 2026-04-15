@@ -23,7 +23,7 @@ cargo build-sbf
 
 # Step 2: Generate IDL using Shank
 echo "[2/3] Generating IDL..."
-PROGRAM_ID=$(grep -A1 'declare_id' "$PROGRAM_DIR/src/lib.rs" 2>/dev/null | grep -oE '[A-HJ-NP-Za-km-z1-9]{32,44}' | head -1 || echo "FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao")
+PROGRAM_ID=$(grep -A1 'declare_id' "$PROGRAM_DIR/src/lib.rs" 2>/dev/null | grep -oE '[A-HJ-NP-Za-km-z1-9]{32,44}' | head -1 || echo "4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS")
 cd "$PROGRAM_DIR"
 if command -v shank &> /dev/null; then
     shank idl -o . --out-filename idl.json -p "$PROGRAM_ID"

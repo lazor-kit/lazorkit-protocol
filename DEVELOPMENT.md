@@ -85,7 +85,7 @@ The SDK is fully hand-written (no code generation). After modifying program inst
 ### F. IDL Generation (using Shank)
 
 ```bash
-cd program && shank idl -o . --out-filename idl.json -p FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao
+cd program && shank idl -o . --out-filename idl.json -p 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
 ```
 
 ### G. Program ID Sync
