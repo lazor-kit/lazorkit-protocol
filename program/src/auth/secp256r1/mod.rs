@@ -132,7 +132,9 @@ impl Authenticator for Secp256r1Authenticator {
         }
 
         // Build challenge hash:
-        //   SHA256(discriminator || auth_payload || signed_payload || slot || payer || counter || program_id)
+        //   SHA256(discriminator || auth_payload || signed_payload || payer || counter || program_id)
+        // Note: slot is already encoded as the first 8 bytes of auth_payload; including it
+        // explicitly here was redundant and has been removed to keep the hash inputs non-repetitive.
         let counter_bytes = expected_counter.to_le_bytes();
         #[allow(unused_assignments)]
         let mut hasher = [0u8; 32];
@@ -143,13 +145,12 @@ impl Authenticator for Secp256r1Authenticator {
                     discriminator,
                     auth_payload,
                     signed_payload,
-                    &slot.to_le_bytes(),
                     payer.key().as_ref(),
                     &counter_bytes,
                     program_id.as_ref(),
                 ]
                 .as_ptr() as *const u8,
-                7,
+                6,
                 hasher.as_mut_ptr(),
             );
         }
