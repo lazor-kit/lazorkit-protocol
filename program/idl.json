@@ -276,6 +276,14 @@
           ]
         },
         {
+          "name": "refundDestination",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Account to receive rent refund from closed current owner"
+          ]
+        },
+        {
           "name": "systemProgram",
           "isMut": false,
           "isSigner": false,

@@ -1,7 +1,7 @@
 {
-  "name": "@lazorkit/solita-client",
+  "name": "@lazorkit/sdk-legacy",
   "version": "0.3.0",
-  "description": "LazorKit Smart Wallet TypeScript SDK",
+  "description": "LazorKit Protocol TypeScript SDK (web3.js v1)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {

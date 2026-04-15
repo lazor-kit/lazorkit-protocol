@@ -31,7 +31,7 @@ import {
   AUTH_TYPE_SECP256R1,
   DISC_AUTHORIZE,
   PROGRAM_ID,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 
 describe('Deferred Execution', () => {
   let ctx: TestContext;

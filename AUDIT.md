@@ -319,6 +319,6 @@ The following items were identified during the audit but intentionally left as-i
 | `program/src/processor/execute/immediate.rs` | Per-CPI gross lamport tracking; eliminate triple borrow of `authority_pda` |
 | `program/src/auth/secp256r1/mod.rs` | Remove redundant `slot` from challenge hash (slot already in `auth_payload[0..8]`) |
 | `program/src/compact.rs` | Add `MAX_COMPACT_INSTRUCTIONS = 16`; add `debug_assert` for u8 truncation |
-| `sdk/solita-client/src/utils/secp256r1.ts` | Remove redundant `slotBuf` from `buildSecp256r1Challenge` (mirrors on-chain fix) |
-| `sdk/solita-client/src/utils/instructions.ts` | Add `refundDestination` param to `createTransferOwnershipIx`; shift sysvar index to 7 |
-| `sdk/solita-client/src/utils/client.ts` | Update `SYSVAR_IX_INDEX_TRANSFER_OWNERSHIP = 7`; add `refundDestination` to `transferOwnership` |
+| `sdk/sdk-legacy/src/utils/secp256r1.ts` | Remove redundant `slotBuf` from `buildSecp256r1Challenge` (mirrors on-chain fix) |
+| `sdk/sdk-legacy/src/utils/instructions.ts` | Add `refundDestination` param to `createTransferOwnershipIx`; shift sysvar index to 7 |
+| `sdk/sdk-legacy/src/utils/client.ts` | Update `SYSVAR_IX_INDEX_TRANSFER_OWNERSHIP = 7`; add `refundDestination` to `transferOwnership` |

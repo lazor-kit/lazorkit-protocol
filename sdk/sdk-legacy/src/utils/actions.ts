@@ -7,7 +7,7 @@
  *
  * @example
  * ```typescript
- * import { Actions, serializeActions } from '@lazorkit/solita-client';
+ * import { Actions, serializeActions } from '@lazorkit/sdk-legacy';
  *
  * const actions = [
  *   Actions.solRecurringLimit({ limit: 1_000_000_000n, window: 216_000n }),

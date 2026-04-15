@@ -12,7 +12,7 @@ import {
   LazorKitClient,
   ed25519,
   secp256r1,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 
 describe('Execute', () => {
   let ctx: TestContext;

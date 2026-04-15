@@ -1,4 +1,6 @@
-# Protocol Fee System
+# Admin Guide — Protocol Fee System
+
+> **Internal document.** This covers protocol management operations that only the LazorKit admin team performs.
 
 ## Overview
 

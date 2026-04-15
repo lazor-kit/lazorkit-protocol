@@ -13,7 +13,7 @@ This document outlines the standard procedures for building, deploying, and test
 
 ```
 /program           Rust smart contract (pinocchio, zero-copy)
-/sdk/solita-client  TypeScript SDK (hand-written instruction builders + client API)
+/sdk/sdk-legacy  TypeScript SDK (hand-written instruction builders + client API)
 /tests-sdk          Integration tests (vitest, @solana/web3.js v1, ~75 tests)
 /scripts            Build/deploy automation
 /audits             Audit reports
@@ -43,7 +43,7 @@ cd program && shank idl -o . --out-filename idl.json -p FLb7fyAtkfA4TSa2uYcAT8QK
 
 ### D. SDK
 
-The SDK is fully hand-written (no code generation). After modifying program instruction layouts, update `sdk/solita-client/src/utils/instructions.ts` manually.
+The SDK is fully hand-written (no code generation). After modifying program instruction layouts, update `sdk/sdk-legacy/src/utils/instructions.ts` manually.
 
 ### E. Running Integration Tests
 

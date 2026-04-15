@@ -41,7 +41,7 @@ import {
   packCompactInstructions,
   computeAccountsHash,
   DISC_EXECUTE,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 
 describe('Security', () => {
   let ctx: TestContext;
@@ -292,7 +292,7 @@ describe('Security', () => {
       // Build layout with recipientA
       const fixedAccounts = [ctx.payer.publicKey, result.walletPda, authorityPda, result.vaultPda, SYSVAR_INSTRUCTIONS_PUBKEY];
       const { compactInstructions, remainingAccounts } =
-        (await import('../../sdk/solita-client/src/utils/compact')).buildCompactLayout(fixedAccounts, [transferIx]);
+        (await import('../../sdk/sdk-legacy/src/utils/compact')).buildCompactLayout(fixedAccounts, [transferIx]);
       const packed = packCompactInstructions(compactInstructions);
 
       // Compute accounts hash with recipientA (the one we sign)
@@ -306,7 +306,7 @@ describe('Security', () => {
       ];
       const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
 
-      const { concatParts } = await import('../../sdk/solita-client/src/utils/signing');
+      const { concatParts } = await import('../../sdk/sdk-legacy/src/utils/signing');
       const signedPayload = concatParts([packed, accountsHash]);
 
       // Sign with the correct data (recipientA in accounts hash)

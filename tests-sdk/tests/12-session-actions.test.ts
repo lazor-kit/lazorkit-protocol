@@ -36,7 +36,7 @@ import {
   session,
   Actions,
   type SessionAction,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 
 describe('Session Actions', () => {
   let ctx: TestContext;

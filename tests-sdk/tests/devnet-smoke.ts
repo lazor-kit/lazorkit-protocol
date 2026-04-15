@@ -24,7 +24,7 @@ import {
   session,
   ROLE_ADMIN,
   ROLE_SPENDER,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 import { generateMockSecp256r1Key, createMockSigner } from './secp256r1Utils';
 
 const RPC_URL = process.env.RPC_URL || 'https://api.devnet.solana.com';

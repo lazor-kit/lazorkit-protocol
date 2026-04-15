@@ -15,8 +15,8 @@ import {
   ROLE_SPENDER,
   ed25519,
   secp256r1,
-} from '../../sdk/solita-client/src';
-import { AuthorityAccount } from '../../sdk/solita-client/src/utils/accounts';
+} from '../../sdk/sdk-legacy/src';
+import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
 /**
  * E2E Company Workflow (realistic flow):

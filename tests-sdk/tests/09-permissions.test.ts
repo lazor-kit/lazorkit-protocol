@@ -26,7 +26,7 @@ import {
   ROLE_SPENDER,
   ed25519,
   secp256r1,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 
 describe('Permission Boundaries', () => {
   let ctx: TestContext;

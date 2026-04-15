@@ -54,7 +54,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Odometer counter replay protection for Secp256r1 (monotonic u32 per authority)
 - program_id included in challenge hash (cross-program replay prevention)
 - rpId stored on authority account at creation (saves ~14 bytes per transaction)
-- TypeScript SDK (`sdk/solita-client`) with Solita code generation
+- TypeScript SDK (`sdk/sdk-legacy`) with Solita code generation
 - Integration + security test suite (`tests-sdk/`) with 56 tests across 11 files
 - Benchmark script for CU and transaction size measurements
 - CompactInstructions accounts hash for anti-reordering protection

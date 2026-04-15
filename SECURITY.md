@@ -19,7 +19,7 @@ If you discover a security vulnerability in LazorKit, please report it responsib
 The following are in scope:
 
 - On-chain Solana program (`program/src/`)
-- TypeScript SDK (`sdk/solita-client/`)
+- TypeScript SDK (`sdk/sdk-legacy/`)
 - PDA derivation and signature verification logic
 - Replay protection mechanisms
 

@@ -25,7 +25,7 @@ import {
   computeAccountsHash,
   AUTH_TYPE_SECP256R1,
   DISC_EXECUTE,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 
 describe('Replay Prevention (Odometer)', () => {
   let ctx: TestContext;

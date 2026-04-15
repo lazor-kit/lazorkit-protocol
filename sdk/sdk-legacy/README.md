@@ -1,20 +1,22 @@
-# @lazorkit/solita-client
+# @lazorkit/sdk-legacy
 
-TypeScript SDK for the LazorKit Protocol smart wallet program on Solana. Built with `@solana/web3.js` v1 and hand-written instruction builders.
+TypeScript SDK for the LazorKit Protocol smart wallet on Solana. Built with `@solana/web3.js` v1.
 
-Includes protocol fee support (auto-detected), wallet lookup by credential, sharded treasury, and session action permissions (spending limits, program whitelist/blacklist).
+> This is the legacy SDK for `@solana/web3.js` v1. A new `@lazorkit/sdk` for web3.js v2 is coming soon.
+
+Features: passkey/WebAuthn authentication, session keys with spending limits and program whitelist/blacklist, deferred execution, wallet lookup by credential.
 
 ## Installation
 
 ```bash
-npm install @lazorkit/solita-client
+npm install @lazorkit/sdk-legacy
 ```
 
 ## Quick Start
 
 ```typescript
 import { Connection, Keypair, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
-import { LazorKitClient, secp256r1 } from '@lazorkit/solita-client';
+import { LazorKitClient, secp256r1 } from '@lazorkit/sdk-legacy';
 import * as crypto from 'crypto';
 
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
@@ -76,7 +78,7 @@ Uses `getProgramAccounts` with discriminator + authority_type + credential data 
 import {
   findWalletPda, findVaultPda, findAuthorityPda, findSessionPda,
   findDeferredExecPda, findProtocolConfigPda, findFeeRecordPda, findTreasuryShardPda,
-} from '@lazorkit/solita-client';
+} from '@lazorkit/sdk-legacy';
 
 const [walletPda] = findWalletPda(userSeed);
 const [vaultPda] = findVaultPda(walletPda);
@@ -91,7 +93,7 @@ const [shardPda] = findTreasuryShardPda(shardId);
 ### Signer Types
 
 ```typescript
-import { ed25519, secp256r1, session } from '@lazorkit/solita-client';
+import { ed25519, secp256r1, session } from '@lazorkit/sdk-legacy';
 
 // Ed25519 — Keypair signs at transaction level
 const signer = ed25519(ownerKp.publicKey, authorityPda);  // authorityPda optional
@@ -180,7 +182,13 @@ const { instructions } = await client.executeDeferredFromPayload({
 const { instructions } = client.reclaimDeferred({ payer, deferredExecPda });
 ```
 
-#### Protocol Fee Management (Admin Only)
+---
+
+## Internal: Protocol Fee Management (Admin Only)
+
+> The following section is for LazorKit admin operations only. Integrators do not need this.
+
+#### Protocol Fee Management
 
 ```typescript
 // Initialize protocol (one-time)
@@ -274,7 +282,7 @@ ROLE_SPENDER // 2
 import {
   WalletAccount, AuthorityAccount, SessionAccount,
   ProtocolConfigAccount, FeeRecordAccount, TreasuryShardAccount,
-} from '@lazorkit/solita-client';
+} from '@lazorkit/sdk-legacy';
 
 const authority = await AuthorityAccount.fromAccountAddress(connection, authorityPda);
 const config = await ProtocolConfigAccount.fromAccountAddress(connection, configPda);
@@ -290,7 +298,7 @@ After modifying program instructions:
 cd program && shank idl -o . --out-filename idl.json -p FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao
 
 # 2. Regenerate SDK
-cd sdk/solita-client && node generate.mjs
+cd sdk/sdk-legacy && node generate.mjs
 ```
 
 ## License

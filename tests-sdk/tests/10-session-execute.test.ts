@@ -25,7 +25,7 @@ import {
   LazorKitClient,
   ed25519,
   session,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 
 describe('Session Execute', () => {
   let ctx: TestContext;

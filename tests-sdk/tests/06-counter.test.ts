@@ -24,8 +24,8 @@ import {
   ROLE_SPENDER,
   DISC_ADD_AUTHORITY,
   DISC_EXECUTE,
-} from '../../sdk/solita-client/src';
-import { AuthorityAccount } from '../../sdk/solita-client/src/utils/accounts';
+} from '../../sdk/sdk-legacy/src';
+import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
 describe('Counter Edge Cases', () => {
   let ctx: TestContext;

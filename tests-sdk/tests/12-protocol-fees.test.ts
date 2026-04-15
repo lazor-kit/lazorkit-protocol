@@ -5,7 +5,7 @@ import { setupTest, sendTx, sendTxExpectError, type TestContext } from './common
 import {
   LazorKitClient,
   PROGRAM_ID,
-} from '../../sdk/solita-client/src';
+} from '../../sdk/sdk-legacy/src';
 
 const NUM_SHARDS = 4;
 

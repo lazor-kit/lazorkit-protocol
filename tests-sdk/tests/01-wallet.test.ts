@@ -8,8 +8,8 @@ import {
   AUTH_TYPE_ED25519,
   AUTH_TYPE_SECP256R1,
   PROGRAM_ID,
-} from '../../sdk/solita-client/src';
-import { AuthorityAccount } from '../../sdk/solita-client/src/utils/accounts';
+} from '../../sdk/sdk-legacy/src';
+import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
 describe('CreateWallet', () => {
   let ctx: TestContext;

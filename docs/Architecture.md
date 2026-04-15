@@ -162,7 +162,13 @@ Seeds: `["vault", wallet_pubkey]`
 
 No data allocated. Holds SOL. Program signs for it via PDA seeds during Execute.
 
-### F. ProtocolConfig (88 bytes) — Protocol Fee System
+---
+
+## Protocol Fee System (Internal)
+
+> The following sections describe internal protocol management. See [AdminGuide.md](AdminGuide.md) for operational details.
+
+### F. ProtocolConfig (88 bytes)
 
 Seeds: `["protocol_config"]`
 
@@ -327,6 +333,8 @@ This enables high-throughput wallets where multiple authorized parties (e.g., an
 - Signature bound to specific session PDA + refund destination (prevents replay).
 - Accounts: payer, wallet, admin_authority, session, refund_destination [+ auth_extra].
 
+### Protocol Instructions (Internal — Admin Only)
+
 ### InitializeProtocol (discriminator: 10)
 
 - Creates the global ProtocolConfig PDA. One-time setup.
@@ -370,7 +378,7 @@ Fee collection happens at the entrypoint, before processor dispatch. For CreateW
 
 If accounts don't match or payer has no FeeRecord, all accounts pass through unchanged. Fully backwards compatible.
 
-See [ProtocolFee.md](ProtocolFee.md) for full protocol fee architecture.
+See [AdminGuide.md](AdminGuide.md) for full protocol fee architecture.
 
 ## 6. CompactInstructions Format
 
@@ -473,7 +481,7 @@ program/
     utils.rs                  PDA initialization, stack_height check
     error.rs                  AuthError (3001-3029) + ProtocolError (4001-4007)
     entrypoint.rs             Instruction routing + fee collection
-sdk/solita-client/
+sdk/sdk-legacy/
   src/
     constants.ts              Program ID + PDA seeds
     utils/
@@ -492,5 +500,5 @@ tests-sdk/                    Integration + security tests (vitest, ~75 tests, 1
 docs/
   Architecture.md             This document
   Costs.md                    CU benchmarks, rent costs
-  ProtocolFee.md              Protocol fee system architecture
+  AdminGuide.md               Protocol fee system (internal)
 ```
