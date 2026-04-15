@@ -1025,4 +1025,466 @@ mod tests {
         );
         assert!(result.is_ok());
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Token spending limit tests
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // Token tests use empty `accounts` slice so find_token_balance returns
+    // None → unwrap_or(0), meaning "all tokens drained." We provide
+    // token_snapshots_before with the initial balance to compute spending.
+
+    fn build_token_limit(mint: &[u8; 32], remaining: u64) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(mint);              // [0..32]
+        data.extend_from_slice(&remaining.to_le_bytes()); // [32..40]
+        data
+    }
+
+    fn build_token_max_per_tx(mint: &[u8; 32], max: u64) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(mint);
+        data.extend_from_slice(&max.to_le_bytes());
+        data
+    }
+
+    fn build_token_recurring(mint: &[u8; 32], limit: u64, spent: u64, window: u64, last_reset: u64) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(mint);                     // [0..32]
+        data.extend_from_slice(&limit.to_le_bytes());     // [32..40]
+        data.extend_from_slice(&spent.to_le_bytes());     // [40..48]
+        data.extend_from_slice(&window.to_le_bytes());    // [48..56]
+        data.extend_from_slice(&last_reset.to_le_bytes()); // [56..64]
+        data
+    }
+
+    // ── TokenLimit ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_token_limit_within_budget() {
+        let mint = [0xAA; 32];
+        let actions = build_action(4, 0, &build_token_limit(&mint, 1_000_000));
+        let mut session_data = build_session_data(&actions);
+        let snapshots = vec![TokenSnapshot { mint, amount: 500_000 }];
+
+        // accounts=[] → after=0, token_spent=500_000, within 1M limit
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            0, 0, &snapshots, 100,
+        );
+        assert!(result.is_ok());
+
+        // Verify remaining was decremented
+        let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
+        let remaining = read_u64(&session_data[abs_offset..], 32);
+        assert_eq!(remaining, 500_000);
+    }
+
+    #[test]
+    fn test_token_limit_exceeds_budget() {
+        let mint = [0xBB; 32];
+        let actions = build_action(4, 0, &build_token_limit(&mint, 100_000));
+        let mut session_data = build_session_data(&actions);
+        let snapshots = vec![TokenSnapshot { mint, amount: 200_000 }];
+
+        // token_spent=200k > remaining=100k → fail
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            0, 0, &snapshots, 100,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_token_limit_exact_budget() {
+        let mint = [0xCC; 32];
+        let actions = build_action(4, 0, &build_token_limit(&mint, 500_000));
+        let mut session_data = build_session_data(&actions);
+        let snapshots = vec![TokenSnapshot { mint, amount: 500_000 }];
+
+        // token_spent = exactly remaining → OK
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            0, 0, &snapshots, 100,
+        );
+        assert!(result.is_ok());
+
+        let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
+        assert_eq!(read_u64(&session_data[abs_offset..], 32), 0);
+    }
+
+    #[test]
+    fn test_token_limit_depletes_across_txs() {
+        let mint = [0xDD; 32];
+        let actions = build_action(4, 0, &build_token_limit(&mint, 1_000_000));
+        let mut session_data = build_session_data(&actions);
+
+        // Tx 1: drain 600k
+        let s1 = vec![TokenSnapshot { mint, amount: 600_000 }];
+        eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s1, 100).unwrap();
+
+        // remaining = 400k
+        let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
+        assert_eq!(read_u64(&session_data[abs_offset..], 32), 400_000);
+
+        // Tx 2: drain 400k → exact
+        let s2 = vec![TokenSnapshot { mint, amount: 400_000 }];
+        eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s2, 101).unwrap();
+        assert_eq!(read_u64(&session_data[abs_offset..], 32), 0);
+
+        // Tx 3: drain 1 → fail
+        let s3 = vec![TokenSnapshot { mint, amount: 1 }];
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s3, 102);
+        assert!(result.is_err());
+    }
+
+    // ── TokenMaxPerTx ───────────────────────────────────────────────
+
+    #[test]
+    fn test_token_max_per_tx_within_limit() {
+        let mint = [0xEE; 32];
+        let actions = build_action(6, 0, &build_token_max_per_tx(&mint, 500_000));
+        let mut session_data = build_session_data(&actions);
+        let snapshots = vec![TokenSnapshot { mint, amount: 300_000 }];
+
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &snapshots, 100);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_token_max_per_tx_exceeds() {
+        let mint = [0xFF; 32];
+        let actions = build_action(6, 0, &build_token_max_per_tx(&mint, 500_000));
+        let mut session_data = build_session_data(&actions);
+        let snapshots = vec![TokenSnapshot { mint, amount: 600_000 }];
+
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &snapshots, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_token_max_per_tx_repeatable() {
+        // MaxPerTx has no cumulative state — repeated spends within limit all pass
+        let mint = [0x11; 32];
+        let actions = build_action(6, 0, &build_token_max_per_tx(&mint, 500_000));
+        let mut session_data = build_session_data(&actions);
+
+        for slot in 100..105 {
+            let snapshots = vec![TokenSnapshot { mint, amount: 500_000 }];
+            let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &snapshots, slot);
+            assert!(result.is_ok());
+        }
+    }
+
+    // ── TokenRecurringLimit ─────────────────────────────────────────
+
+    #[test]
+    fn test_token_recurring_basic() {
+        let mint = [0x22; 32];
+        let actions = build_action(5, 0, &build_token_recurring(&mint, 1_000_000, 0, 100, 0));
+        let mut session_data = build_session_data(&actions);
+
+        // Spend 600k at slot 50 — OK
+        let s1 = vec![TokenSnapshot { mint, amount: 600_000 }];
+        eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s1, 50).unwrap();
+
+        // Spend 500k more at slot 60 → total 1.1M > 1M limit → fail
+        let s2 = vec![TokenSnapshot { mint, amount: 500_000 }];
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s2, 60);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_token_recurring_window_reset() {
+        let mint = [0x33; 32];
+        let actions = build_action(5, 0, &build_token_recurring(&mint, 1_000_000, 0, 100, 0));
+        let mut session_data = build_session_data(&actions);
+
+        // Spend 900k at slot 50
+        let s1 = vec![TokenSnapshot { mint, amount: 900_000 }];
+        eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s1, 50).unwrap();
+
+        // At slot 150 (after window), spending resets → 500k OK
+        let s2 = vec![TokenSnapshot { mint, amount: 500_000 }];
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s2, 150);
+        assert!(result.is_ok());
+    }
+
+    // ── Expired token limits ─────────────────────────────────────────
+
+    #[test]
+    fn test_expired_token_limit_blocks_spending() {
+        let mint = [0x44; 32];
+        let actions = build_action(4, 50, &build_token_limit(&mint, 1_000_000)); // expires at slot 50
+        let mut session_data = build_session_data(&actions);
+        let snapshots = vec![TokenSnapshot { mint, amount: 100 }];
+
+        // At slot 100 (expired), any token spend → fail
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &snapshots, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_expired_token_max_per_tx_blocks_spending() {
+        let mint = [0x55; 32];
+        let actions = build_action(6, 50, &build_token_max_per_tx(&mint, 1_000_000)); // expires at 50
+        let mut session_data = build_session_data(&actions);
+        let snapshots = vec![TokenSnapshot { mint, amount: 1 }];
+
+        // Expired → even 1 token blocked
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &snapshots, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_expired_token_recurring_blocks_spending() {
+        let mint = [0x66; 32];
+        let actions = build_action(5, 50, &build_token_recurring(&mint, 1_000_000, 0, 100, 0));
+        let mut session_data = build_session_data(&actions);
+        let snapshots = vec![TokenSnapshot { mint, amount: 1 }];
+
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &snapshots, 100);
+        assert!(result.is_err());
+    }
+
+    // ── Multiple mint limits ────────────────────────────────────────
+
+    #[test]
+    fn test_multiple_mints_independent() {
+        let mint_a = [0xAA; 32];
+        let mint_b = [0xBB; 32];
+        let mut actions_buf = Vec::new();
+        actions_buf.extend_from_slice(&build_action(4, 0, &build_token_limit(&mint_a, 100_000)));
+        actions_buf.extend_from_slice(&build_action(4, 0, &build_token_limit(&mint_b, 500_000)));
+        let mut session_data = build_session_data(&actions_buf);
+
+        // Drain mint_a within its limit, drain mint_b within its limit
+        let snapshots = vec![
+            TokenSnapshot { mint: mint_a, amount: 50_000 },
+            TokenSnapshot { mint: mint_b, amount: 400_000 },
+        ];
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &snapshots, 100);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_multiple_mints_one_exceeds() {
+        let mint_a = [0xAA; 32];
+        let mint_b = [0xBB; 32];
+        let mut actions_buf = Vec::new();
+        actions_buf.extend_from_slice(&build_action(4, 0, &build_token_limit(&mint_a, 100_000)));
+        actions_buf.extend_from_slice(&build_action(4, 0, &build_token_limit(&mint_b, 500_000)));
+        let mut session_data = build_session_data(&actions_buf);
+
+        // mint_a: 50k OK, mint_b: 600k > 500k → fail
+        let snapshots = vec![
+            TokenSnapshot { mint: mint_a, amount: 50_000 },
+            TokenSnapshot { mint: mint_b, amount: 600_000 },
+        ];
+        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &snapshots, 100);
+        assert!(result.is_err());
+    }
+
+    // ── Combined SOL + Token limits ─────────────────────────────────
+
+    #[test]
+    fn test_combined_sol_and_token_limits() {
+        let mint = [0xCC; 32];
+        let mut actions_buf = Vec::new();
+        actions_buf.extend_from_slice(&build_action(1, 0, &1_000_000u64.to_le_bytes())); // SolLimit: 1M
+        actions_buf.extend_from_slice(&build_action(4, 0, &build_token_limit(&mint, 500_000))); // TokenLimit: 500k
+        let mut session_data = build_session_data(&actions_buf);
+
+        let snapshots = vec![TokenSnapshot { mint, amount: 300_000 }];
+
+        // SOL: 200k spent (under 1M), Token: 300k spent (under 500k) → OK
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            1_000_000, 800_000, &snapshots, 100,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_combined_sol_ok_token_exceeds() {
+        let mint = [0xDD; 32];
+        let mut actions_buf = Vec::new();
+        actions_buf.extend_from_slice(&build_action(1, 0, &10_000_000u64.to_le_bytes())); // SolLimit: 10M
+        actions_buf.extend_from_slice(&build_action(4, 0, &build_token_limit(&mint, 100_000))); // TokenLimit: 100k
+        let mut session_data = build_session_data(&actions_buf);
+
+        let snapshots = vec![TokenSnapshot { mint, amount: 200_000 }];
+
+        // SOL: 500k spent (under 10M), Token: 200k > 100k → fail
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            5_000_000, 4_500_000, &snapshots, 100,
+        );
+        assert!(result.is_err());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Gross outflow tests (SolMaxPerTx uses gross, not net)
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_sol_max_per_tx_gross_vs_net() {
+        // SolMaxPerTx = 1 SOL. A DeFi swap sends 10 SOL out and receives 9.5 back.
+        // Net = 0.5 SOL (would pass if using net), Gross = 10 SOL (must fail).
+        let actions = build_action(3, 0, &1_000_000_000u64.to_le_bytes()); // 1 SOL max
+        let mut session_data = build_session_data(&actions);
+
+        // before=20 SOL, after=19.5 SOL → net = 0.5 SOL
+        // But gross = 10 SOL (passed explicitly)
+        let result = evaluate_post_actions(
+            &mut session_data, &[], &Pubkey::default(),
+            20_000_000_000, 19_500_000_000,
+            10_000_000_000, // gross = 10 SOL
+            &[], 100,
+        );
+        assert!(result.is_err()); // 10 SOL gross > 1 SOL max → fail
+    }
+
+    #[test]
+    fn test_sol_max_per_tx_gross_within_limit() {
+        let actions = build_action(3, 0, &5_000_000_000u64.to_le_bytes()); // 5 SOL max
+        let mut session_data = build_session_data(&actions);
+
+        // Gross = 3 SOL, net = 1 SOL
+        let result = evaluate_post_actions(
+            &mut session_data, &[], &Pubkey::default(),
+            20_000_000_000, 19_000_000_000,
+            3_000_000_000, // gross = 3 SOL
+            &[], 100,
+        );
+        assert!(result.is_ok()); // 3 SOL gross < 5 SOL max → OK
+    }
+
+    #[test]
+    fn test_sol_limit_uses_net_not_gross() {
+        // SolLimit (cumulative) should use net, not gross.
+        // A round-trip that returns most lamports shouldn't deplete the budget.
+        let actions = build_action(1, 0, &2_000_000_000u64.to_le_bytes()); // 2 SOL limit
+        let mut session_data = build_session_data(&actions);
+
+        // net = 0.5 SOL, gross = 10 SOL
+        let result = evaluate_post_actions(
+            &mut session_data, &[], &Pubkey::default(),
+            20_000_000_000, 19_500_000_000,
+            10_000_000_000,
+            &[], 100,
+        );
+        assert!(result.is_ok()); // SolLimit uses net: 0.5 SOL < 2 SOL → OK
+
+        let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
+        let remaining = read_u64(&session_data[abs_offset..], 0);
+        assert_eq!(remaining, 1_500_000_000); // 2 SOL - 0.5 SOL net
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Attacker pattern tests
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_attacker_all_limits_expired_session_locked() {
+        // Attacker scenario: create a session with a short-lived SolLimit.
+        // After expiry, the session should be locked — not unrestricted.
+        let mut actions_buf = Vec::new();
+        actions_buf.extend_from_slice(&build_action(1, 50, &1_000_000u64.to_le_bytes())); // SolLimit, expires at 50
+        actions_buf.extend_from_slice(&build_action(3, 50, &500_000u64.to_le_bytes())); // SolMaxPerTx, expires at 50
+        let mut session_data = build_session_data(&actions_buf);
+
+        // At slot 100 (both expired), even 1 lamport spend is blocked
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            1_000_000, 999_999, &[], 100,
+        );
+        assert!(result.is_err());
+
+        // Zero spend still OK
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            1_000_000, 1_000_000, &[], 100,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_attacker_expired_token_and_sol_limits() {
+        // All limits expired — both SOL and token spending blocked
+        let mint = [0xFF; 32];
+        let mut actions_buf = Vec::new();
+        actions_buf.extend_from_slice(&build_action(1, 50, &1_000_000u64.to_le_bytes()));
+        actions_buf.extend_from_slice(&build_action(4, 50, &build_token_limit(&mint, 500_000)));
+        let mut session_data = build_session_data(&actions_buf);
+
+        // SOL spend → blocked
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            1_000_000, 999_000, &[], 100,
+        );
+        assert!(result.is_err());
+
+        // Token spend → blocked
+        let snapshots = vec![TokenSnapshot { mint, amount: 100 }];
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            1_000_000, 1_000_000, // no SOL change
+            &snapshots, 100,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_attacker_u64_max_overflow() {
+        // Attacker tries u64::MAX as remaining — should not cause overflow
+        let actions = build_action(1, 0, &u64::MAX.to_le_bytes());
+        let mut session_data = build_session_data(&actions);
+
+        // Spend u64::MAX → should succeed (exact match)
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            u64::MAX, 0, &[], 100,
+        );
+        assert!(result.is_ok());
+
+        let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
+        assert_eq!(read_u64(&session_data[abs_offset..], 0), 0);
+    }
+
+    #[test]
+    fn test_no_token_snapshot_means_no_change() {
+        // If a token mint has a limit but no before-snapshot, token_spent = 0
+        let mint = [0xAA; 32];
+        let actions = build_action(4, 0, &build_token_limit(&mint, 1_000_000));
+        let mut session_data = build_session_data(&actions);
+
+        // No snapshots → before=0, after=0 → spent=0 → OK
+        let result = eval_post(
+            &mut session_data, &[], &Pubkey::default(),
+            0, 0, &[], 100,
+        );
+        assert!(result.is_ok());
+    }
+
+    // ── evaluate_pre_actions tests ───────────────────────────────────
+    // These test whitelist/blacklist logic directly.
+    // We create minimal CompactInstructions that reference account indexes.
+
+    #[test]
+    fn test_pre_actions_no_actions_passthrough() {
+        let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
+        session_data[0] = 3;
+
+        let result = evaluate_pre_actions(&session_data, &[], &[], 100);
+        assert!(result.is_ok());
+    }
+
+    // ── Session creation: actions_len cap ────────────────────────────
+    // (tested in session/create.rs but we verify the constant here)
+
+    #[test]
+    fn test_max_actions_constant_is_16() {
+        assert_eq!(crate::state::action::MAX_ACTIONS, 16);
+    }
 }

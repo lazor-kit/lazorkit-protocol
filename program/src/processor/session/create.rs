@@ -426,4 +426,46 @@ mod tests {
         assert_eq!(args.args_end_offset, 42 + 19);
         // Trailing 50 bytes would be auth_payload — not parsed here
     }
+
+    #[test]
+    fn test_actions_len_exceeds_cap_rejected() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&[7u8; 32]); // session_key
+        data.extend_from_slice(&12345678u64.to_le_bytes()); // expires_at
+
+        // actions_len = 3000 > MAX_ACTIONS_BUFFER_SIZE (2048)
+        data.extend_from_slice(&3000u16.to_le_bytes());
+        // Pad enough bytes so the length check doesn't fail first
+        data.extend_from_slice(&vec![0u8; 3000]);
+
+        let result = ParsedCreateSessionArgs::from_bytes(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_actions_len_at_cap_allowed() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&[7u8; 32]); // session_key
+        data.extend_from_slice(&12345678u64.to_le_bytes()); // expires_at
+
+        // Build a valid action buffer that's under 2048
+        // 16 ProgramWhitelist actions = 16 * (11 header + 32 data) = 16 * 43 = 688 bytes
+        let mut actions = Vec::new();
+        for i in 0..16u8 {
+            let mut prog = [0u8; 32];
+            prog[0] = i;
+            actions.push(10u8); // ProgramWhitelist type
+            actions.extend_from_slice(&32u16.to_le_bytes()); // data_len
+            actions.extend_from_slice(&0u64.to_le_bytes()); // expires_at
+            actions.extend_from_slice(&prog);
+        }
+        assert!(actions.len() <= 2048);
+
+        data.extend_from_slice(&(actions.len() as u16).to_le_bytes());
+        data.extend_from_slice(&actions);
+
+        let result = ParsedCreateSessionArgs::from_bytes(&data);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().actions_bytes.len(), actions.len());
+    }
 }
