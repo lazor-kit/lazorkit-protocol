@@ -9,7 +9,12 @@ import {
   type Signer,
 } from '@solana/web3.js';
 
-export const PROGRAM_ID = new PublicKey('4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS');
+// Program ID imported from SDK (single source of truth for TypeScript).
+// SDK constants.ts is the canonical TS source; Rust declare_id! is the canonical Rust source.
+// Use ./scripts/sync-program-id.sh to keep them in sync.
+import { PROGRAM_ID } from '../../sdk/sdk-legacy/src/constants';
+export { PROGRAM_ID };
+
 export const RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
 
 export interface TestContext {

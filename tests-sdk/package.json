@@ -7,7 +7,7 @@
     "test": "vitest run --fileParallelism=false",
     "test:watch": "vitest --fileParallelism=false",
     "test:local": "npm run validator:start & sleep 3 && npm test; npm run validator:stop",
-    "validator:start": "solana-test-validator --bpf-program 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS ../target/deploy/lazorkit_program.so --reset --quiet &",
+    "validator:start": "solana-test-validator --bpf-program $(solana-keygen pubkey ../target/deploy/lazorkit_program-keypair.json) ../target/deploy/lazorkit_program.so --reset --quiet &",
     "validator:stop": "pkill -f solana-test-validator || true",
     "benchmark": "npx tsx tests/benchmark.ts"
   },
