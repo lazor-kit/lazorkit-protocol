@@ -9,11 +9,7 @@ use pinocchio::{
 };
 
 use crate::{
-    processor::{
-        authorize, create_session, create_wallet, execute, execute_deferred, initialize_protocol,
-        initialize_treasury_shard, manage_authority, reclaim_deferred, register_integrator,
-        revoke_session, transfer_ownership, update_protocol, withdraw_treasury,
-    },
+    processor::{authority, execute, session, wallet},
     state::{
         integrator_record::FeeRecord, protocol_config::ProtocolConfig,
         treasury_shard::TreasuryShard, AccountDiscriminator,
@@ -41,21 +37,21 @@ pub fn process_instruction(
     };
 
     match discriminator {
-        0 => create_wallet::process(program_id, processor_accounts, data),
-        1 => manage_authority::process_add_authority(program_id, processor_accounts, data),
-        2 => manage_authority::process_remove_authority(program_id, processor_accounts, data),
-        3 => transfer_ownership::process(program_id, processor_accounts, data),
-        4 => execute::process(program_id, processor_accounts, data),
-        5 => create_session::process(program_id, processor_accounts, data),
-        6 => authorize::process(program_id, processor_accounts, data),
-        7 => execute_deferred::process(program_id, processor_accounts, data),
-        8 => reclaim_deferred::process(program_id, processor_accounts, data),
-        9 => revoke_session::process(program_id, processor_accounts, data),
-        10 => initialize_protocol::process(program_id, accounts, data),
-        11 => update_protocol::process(program_id, accounts, data),
-        12 => register_integrator::process(program_id, accounts, data),
-        13 => withdraw_treasury::process(program_id, accounts, data),
-        14 => initialize_treasury_shard::process(program_id, accounts, data),
+        0 => wallet::create::process(program_id, processor_accounts, data),
+        1 => authority::manage::process_add_authority(program_id, processor_accounts, data),
+        2 => authority::manage::process_remove_authority(program_id, processor_accounts, data),
+        3 => authority::transfer_ownership::process(program_id, processor_accounts, data),
+        4 => execute::immediate::process(program_id, processor_accounts, data),
+        5 => session::create::process(program_id, processor_accounts, data),
+        6 => execute::authorize::process(program_id, processor_accounts, data),
+        7 => execute::deferred::process(program_id, processor_accounts, data),
+        8 => execute::reclaim::process(program_id, processor_accounts, data),
+        9 => session::revoke::process(program_id, processor_accounts, data),
+        10 => crate::processor::protocol::initialize_protocol::process(program_id, accounts, data),
+        11 => crate::processor::protocol::update_protocol::process(program_id, accounts, data),
+        12 => crate::processor::protocol::register_integrator::process(program_id, accounts, data),
+        13 => crate::processor::protocol::withdraw_treasury::process(program_id, accounts, data),
+        14 => crate::processor::protocol::initialize_treasury_shard::process(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
