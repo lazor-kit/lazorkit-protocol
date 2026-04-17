@@ -25,15 +25,30 @@ LazorKit Protocol is a revenue-enabled smart wallet on Solana with passkey (WebA
 
 ### Challenge Hash (Secp256r1)
 
+Two modes with different challenge computation:
+
+**Mode 0** (reconstructed clientDataJSON — programmatic/bot signing):
 ```
 SHA256(discriminator || auth_payload || signed_payload || payer || counter || program_id)
 ```
 
-6 elements, computed on-chain via `sol_sha256` syscall. Note: slot is already encoded as the first 8 bytes of `auth_payload`, so it is not repeated as a separate element.
+**Mode 1** (raw clientDataJSON — real browser authenticators):
+```
+SHA256(discriminator || auth_payload_prefix[14] || signed_payload || payer || counter || program_id)
+```
+
+6 elements, computed on-chain via `sol_sha256` syscall. Slot is already encoded as the first 8 bytes of `auth_payload`, so it is not repeated separately.
+
+Mode 1 uses only the 14-byte deterministic prefix `[slot(8)][counter(4)][sysvarIxIdx(1)][mode(1)]` instead of the full auth_payload. This avoids a circular dependency: the full auth_payload contains `clientDataJSON`, which is only produced by the authenticator **after** signing the challenge.
 
 ### WebAuthn Passkey Support
 
-- Reconstructs clientDataJSON on-chain from packed flags.
+Two authentication modes, selected by bit 7 of the flags byte (offset 13 in auth_payload):
+
+- **Mode 0** (`flags & 0x80 == 0`): Reconstructs `clientDataJSON` on-chain from packed flags. For programmatic/bot signing where the SDK controls the exact JSON format.
+- **Mode 1** (`flags & 0x80 != 0`): Receives raw `clientDataJSON` bytes from the authenticator. Validates `challenge` and `type` fields via JSON scanning, then hashes the raw bytes. For real browser authenticators (Chrome, Safari, Android, security keys) which produce varying JSON formats.
+
+Common properties:
 - Verifies authenticatorData flags (User Presence / User Verification).
 - Uses Secp256r1SigVerify precompile via sysvar introspection.
 - Stores 33-byte compressed public keys (not 64-byte uncompressed).
@@ -427,15 +442,35 @@ For Secp256r1 Execute, the signed payload includes a SHA256 hash of all account 
 
 ## 8. Auth Payload Layout (Secp256r1)
 
+### Mode 0 — Reconstructed clientDataJSON (programmatic signing)
+
 ```
 [slot: u64 LE]              // 8 bytes  -- Clock-based slot freshness
 [counter: u32 LE]           // 4 bytes  -- odometer value (stored + 1)
 [sysvar_ix_index: u8]       // 1 byte   -- index of sysvar_instructions in accounts
-[type_and_flags: u8]        // 1 byte   -- WebAuthn type + flags
+[type_and_flags: u8]        // 1 byte   -- WebAuthn type + flags (bit 7 clear)
 [authenticator_data: u8[]]  // M bytes  -- WebAuthn authenticator data (min 37 bytes)
 ```
 
-Compared to the previous layout, 3 optimizations reduce the per-transaction payload:
+### Mode 1 — Raw clientDataJSON (real browser authenticators)
+
+```
+[slot: u64 LE]              // 8 bytes  -- Clock-based slot freshness
+[counter: u32 LE]           // 4 bytes  -- odometer value (stored + 1)
+[sysvar_ix_index: u8]       // 1 byte   -- index of sysvar_instructions in accounts
+[0x80: u8]                  // 1 byte   -- Mode 1 flag (bit 7 set)
+[auth_data_len: u16 LE]     // 2 bytes  -- length of authenticator data
+[authenticator_data: u8[]]  // M bytes  -- WebAuthn authenticator data
+[cdj_len: u16 LE]           // 2 bytes  -- length of clientDataJSON
+[client_data_json: u8[]]    // N bytes  -- raw clientDataJSON from authenticator
+```
+
+Mode detection: byte 13 (flags). If `flags & 0x80 != 0` → Mode 1. No valid Mode 0 value has bit 7 set (max is `0x17`), so this is backward compatible.
+
+Mode 1 is the default for real WebAuthn flows. The on-chain program validates the `challenge` and `type` fields inside the raw clientDataJSON, then hashes the raw bytes. This handles browser-specific JSON variations (field order, extra fields like `androidPackageName`, missing `crossOrigin` on Safari).
+
+### Layout optimizations (both modes)
+
 - **Counter**: u64 -> u32 (saves 4 bytes; 4 billion ops per authority is sufficient)
 - **SlotHashes index**: removed (slot freshness via `Clock::get()` instead of sysvar lookup)
 - **rpId**: stored on the authority account at creation, not sent per-tx (saves ~12 bytes)
@@ -487,8 +522,8 @@ sdk/sdk-legacy/
     utils/
       instructions.ts         Hand-written instruction builders
       client.ts               LazorKitClient API (wallet ops + protocol + wallet lookup)
-      types.ts                Discriminated union signer types
-      signing.ts              Secp256r1 signing utilities + data payload builders
+      types.ts                Signer types, Secp256r1Params, WebAuthnResponse
+      signing.ts              Two-phase Secp256r1 signing (prepare/finalize) + data payload builders
       compact.ts              CompactInstruction layout builder
       pdas.ts                 PDA derivation helpers
       secp256r1.ts            Challenge hash + auth payload builders
@@ -496,7 +531,7 @@ sdk/sdk-legacy/
       actions.ts              Session action serializer
       accounts.ts             On-chain account decoders
       errors.ts               Error code mapping (3001-3029 + 4001-4007)
-tests-sdk/                    Integration + security tests (vitest, ~75 tests, 12 suites)
+tests-sdk/                    Integration + security tests (vitest, ~91 tests, 13 suites)
 docs/
   Architecture.md             This document
   Costs.md                    CU benchmarks, rent costs

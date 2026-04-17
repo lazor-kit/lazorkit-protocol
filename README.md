@@ -19,8 +19,8 @@ A high-performance smart wallet on Solana with passkey (WebAuthn/Secp256r1) auth
 ## Quick Start
 
 ```typescript
-import { Connection, Keypair, Transaction, sendAndConfirmTransaction, SystemProgram } from '@solana/web3.js';
-import { LazorKitClient, ed25519, secp256r1, session, ROLE_ADMIN } from '@lazorkit/sdk-legacy';
+import { Connection, Transaction, sendAndConfirmTransaction, SystemProgram } from '@solana/web3.js';
+import { LazorKitClient, ed25519, session, ROLE_ADMIN } from '@lazorkit/sdk-legacy';
 import * as crypto from 'crypto';
 
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
@@ -30,7 +30,7 @@ const client = new LazorKitClient(connection);
 ### Create a Wallet
 
 ```typescript
-const { instructions, walletPda, vaultPda } = client.createWallet({
+const { instructions, walletPda, vaultPda, authorityPda } = await client.createWallet({
   payer: payer.publicKey,
   userSeed: crypto.randomBytes(32),
   owner: {
@@ -42,16 +42,22 @@ const { instructions, walletPda, vaultPda } = client.createWallet({
 });
 ```
 
-### Transfer SOL
+### Transfer SOL (Passkey — Two-Phase Flow)
 
 ```typescript
-const { instructions } = await client.transferSol({
+// Step 1: SDK computes the challenge
+const prepared = await client.prepareExecute({
   payer: payer.publicKey,
   walletPda,
-  signer: secp256r1(mySigner),
-  recipient,
-  lamports: 1_000_000n,
+  secp256r1: { credentialIdHash, publicKeyBytes: compressedPubkey, authorityPda },
+  instructions: [SystemProgram.transfer({ fromPubkey: vaultPda, toPubkey: recipient, lamports: 1_000_000 })],
 });
+
+// Step 2: Browser authenticator signs the challenge
+const webauthnResponse = await getWebAuthnResponse(prepared.challenge, 'your-app.com', credentialId);
+
+// Step 3: SDK builds the transaction
+const { instructions } = client.finalizeExecute(prepared, webauthnResponse);
 ```
 
 ### Find Wallet by Credential (Returning Users)
@@ -100,22 +106,23 @@ const { instructions, sessionPda } = await client.createSession({
 });
 ```
 
-### Create a Token-Limited Session
+### Create a Token-Limited Session (Passkey Admin)
 
 ```typescript
-const { instructions, sessionPda } = await client.createSession({
+// Passkey admin uses prepare/finalize
+const prepared = await client.prepareCreateSession({
   payer: payer.publicKey,
   walletPda,
-  adminSigner: secp256r1(ownerSigner),
+  secp256r1: { credentialIdHash, publicKeyBytes, authorityPda },
   sessionKey: sessionKp.publicKey,
   expiresAt: currentSlot + 432_000n,  // ~2 days
   actions: [
-    // 1000 USDC lifetime cap
     { type: 'TokenLimit', mint: USDC_MINT, remaining: 1_000_000_000n },
-    // Max 100 USDC per transaction
     { type: 'TokenMaxPerTx', mint: USDC_MINT, max: 100_000_000n },
   ],
 });
+const webauthnResponse = await getWebAuthnResponse(prepared.challenge, 'your-app.com', credentialId);
+const { instructions, sessionPda } = client.finalizeCreateSession(prepared, webauthnResponse);
 ```
 
 ### Unrestricted Session (No Actions)
