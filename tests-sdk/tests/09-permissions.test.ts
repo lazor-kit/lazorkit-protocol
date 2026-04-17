@@ -18,14 +18,13 @@ import {
   getSlot,
   type TestContext,
 } from './common';
-import { generateMockSecp256r1Key, createMockSigner } from './secp256r1Utils';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
   LazorKitClient,
   AUTH_TYPE_ED25519,
   ROLE_ADMIN,
   ROLE_SPENDER,
   ed25519,
-  secp256r1,
 } from '../../sdk/sdk-legacy/src';
 
 describe('Permission Boundaries', () => {
@@ -234,13 +233,16 @@ describe('Permission Boundaries', () => {
       secpOwnerAuthPda = result.authorityPda;
       await sendTx(ctx, result.instructions);
 
-      // Owner adds Secp256r1 spender
+      // Owner adds Secp256r1 spender via prepare/finalize
       secpSpenderKey = await generateMockSecp256r1Key();
-      const ownerSigner = createMockSigner(secpOwnerKey);
-      const addResult = await client.addAuthority({
+      const prepared = await client.prepareAddAuthority({
         payer: ctx.payer.publicKey,
         walletPda: secpWalletPda,
-        adminSigner: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
+        secp256r1: {
+          credentialIdHash: secpOwnerKey.credentialIdHash,
+          publicKeyBytes: secpOwnerKey.publicKeyBytes,
+          authorityPda: secpOwnerAuthPda,
+        },
         newAuthority: {
           type: 'secp256r1',
           credentialIdHash: secpSpenderKey.credentialIdHash,
@@ -249,21 +251,31 @@ describe('Permission Boundaries', () => {
         },
         role: ROLE_SPENDER,
       });
+      const response = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+      const addResult = client.finalizeAddAuthority(prepared, response);
       secpSpenderAuthPda = addResult.newAuthorityPda;
       await sendTx(ctx, addResult.instructions);
     });
 
     it('secp256r1 spender cannot add authority', async () => {
       const newKp = Keypair.generate();
-      const spenderSigner = createMockSigner(secpSpenderKey);
 
-      const { instructions } = await client.addAuthority({
+      const prepared = await client.prepareAddAuthority({
         payer: ctx.payer.publicKey,
         walletPda: secpWalletPda,
-        adminSigner: secp256r1(spenderSigner, { authorityPda: secpSpenderAuthPda }),
+        secp256r1: {
+          credentialIdHash: secpSpenderKey.credentialIdHash,
+          publicKeyBytes: secpSpenderKey.publicKeyBytes,
+          authorityPda: secpSpenderAuthPda,
+        },
         newAuthority: { type: 'ed25519', publicKey: newKp.publicKey },
         role: ROLE_SPENDER,
       });
+      const response = await fakeWebAuthnSign(
+        secpSpenderKey,
+        prepared.challenge,
+      );
+      const { instructions } = client.finalizeAddAuthority(prepared, response);
 
       await sendTxExpectError(ctx, instructions, [], 3002);
     });
@@ -271,15 +283,23 @@ describe('Permission Boundaries', () => {
     it('secp256r1 spender cannot create session', async () => {
       const sessionKp = Keypair.generate();
       const currentSlot = await getSlot(ctx);
-      const spenderSigner = createMockSigner(secpSpenderKey);
 
-      const { instructions } = await client.createSession({
+      const prepared = await client.prepareCreateSession({
         payer: ctx.payer.publicKey,
         walletPda: secpWalletPda,
-        adminSigner: secp256r1(spenderSigner, { authorityPda: secpSpenderAuthPda }),
+        secp256r1: {
+          credentialIdHash: secpSpenderKey.credentialIdHash,
+          publicKeyBytes: secpSpenderKey.publicKeyBytes,
+          authorityPda: secpSpenderAuthPda,
+        },
         sessionKey: sessionKp.publicKey,
         expiresAt: currentSlot + 9000n,
       });
+      const response = await fakeWebAuthnSign(
+        secpSpenderKey,
+        prepared.challenge,
+      );
+      const { instructions } = client.finalizeCreateSession(prepared, response);
 
       await sendTxExpectError(ctx, instructions, [], 3002);
     });
