@@ -1,6 +1,4 @@
-#[allow(unused_imports)]
 use crate::error::AuthError;
-#[allow(unused_imports)]
 use pinocchio::program_error::ProgramError;
 
 /// Packed flags for clientDataJson reconstruction
@@ -115,6 +113,10 @@ pub fn reconstruct_client_data_json(
 /// Minimum authenticator data length: rpIdHash(32) + flags(1) + counter(4) = 37
 pub const AUTH_DATA_MIN_LEN: usize = 37;
 
+/// Mode bit in the flags byte (auth_payload[13]).
+/// When set, the client sends raw clientDataJSON instead of reconstruction flags.
+pub const MODE_RAW_CLIENT_DATA_JSON: u8 = 0x80;
+
 /// Parser for WebAuthn authenticator data
 pub struct AuthDataParser<'a> {
     data: &'a [u8],
@@ -142,5 +144,574 @@ impl<'a> AuthDataParser<'a> {
 
     pub fn counter(&self) -> u32 {
         u32::from_be_bytes(self.data[33..37].try_into().unwrap())
+    }
+}
+
+/// Extracts a top-level string value for a given key from a JSON object.
+///
+/// Walks `{"key":"value", ...}` looking for the specified key at depth 1.
+/// Returns the value bytes (without quotes). Rejects escaped strings
+/// (backslash inside key or value) to prevent challenge injection.
+pub fn extract_top_level_string_field<'a>(
+    json: &'a [u8],
+    field_name: &[u8],
+) -> Result<&'a [u8], ProgramError> {
+    // Skip leading whitespace
+    let mut i = 0;
+    while i < json.len() && json[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= json.len() || json[i] != b'{' {
+        return Err(AuthError::InvalidMessage.into());
+    }
+
+    let mut depth: usize = 0;
+    let mut cursor = i;
+
+    while cursor < json.len() {
+        let byte = json[cursor];
+
+        if byte == b'{' {
+            depth += 1;
+            cursor += 1;
+            continue;
+        }
+        if byte == b'}' {
+            if depth == 0 {
+                return Err(AuthError::InvalidMessage.into());
+            }
+            depth -= 1;
+            cursor += 1;
+            continue;
+        }
+
+        // Only parse keys at the top level (depth == 1)
+        if depth == 1 && byte == b'"' {
+            // Parse key
+            let key_start = cursor + 1;
+            let mut key_end = key_start;
+            while key_end < json.len() {
+                let b = json[key_end];
+                if b == b'"' {
+                    break;
+                }
+                if b == b'\\' {
+                    return Err(AuthError::InvalidMessage.into());
+                }
+                key_end += 1;
+            }
+            if key_end >= json.len() {
+                return Err(AuthError::InvalidMessage.into());
+            }
+
+            // Skip past closing quote
+            cursor = key_end + 1;
+
+            // Skip whitespace before colon
+            while cursor < json.len() && json[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor >= json.len() || json[cursor] != b':' {
+                return Err(AuthError::InvalidMessage.into());
+            }
+            cursor += 1;
+
+            // Skip whitespace after colon
+            while cursor < json.len() && json[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor >= json.len() {
+                return Err(AuthError::InvalidMessage.into());
+            }
+
+            // Check if this is the field we want
+            if &json[key_start..key_end] == field_name {
+                // Value must be a string
+                if json[cursor] != b'"' {
+                    return Err(AuthError::InvalidMessage.into());
+                }
+                let value_start = cursor + 1;
+                let mut value_end = value_start;
+                while value_end < json.len() {
+                    let b = json[value_end];
+                    if b == b'"' {
+                        return Ok(&json[value_start..value_end]);
+                    }
+                    if b == b'\\' {
+                        return Err(AuthError::InvalidMessage.into());
+                    }
+                    value_end += 1;
+                }
+                return Err(AuthError::InvalidMessage.into());
+            }
+
+            // Not our field — skip the value
+            if json[cursor] == b'"' {
+                // String value — skip to closing quote
+                cursor += 1;
+                while cursor < json.len() {
+                    let b = json[cursor];
+                    if b == b'"' {
+                        cursor += 1;
+                        break;
+                    }
+                    if b == b'\\' {
+                        return Err(AuthError::InvalidMessage.into());
+                    }
+                    cursor += 1;
+                }
+            } else {
+                // Non-string value (number, bool, null, object, array) — skip to next comma or }
+                // Track nested structures
+                let mut nest: usize = 0;
+                while cursor < json.len() {
+                    match json[cursor] {
+                        b'{' | b'[' => nest += 1,
+                        b'}' | b']' => {
+                            if nest == 0 {
+                                break;
+                            }
+                            nest -= 1;
+                        }
+                        b',' if nest == 0 => break,
+                        _ => {}
+                    }
+                    cursor += 1;
+                }
+            }
+            continue;
+        }
+
+        cursor += 1;
+    }
+
+    Err(AuthError::InvalidMessage.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── extract_top_level_string_field tests ───────────────────────────
+
+    #[test]
+    fn test_extract_field_basic() {
+        let json = br#"{"type":"webauthn.get","challenge":"abc123","origin":"https://example.com"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"type").unwrap(),
+            b"webauthn.get"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"abc123"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"origin").unwrap(),
+            b"https://example.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_with_bool_value() {
+        let json =
+            br#"{"type":"webauthn.get","challenge":"abc","crossOrigin":false,"origin":"https://x.com"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"origin").unwrap(),
+            b"https://x.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_with_nested_object() {
+        // Real Android clientDataJSON has extra fields like androidPackageName
+        let json =
+            br#"{"type":"webauthn.get","challenge":"xyz","origin":"https://a.com","androidPackageName":"com.example.app"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"type").unwrap(),
+            b"webauthn.get"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"xyz"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_with_nested_json_object() {
+        // Nested object should be skipped when looking for top-level keys
+        let json = br#"{"nested":{"challenge":"fake"},"type":"webauthn.get","challenge":"real"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"real"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"type").unwrap(),
+            b"webauthn.get"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_missing_key() {
+        let json = br#"{"type":"webauthn.get"}"#;
+        assert!(extract_top_level_string_field(json, b"challenge").is_err());
+    }
+
+    #[test]
+    fn test_extract_field_rejects_escaped_key() {
+        // Backslash in key → reject (prevents injection)
+        let json = br#"{"ty\"pe":"webauthn.get"}"#;
+        assert!(extract_top_level_string_field(json, b"type").is_err());
+    }
+
+    #[test]
+    fn test_extract_field_rejects_escaped_value() {
+        // Backslash in value → reject
+        let json = br#"{"challenge":"abc\"def"}"#;
+        assert!(extract_top_level_string_field(json, b"challenge").is_err());
+    }
+
+    #[test]
+    fn test_extract_field_rejects_non_string_value() {
+        // challenge is a number, not a string → reject
+        let json = br#"{"challenge":12345}"#;
+        assert!(extract_top_level_string_field(json, b"challenge").is_err());
+    }
+
+    #[test]
+    fn test_extract_field_rejects_empty_input() {
+        assert!(extract_top_level_string_field(b"", b"type").is_err());
+    }
+
+    #[test]
+    fn test_extract_field_rejects_not_object() {
+        assert!(extract_top_level_string_field(b"[1,2,3]", b"type").is_err());
+    }
+
+    #[test]
+    fn test_extract_field_nested_challenge_not_found_at_top() {
+        // challenge only exists inside a nested object — should not be found
+        let json = br#"{"type":"webauthn.get","nested":{"challenge":"sneaky"}}"#;
+        assert!(extract_top_level_string_field(json, b"challenge").is_err());
+    }
+
+    #[test]
+    fn test_extract_field_with_whitespace() {
+        let json = br#"{ "type" : "webauthn.get" , "challenge" : "abc" }"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"type").unwrap(),
+            b"webauthn.get"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"abc"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_google_extra() {
+        // Google Chrome adds this extra field
+        let json = br#"{"type":"webauthn.get","challenge":"abc","origin":"https://x.com","crossOrigin":false,"other_keys_can_be_added_here":"do not compare clientDataJSON against a template. See https://goo.gl/yabPex"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"type").unwrap(),
+            b"webauthn.get"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_with_array_value() {
+        // Array value should be skipped properly
+        let json = br#"{"arr":[1,2,3],"challenge":"abc"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"abc"
+        );
+    }
+
+    #[test]
+    fn test_extract_field_with_nested_array_of_objects() {
+        let json = br#"{"arr":[{"challenge":"fake"},{"x":1}],"challenge":"real"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"real"
+        );
+    }
+
+    // ─── base64url_encode_no_pad tests ──────────────────────────────────
+
+    #[test]
+    fn test_base64url_encode_empty() {
+        assert_eq!(base64url_encode_no_pad(&[]), b"");
+    }
+
+    #[test]
+    fn test_base64url_encode_known_vectors() {
+        // "f" → "Zg"
+        assert_eq!(base64url_encode_no_pad(b"f"), b"Zg");
+        // "fo" → "Zm8"
+        assert_eq!(base64url_encode_no_pad(b"fo"), b"Zm8");
+        // "foo" → "Zm9v"
+        assert_eq!(base64url_encode_no_pad(b"foo"), b"Zm9v");
+    }
+
+    #[test]
+    fn test_base64url_encode_32_bytes() {
+        // SHA256 output (32 bytes) → 43 base64url chars (no padding)
+        let data = [0x11u8; 32];
+        let encoded = base64url_encode_no_pad(&data);
+        assert_eq!(encoded.len(), 43);
+        // Verify no padding characters
+        assert!(!encoded.contains(&b'='));
+        // Verify URL-safe: no + or /
+        assert!(!encoded.contains(&b'+'));
+        assert!(!encoded.contains(&b'/'));
+    }
+
+    #[test]
+    fn test_base64url_uses_url_safe_chars() {
+        // 0xFB, 0xFF → should produce '-' and '_' instead of '+' and '/'
+        let data = [0xFB, 0xFF, 0xFE];
+        let encoded = base64url_encode_no_pad(&data);
+        let encoded_str = std::str::from_utf8(&encoded).unwrap();
+        assert!(
+            !encoded_str.contains('+') && !encoded_str.contains('/'),
+            "Must use URL-safe alphabet"
+        );
+    }
+
+    // ─── reconstruct_client_data_json tests ─────────────────────────────
+
+    #[test]
+    fn test_reconstruct_webauthn_get_https() {
+        let params = ClientDataJsonReconstructionParams {
+            type_and_flags: 0x10, // webauthn.get + https
+        };
+        let json = reconstruct_client_data_json(&params, b"example.com", b"challenge123");
+        let json_str = std::str::from_utf8(&json).unwrap();
+        assert!(json_str.starts_with(r#"{"type":"webauthn.get","challenge":""#));
+        assert!(json_str.contains(r#""origin":"https://example.com""#));
+        assert!(json_str.contains(r#""crossOrigin":false"#));
+    }
+
+    #[test]
+    fn test_reconstruct_webauthn_get_http() {
+        let params = ClientDataJsonReconstructionParams {
+            type_and_flags: 0x12, // webauthn.get + http
+        };
+        let json = reconstruct_client_data_json(&params, b"localhost", b"test");
+        let json_str = std::str::from_utf8(&json).unwrap();
+        assert!(json_str.contains(r#""origin":"http://localhost""#));
+    }
+
+    #[test]
+    fn test_reconstruct_cross_origin() {
+        let params = ClientDataJsonReconstructionParams {
+            type_and_flags: 0x11, // webauthn.get + https + crossOrigin
+        };
+        let json = reconstruct_client_data_json(&params, b"example.com", b"test");
+        let json_str = std::str::from_utf8(&json).unwrap();
+        assert!(json_str.contains(r#""crossOrigin":true"#));
+    }
+
+    #[test]
+    fn test_reconstruct_google_extra() {
+        let params = ClientDataJsonReconstructionParams {
+            type_and_flags: 0x14, // webauthn.get + https + google extra
+        };
+        let json = reconstruct_client_data_json(&params, b"example.com", b"test");
+        let json_str = std::str::from_utf8(&json).unwrap();
+        assert!(json_str.contains(r#""other_keys_can_be_added_here""#));
+    }
+
+    #[test]
+    fn test_reconstruct_webauthn_create() {
+        let params = ClientDataJsonReconstructionParams {
+            type_and_flags: 0x00, // webauthn.create + https
+        };
+        let json = reconstruct_client_data_json(&params, b"example.com", b"test");
+        let json_str = std::str::from_utf8(&json).unwrap();
+        assert!(json_str.contains(r#""type":"webauthn.create""#));
+    }
+
+    // ─── AuthDataParser tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_auth_data_parser_basic() {
+        let mut data = [0u8; 37];
+        // rpIdHash = first 32 bytes (zeros)
+        data[32] = 0x05; // flags: user present (0x01) + user verified (0x04)
+        data[33..37].copy_from_slice(&[0, 0, 0, 42]); // counter = 42 (big-endian)
+
+        let parser = AuthDataParser::new(&data).unwrap();
+        assert!(parser.is_user_present());
+        assert!(parser.is_user_verified());
+        assert_eq!(parser.counter(), 42);
+        assert_eq!(parser.rp_id_hash(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn test_auth_data_parser_no_flags() {
+        let data = [0u8; 37];
+        let parser = AuthDataParser::new(&data).unwrap();
+        assert!(!parser.is_user_present());
+        assert!(!parser.is_user_verified());
+    }
+
+    #[test]
+    fn test_auth_data_parser_too_short() {
+        let data = [0u8; 36]; // Less than 37
+        assert!(AuthDataParser::new(&data).is_err());
+    }
+
+    #[test]
+    fn test_auth_data_parser_with_extensions() {
+        // Real authenticators may return > 37 bytes (with extensions)
+        let mut data = [0u8; 100];
+        data[32] = 0x41; // user present + attested credential data
+        let parser = AuthDataParser::new(&data).unwrap();
+        assert!(parser.is_user_present());
+    }
+
+    // ─── MODE_RAW_CLIENT_DATA_JSON tests ────────────────────────────────
+
+    #[test]
+    fn test_mode_bit_does_not_conflict_with_existing_flags() {
+        // All valid Mode 0 flag values should have bit 7 clear
+        let valid_mode0_flags: &[u8] = &[
+            0x00, // webauthn.create + https
+            0x01, // webauthn.create + https + crossOrigin
+            0x02, // webauthn.create + http
+            0x04, // webauthn.create + google extra
+            0x10, // webauthn.get + https
+            0x11, // webauthn.get + https + crossOrigin
+            0x12, // webauthn.get + http
+            0x14, // webauthn.get + google extra
+            0x17, // webauthn.get + all flags
+        ];
+        for &flags in valid_mode0_flags {
+            assert_eq!(
+                flags & MODE_RAW_CLIENT_DATA_JSON,
+                0,
+                "Mode 0 flag 0x{:02x} must not have bit 7 set",
+                flags
+            );
+        }
+    }
+
+    #[test]
+    fn test_mode_raw_is_detected() {
+        assert_ne!(0x80 & MODE_RAW_CLIENT_DATA_JSON, 0);
+        assert_ne!(0xFF & MODE_RAW_CLIENT_DATA_JSON, 0);
+    }
+
+    // ─── Round-trip: reconstruct then extract ───────────────────────────
+
+    #[test]
+    fn test_roundtrip_reconstruct_then_extract() {
+        let challenge = [0xABu8; 32];
+        let params = ClientDataJsonReconstructionParams {
+            type_and_flags: 0x10,
+        };
+        let json = reconstruct_client_data_json(&params, b"example.com", &challenge);
+
+        // Extract challenge back from reconstructed JSON
+        let extracted_challenge =
+            extract_top_level_string_field(&json, b"challenge").unwrap();
+        let expected_b64 = base64url_encode_no_pad(&challenge);
+        assert_eq!(extracted_challenge, expected_b64.as_slice());
+
+        // Extract type
+        let extracted_type = extract_top_level_string_field(&json, b"type").unwrap();
+        assert_eq!(extracted_type, b"webauthn.get");
+
+        // Extract origin
+        let extracted_origin = extract_top_level_string_field(&json, b"origin").unwrap();
+        assert_eq!(extracted_origin, b"https://example.com");
+    }
+
+    #[test]
+    fn test_roundtrip_with_google_extra() {
+        let challenge = [0xCDu8; 32];
+        let params = ClientDataJsonReconstructionParams {
+            type_and_flags: 0x14, // google extra
+        };
+        let json = reconstruct_client_data_json(&params, b"google.com", &challenge);
+
+        let extracted_challenge =
+            extract_top_level_string_field(&json, b"challenge").unwrap();
+        let expected_b64 = base64url_encode_no_pad(&challenge);
+        assert_eq!(extracted_challenge, expected_b64.as_slice());
+
+        let extracted_type = extract_top_level_string_field(&json, b"type").unwrap();
+        assert_eq!(extracted_type, b"webauthn.get");
+    }
+
+    // ─── Real-world clientDataJSON samples ──────────────────────────────
+
+    #[test]
+    fn test_extract_from_chrome_sample() {
+        let json = br#"{"type":"webauthn.get","challenge":"dGVzdC1jaGFsbGVuZ2U","origin":"https://lazorkit.app","crossOrigin":false}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"type").unwrap(),
+            b"webauthn.get"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"dGVzdC1jaGFsbGVuZ2U"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"origin").unwrap(),
+            b"https://lazorkit.app"
+        );
+    }
+
+    #[test]
+    fn test_extract_from_android_sample() {
+        // Android may include androidPackageName and topOrigin
+        let json = br#"{"type":"webauthn.get","challenge":"abc123","origin":"https://example.com","androidPackageName":"com.example.app","topOrigin":"https://example.com"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"type").unwrap(),
+            b"webauthn.get"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"abc123"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"androidPackageName").unwrap(),
+            b"com.example.app"
+        );
+    }
+
+    #[test]
+    fn test_extract_from_safari_no_crossorigin() {
+        // Safari may omit crossOrigin entirely
+        let json =
+            br#"{"type":"webauthn.get","challenge":"xyz","origin":"https://lazorkit.app"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"type").unwrap(),
+            b"webauthn.get"
+        );
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"xyz"
+        );
+        // crossOrigin field doesn't exist → error
+        assert!(extract_top_level_string_field(json, b"crossOrigin").is_err());
+    }
+
+    #[test]
+    fn test_extract_rejects_webauthn_create_type() {
+        let json = br#"{"type":"webauthn.create","challenge":"abc"}"#;
+        let type_val = extract_top_level_string_field(json, b"type").unwrap();
+        assert_ne!(type_val, b"webauthn.get");
+        assert_eq!(type_val, b"webauthn.create");
     }
 }
