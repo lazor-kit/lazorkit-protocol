@@ -1,16 +1,142 @@
 import { PublicKey, TransactionInstruction } from '@solana/web3.js';
 import {
   buildAuthPayload,
+  buildAuthPayloadPrefix,
   buildSecp256r1Challenge,
   generateAuthenticatorData,
+  MODE_RAW_CLIENT_DATA_JSON,
   type Secp256r1Signer,
 } from './secp256r1';
 import { AUTH_TYPE_SECP256R1 } from './instructions';
 
-// ─── Secp256r1 signing flow ─────────────────────────────────────────
+// ─── Two-phase Secp256r1 signing flow ───────────────────────────────
+//
+// Real browser WebAuthn flows are async (popups, redirects, cross-page).
+// The SDK splits signing into two phases:
+//
+//   1. prepare  → computes the challenge (send this to the authenticator page)
+//   2. finalize → takes the WebAuthn response, builds authPayload + precompile ix
+//
+// For programmatic/bot signing (Mode 0), use `signWithSecp256r1()` which
+// wraps both phases in a single call.
+
+/** Output of prepareSecp256r1 — everything needed to call the authenticator. */
+export interface PreparedSecp256r1 {
+  /** The SHA-256 challenge to pass to `navigator.credentials.get()` */
+  challenge: Uint8Array;
+  /** Signing params preserved for the finalize step */
+  _internal: {
+    slot: bigint;
+    counter: number;
+    sysvarIxIndex: number;
+    publicKeyBytes: Uint8Array;
+  };
+}
+
+/** Raw WebAuthn authenticator response — what the browser gives back. */
+export interface WebAuthnResponse {
+  /** 64-byte raw ECDSA signature (r || s), low-S normalized */
+  signature: Uint8Array;
+  /** Authenticator data bytes from the WebAuthn response */
+  authenticatorData: Uint8Array;
+  /** SHA256 of the clientDataJSON */
+  clientDataJsonHash: Uint8Array;
+  /** Raw clientDataJSON bytes from the authenticator */
+  clientDataJson: Uint8Array;
+}
 
 /**
- * Full Secp256r1 signing: build auth payload, compute challenge, sign, build precompile ix.
+ * Phase 1: Prepare the challenge for a real browser authenticator (Mode 1).
+ *
+ * Computes the SHA-256 challenge that must be passed to `navigator.credentials.get()`.
+ * After the user signs with their passkey, call `finalizeSecp256r1()` with the response.
+ */
+export function prepareSecp256r1(params: {
+  discriminator: Uint8Array;
+  signedPayload: Uint8Array;
+  sysvarIxIndex: number;
+  slot: bigint;
+  counter: number;
+  payer: PublicKey;
+  programId: PublicKey;
+  publicKeyBytes: Uint8Array;
+}): PreparedSecp256r1 {
+  const challengePrefix = buildAuthPayloadPrefix({
+    slot: params.slot,
+    counter: params.counter,
+    sysvarIxIndex: params.sysvarIxIndex,
+  });
+
+  const challenge = buildSecp256r1Challenge({
+    discriminator: params.discriminator,
+    authPayload: challengePrefix,
+    signedPayload: params.signedPayload,
+    slot: params.slot,
+    payer: params.payer,
+    counter: params.counter,
+    programId: params.programId,
+  });
+
+  return {
+    challenge,
+    _internal: {
+      slot: params.slot,
+      counter: params.counter,
+      sysvarIxIndex: params.sysvarIxIndex,
+      publicKeyBytes: params.publicKeyBytes,
+    },
+  };
+}
+
+/**
+ * Phase 2: Finalize the signing flow after the user authenticates (Mode 1).
+ *
+ * Takes the raw WebAuthn response from the browser and produces the
+ * auth payload + precompile instruction for the transaction.
+ */
+export function finalizeSecp256r1(
+  prepared: PreparedSecp256r1,
+  response: WebAuthnResponse,
+): {
+  authPayload: Uint8Array;
+  precompileIx: TransactionInstruction;
+} {
+  const { slot, counter, sysvarIxIndex, publicKeyBytes } = prepared._internal;
+
+  const authPayload = buildAuthPayload({
+    slot,
+    counter,
+    sysvarIxIndex,
+    typeAndFlags: MODE_RAW_CLIENT_DATA_JSON,
+    authenticatorData: response.authenticatorData,
+    clientDataJson: response.clientDataJson,
+  });
+
+  const precompileMessage = concatParts([
+    response.authenticatorData,
+    response.clientDataJsonHash,
+  ]);
+  const precompileIx = buildSecp256r1PrecompileIx(
+    publicKeyBytes,
+    precompileMessage,
+    response.signature,
+  );
+
+  return { authPayload, precompileIx };
+}
+
+// ─── Single-call convenience (Mode 0 + Mode 1) ─────────────────────
+
+/**
+ * Full Secp256r1 signing in a single call.
+ *
+ * **Default (Mode 1 — raw clientDataJSON):** For real browser authenticators.
+ * The signer's `sign()` must return `clientDataJson` bytes.
+ *
+ * **Mode 0 (`rawMode: false`):** For programmatic/bot signing.
+ * The SDK generates authenticatorData and the on-chain program reconstructs clientDataJSON.
+ *
+ * For async browser flows (popups, redirects), use `prepareSecp256r1()` + `finalizeSecp256r1()` instead.
  */
 export async function signWithSecp256r1(params: {
   signer: Secp256r1Signer;
@@ -21,10 +147,46 @@ export async function signWithSecp256r1(params: {
   counter: number;
   payer: PublicKey;
   programId: PublicKey;
+  /** Set to false for programmatic signing (Mode 0). Defaults to true (Mode 1: raw clientDataJSON). */
+  rawMode?: boolean;
 }): Promise<{
   authPayload: Uint8Array;
   precompileIx: TransactionInstruction;
 }> {
+  const rawMode = params.rawMode ?? true;
+
+  if (rawMode) {
+    // Mode 1: Raw clientDataJSON
+    const prepared = prepareSecp256r1({
+      discriminator: params.discriminator,
+      signedPayload: params.signedPayload,
+      sysvarIxIndex: params.sysvarIxIndex,
+      slot: params.slot,
+      counter: params.counter,
+      payer: params.payer,
+      programId: params.programId,
+      publicKeyBytes: params.signer.publicKeyBytes,
+    });
+
+    const { signature, authenticatorData, clientDataJsonHash, clientDataJson } =
+      await params.signer.sign(prepared.challenge);
+
+    if (!clientDataJson) {
+      throw new Error(
+        'Signer must return clientDataJson bytes in raw mode (Mode 1). ' +
+        'Ensure your signer returns the raw clientDataJSON from the authenticator.',
+      );
+    }
+
+    return finalizeSecp256r1(prepared, {
+      signature,
+      authenticatorData,
+      clientDataJsonHash,
+      clientDataJson,
+    });
+  }
+
+  // Mode 0: Reconstructed clientDataJSON (programmatic signing)
   const authenticatorData = generateAuthenticatorData(params.signer.rpId);
 
   const authPayload = buildAuthPayload({

@@ -28,7 +28,12 @@ export interface Ed25519SignerConfig {
   authorityPda?: PublicKey;
 }
 
-/** Secp256r1 (passkey / WebAuthn) signer */
+/**
+ * Secp256r1 (passkey / WebAuthn) signer.
+ *
+ * Defaults to Mode 1 (raw clientDataJSON) which works with all real browser authenticators.
+ * Set `rawMode: false` to use Mode 0 (on-chain reconstruction) for programmatic/bot signing.
+ */
 export interface Secp256r1SignerConfig {
   type: 'secp256r1';
   signer: Secp256r1Signer;
@@ -36,6 +41,8 @@ export interface Secp256r1SignerConfig {
   authorityPda?: PublicKey;
   /** Override slot (auto-fetched from connection if omitted) */
   slotOverride?: bigint;
+  /** WebAuthn mode. Defaults to true (raw clientDataJSON). Set false for programmatic signing. */
+  rawMode?: boolean;
 }
 
 /** Session key signer */
@@ -59,6 +66,23 @@ export interface DeferredPayload {
   remainingAccounts: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
 }
 
+// ─── Secp256r1 prepare/finalize types ────────────────────────────────
+
+/** Secp256r1 identity for prepare methods (no signer callback needed) */
+export interface Secp256r1Params {
+  /** SHA256 of the credential ID (32 bytes) — used as PDA seed */
+  credentialIdHash: Uint8Array;
+  /** Compressed public key (33 bytes) */
+  publicKeyBytes: Uint8Array;
+  /** Pre-derived authority PDA (auto-derived from credentialIdHash if omitted) */
+  authorityPda?: PublicKey;
+  /** Override slot (auto-fetched from connection if omitted) */
+  slotOverride?: bigint;
+}
+
+/** Raw WebAuthn authenticator response — what the browser gives back */
+export { type WebAuthnResponse } from './signing';
+
 // ─── Helper constructors ──────────────────────────────────────────────
 
 export function ed25519(publicKey: PublicKey, authorityPda?: PublicKey): Ed25519SignerConfig {
@@ -67,7 +91,7 @@ export function ed25519(publicKey: PublicKey, authorityPda?: PublicKey): Ed25519
 
 export function secp256r1(
   signer: Secp256r1Signer,
-  opts?: { authorityPda?: PublicKey; slotOverride?: bigint },
+  opts?: { authorityPda?: PublicKey; slotOverride?: bigint; rawMode?: boolean },
 ): Secp256r1SignerConfig {
   return { type: 'secp256r1', signer, ...opts };
 }
