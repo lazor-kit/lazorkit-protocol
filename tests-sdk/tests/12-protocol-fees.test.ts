@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import * as crypto from 'crypto';
-import { setupTest, sendTx, sendTxExpectError, type TestContext } from './common';
 import {
-  LazorKitClient,
-  PROGRAM_ID,
-} from '../../sdk/sdk-legacy/src';
+  setupTest,
+  sendTx,
+  sendTxExpectError,
+  type TestContext,
+} from './common';
+import { LazorKitClient, PROGRAM_ID } from '../../sdk/sdk-legacy/src';
 
 const NUM_SHARDS = 4;
 
@@ -23,7 +25,10 @@ describe('Protocol Fees', () => {
     adminKp = Keypair.generate();
     treasuryKp = Keypair.generate();
 
-    const sig = await ctx.connection.requestAirdrop(adminKp.publicKey, 2 * LAMPORTS_PER_SOL);
+    const sig = await ctx.connection.requestAirdrop(
+      adminKp.publicKey,
+      2 * LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(sig, 'confirmed');
   });
 
@@ -60,11 +65,13 @@ describe('Protocol Fees', () => {
 
   it('initializes treasury shards', async () => {
     for (let i = 0; i < NUM_SHARDS; i++) {
-      const { instructions, treasuryShardPda } = client.initializeTreasuryShard({
-        payer: ctx.payer.publicKey,
-        admin: adminKp.publicKey,
-        shardId: i,
-      });
+      const { instructions, treasuryShardPda } = client.initializeTreasuryShard(
+        {
+          payer: ctx.payer.publicKey,
+          admin: adminKp.publicKey,
+          shardId: i,
+        },
+      );
       await sendTx(ctx, instructions, [adminKp]);
 
       const info = await ctx.connection.getAccountInfo(treasuryShardPda);
@@ -98,7 +105,10 @@ describe('Protocol Fees', () => {
 
   it('rejects update from non-admin', async () => {
     const fakeAdmin = Keypair.generate();
-    const sig = await ctx.connection.requestAirdrop(fakeAdmin.publicKey, LAMPORTS_PER_SOL);
+    const sig = await ctx.connection.requestAirdrop(
+      fakeAdmin.publicKey,
+      LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(sig, 'confirmed');
 
     const { instructions } = client.updateProtocol({
@@ -180,7 +190,10 @@ describe('Protocol Fees', () => {
     await sendTx(ctx, createIxs);
 
     const [vaultPda] = client.findVault(walletPda);
-    const fundSig = await ctx.connection.requestAirdrop(vaultPda, 2 * LAMPORTS_PER_SOL);
+    const fundSig = await ctx.connection.requestAirdrop(
+      vaultPda,
+      2 * LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(fundSig, 'confirmed');
 
     let shardBalanceBefore = 0;
@@ -215,7 +228,10 @@ describe('Protocol Fees', () => {
 
   it('skips fee for unregistered payer (no extra config needed)', async () => {
     const newPayer = Keypair.generate();
-    const sig = await ctx.connection.requestAirdrop(newPayer.publicKey, 5 * LAMPORTS_PER_SOL);
+    const sig = await ctx.connection.requestAirdrop(
+      newPayer.publicKey,
+      5 * LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(sig, 'confirmed');
 
     const newClient = new LazorKitClient(ctx.connection);
@@ -236,10 +252,15 @@ describe('Protocol Fees', () => {
   });
 
   it('withdraws fees from treasury shards', async () => {
-    const fundSig = await ctx.connection.requestAirdrop(treasuryKp.publicKey, LAMPORTS_PER_SOL);
+    const fundSig = await ctx.connection.requestAirdrop(
+      treasuryKp.publicKey,
+      LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(fundSig, 'confirmed');
 
-    const treasuryBefore = await ctx.connection.getBalance(treasuryKp.publicKey);
+    const treasuryBefore = await ctx.connection.getBalance(
+      treasuryKp.publicKey,
+    );
     let totalSwept = 0;
 
     for (let i = 0; i < NUM_SHARDS; i++) {
