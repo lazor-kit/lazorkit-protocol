@@ -63,6 +63,12 @@ pub fn process(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    // Verify config_pda is owned by this program before reading admin
+    // and num_shards from its data for authorization. Defense-in-depth.
+    if config_pda.owner() != program_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+
     // Read config and verify admin + shard_id in range
     let config_data = config_pda.try_borrow_data()?;
     if config_data.len() < core::mem::size_of::<ProtocolConfig>()

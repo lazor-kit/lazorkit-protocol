@@ -7,7 +7,12 @@ import {
   sendTxExpectError,
   type TestContext,
 } from './common';
-import { LazorKitClient, PROGRAM_ID } from '../../sdk/sdk-legacy/src';
+import {
+  LazorKitClient,
+  PROGRAM_ID,
+  createWithdrawTreasuryIx,
+  createUpdateProtocolIx,
+} from '../../sdk/sdk-legacy/src';
 
 const NUM_SHARDS = 4;
 
@@ -313,5 +318,53 @@ describe('Protocol Fees', () => {
     const treasuryAfter = await ctx.connection.getBalance(treasuryKp.publicKey);
     expect(treasuryAfter - treasuryBefore).toBe(totalSwept);
     expect(totalSwept).toBeGreaterThan(0);
+  });
+
+  // ── H2 — admin instructions must verify config_pda / shard_pda ownership ──
+  //
+  // Pre-fix, withdraw_treasury read config_pda without checking its owner.
+  // An attacker could supply a fake config (owned by their own program) with
+  // attacker-controlled `admin`/`treasury` fields, hand in the real LazorKit
+  // shard as `shard_pda`, and drain it. Post-fix, any non-program-owned
+  // config_pda or shard_pda is rejected with IllegalOwner before any writes.
+
+  it('H2: rejects WithdrawTreasury with fake (non-program-owned) config_pda', async () => {
+    const [shard0] = client.findTreasuryShard(0);
+    const fakeConfig = Keypair.generate().publicKey; // System-owned → owner check fails
+
+    const ix = createWithdrawTreasuryIx({
+      admin: adminKp.publicKey,
+      protocolConfigPda: fakeConfig,
+      treasuryShardPda: shard0,
+      treasury: treasuryKp.publicKey,
+    });
+    await sendTxExpectError(ctx, [ix], [adminKp]);
+  });
+
+  it('H2: rejects WithdrawTreasury with fake (non-program-owned) shard_pda', async () => {
+    const [protocolConfigPda] = client.findProtocolConfig();
+    const fakeShard = Keypair.generate().publicKey;
+
+    const ix = createWithdrawTreasuryIx({
+      admin: adminKp.publicKey,
+      protocolConfigPda,
+      treasuryShardPda: fakeShard,
+      treasury: treasuryKp.publicKey,
+    });
+    await sendTxExpectError(ctx, [ix], [adminKp]);
+  });
+
+  it('H2: rejects UpdateProtocol with fake config_pda', async () => {
+    const fakeConfig = Keypair.generate().publicKey;
+
+    const ix = createUpdateProtocolIx({
+      admin: adminKp.publicKey,
+      protocolConfigPda: fakeConfig,
+      creationFee: 9999n,
+      executionFee: 9999n,
+      enabled: true,
+      newTreasury: treasuryKp.publicKey,
+    });
+    await sendTxExpectError(ctx, [ix], [adminKp]);
   });
 });

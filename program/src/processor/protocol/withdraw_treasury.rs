@@ -20,7 +20,7 @@ use crate::{
 /// 4. `[writable]` Treasury destination (must match config.treasury)
 /// 5. `[]` Rent Sysvar
 pub fn process(
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
     accounts: &[AccountInfo],
     _instruction_data: &[u8],
 ) -> ProgramResult {
@@ -43,6 +43,18 @@ pub fn process(
 
     if !admin.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // CRITICAL: verify config_pda AND shard_pda are owned by this program.
+    //
+    // Without the config ownership check, any attacker could supply a
+    // fake ProtocolConfig (owned by their own program) with attacker-controlled
+    // `admin` and `treasury` fields, passing the admin-signer and treasury
+    // checks below. They'd then get direct lamport manipulation on the real
+    // (LazorKit-owned) shard_pda — which Solana's runtime allows because
+    // LazorKit owns the shard — draining all treasury shards to themselves.
+    if config_pda.owner() != program_id || shard_pda.owner() != program_id {
+        return Err(ProgramError::IllegalOwner);
     }
 
     // Read config, verify admin + treasury
