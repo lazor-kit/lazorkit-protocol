@@ -9,6 +9,7 @@ use crate::{
         snapshot_token_balances, verify_token_authorities_unchanged,
     },
     state::{authority::AuthorityAccountHeader, session::has_actions, AccountDiscriminator},
+    utils::get_stack_height,
 };
 use pinocchio::{
     account_info::AccountInfo,
@@ -148,6 +149,15 @@ pub fn process(
         }
         3 => {
             // Session — reuse the existing `authority_data` borrow; no re-borrow needed.
+
+            // L5: anti-CPI guard, mirroring the Secp256r1 authenticator check.
+            // A session-authenticated Execute is only valid as a top-level instruction
+            // (stack_height == 1). Rejecting CPI entry prevents any future bugs where
+            // a wrapper program could chain through Execute with forged account context.
+            if get_stack_height() > 1 {
+                return Err(AuthError::PermissionDenied.into());
+            }
+
             if authority_data.len()
                 < std::mem::size_of::<crate::state::session::SessionAccount>()
             {

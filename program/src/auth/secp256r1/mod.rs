@@ -195,10 +195,21 @@ impl Authenticator for Secp256r1Authenticator {
                     .unwrap(),
             ) as usize;
             let cdj_offset = cdj_len_offset + 2;
-            if cdj_len == 0 || auth_payload.len() < cdj_offset + cdj_len {
+            // L2: require exact length. Trailing bytes after the declared cdj are
+            // not covered by the challenge hash or the precompile message, so they
+            // carry no meaning — reject rather than silently accept.
+            if cdj_len == 0 || auth_payload.len() != cdj_offset + cdj_len {
                 return Err(AuthError::InvalidAuthorityPayload.into());
             }
             let raw_client_data_json = &auth_payload[cdj_offset..cdj_offset + cdj_len];
+
+            // L1: We intentionally do NOT validate the `origin` field inside the
+            // clientDataJSON. The binding that matters is the authenticator's
+            // `rpIdHash` (checked below against the on-chain stored rpId), which
+            // the authenticator hardware/OS computes from the registered relying
+            // party and refuses to sign cross-origin. Validating origin here
+            // would break non-https origins (Android APKs, localhost dev) without
+            // adding security the rpIdHash check doesn't already provide.
 
             // Validate "type" field is "webauthn.get"
             let type_value = extract_top_level_string_field(raw_client_data_json, b"type")?;
@@ -206,11 +217,14 @@ impl Authenticator for Secp256r1Authenticator {
                 return Err(AuthError::InvalidAuthenticationKind.into());
             }
 
-            // Validate "challenge" field matches expected base64url(challenge_hash)
+            // Validate "challenge" field matches expected base64url(challenge_hash).
+            // L3: constant-time byte comparison. The expected value is a SHA-256
+            // output so an attacker can't realistically exploit a timing channel,
+            // but constant-time is free and makes the guarantee explicit.
             let challenge_value =
                 extract_top_level_string_field(raw_client_data_json, b"challenge")?;
             let expected_challenge_b64 = base64url_encode_no_pad(&hasher);
-            if challenge_value != expected_challenge_b64.as_slice() {
+            if !ct_eq(challenge_value, expected_challenge_b64.as_slice()) {
                 return Err(AuthError::InvalidMessageHash.into());
             }
 
@@ -311,5 +325,54 @@ impl Authenticator for Secp256r1Authenticator {
         }
 
         Ok(())
+    }
+}
+
+/// Constant-time byte slice equality. Returns `false` for different lengths;
+/// otherwise XORs every byte pair into an accumulator and compares to zero,
+/// ensuring the comparison takes the same time regardless of where (or if) the
+/// bytes differ. Used for the Mode 1 challenge check.
+#[inline(always)]
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc: u8 = 0;
+    for i in 0..a.len() {
+        acc |= a[i] ^ b[i];
+    }
+    acc == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ct_eq;
+
+    #[test]
+    fn ct_eq_equal() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(ct_eq(b"", b""));
+        assert!(ct_eq(&[0xFF; 43], &[0xFF; 43]));
+    }
+
+    #[test]
+    fn ct_eq_different_length() {
+        assert!(!ct_eq(b"abc", b"abcd"));
+        assert!(!ct_eq(b"", b"a"));
+    }
+
+    #[test]
+    fn ct_eq_differs_at_start() {
+        assert!(!ct_eq(b"xbc", b"abc"));
+    }
+
+    #[test]
+    fn ct_eq_differs_at_end() {
+        assert!(!ct_eq(b"abx", b"abc"));
+    }
+
+    #[test]
+    fn ct_eq_differs_at_middle() {
+        assert!(!ct_eq(b"axc", b"abc"));
     }
 }
