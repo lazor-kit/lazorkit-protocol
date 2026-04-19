@@ -88,7 +88,7 @@ fn try_collect_fee<'a>(
         return Ok(accounts);
     }
 
-    // Check config
+    // Required: valid ProtocolConfig
     if maybe_config.owner() != program_id {
         return Ok(accounts);
     }
@@ -118,21 +118,7 @@ fn try_collect_fee<'a>(
         return Ok(&accounts[..n - 4]);
     }
 
-    // Check fee record
-    if maybe_record.owner() != program_id {
-        return Ok(accounts);
-    }
-    let record_data = maybe_record.try_borrow_data()?;
-    if record_data.is_empty()
-        || record_data[0] != AccountDiscriminator::FeeRecord as u8
-        || record_data.len() < core::mem::size_of::<FeeRecord>()
-    {
-        drop(record_data);
-        return Ok(accounts);
-    }
-    drop(record_data);
-
-    // Check treasury shard
+    // Required: valid TreasuryShard (fee destination)
     if maybe_shard.owner() != program_id {
         return Ok(accounts);
     }
@@ -145,6 +131,20 @@ fn try_collect_fee<'a>(
         return Ok(accounts);
     }
     drop(shard_data);
+
+    // Optional: FeeRecord. If it's a valid FeeRecord owned by this program, we'll
+    // bump counters after transfer. If not (unregistered dev), we still charge the
+    // fee; we just skip the counter update.
+    let record_present = if maybe_record.owner() != program_id {
+        false
+    } else {
+        let rec = maybe_record.try_borrow_data()?;
+        let ok = !rec.is_empty()
+            && rec[0] == AccountDiscriminator::FeeRecord as u8
+            && rec.len() >= core::mem::size_of::<FeeRecord>();
+        drop(rec);
+        ok
+    };
 
     // Transfer fee from payer (accounts[0]) to treasury shard via System Program
     let payer = &accounts[0];
@@ -177,31 +177,33 @@ fn try_collect_fee<'a>(
 
     invoke(&transfer_ix, &[payer, maybe_shard, maybe_system])?;
 
-    // Update fee record counters (no SOL, just tracking)
-    let mut record_data = maybe_record.try_borrow_mut_data()?;
-    let record = unsafe { &mut *(record_data.as_mut_ptr() as *mut FeeRecord) };
+    // Conditional: only bump counters if a valid FeeRecord was supplied
+    if record_present {
+        let mut record_data = maybe_record.try_borrow_mut_data()?;
+        let record = unsafe { &mut *(record_data.as_mut_ptr() as *mut FeeRecord) };
 
-    record.total_fees_paid = record
-        .total_fees_paid
-        .checked_add(fee)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
+        record.total_fees_paid = record
+            .total_fees_paid
+            .checked_add(fee)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    match discriminator {
-        0 => {
-            record.wallet_count = record
-                .wallet_count
-                .checked_add(1)
-                .ok_or(ProgramError::ArithmeticOverflow)?;
-        },
-        4 | 7 => {
-            record.tx_count = record
-                .tx_count
-                .checked_add(1)
-                .ok_or(ProgramError::ArithmeticOverflow)?;
-        },
-        _ => {},
+        match discriminator {
+            0 => {
+                record.wallet_count = record
+                    .wallet_count
+                    .checked_add(1)
+                    .ok_or(ProgramError::ArithmeticOverflow)?;
+            },
+            4 | 7 => {
+                record.tx_count = record
+                    .tx_count
+                    .checked_add(1)
+                    .ok_or(ProgramError::ArithmeticOverflow)?;
+            },
+            _ => {},
+        }
+        drop(record_data);
     }
-    drop(record_data);
 
     Ok(&accounts[..n - 4])
 }

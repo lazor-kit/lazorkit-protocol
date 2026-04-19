@@ -226,7 +226,7 @@ describe('Protocol Fees', () => {
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(EXECUTION_FEE));
   });
 
-  it('skips fee for unregistered payer (no extra config needed)', async () => {
+  it('charges fee for unregistered payer but skips FeeRecord counter update', async () => {
     const newPayer = Keypair.generate();
     const sig = await ctx.connection.requestAirdrop(
       newPayer.publicKey,
@@ -237,11 +237,28 @@ describe('Protocol Fees', () => {
     const newClient = new LazorKitClient(ctx.connection);
     const newCtx = { ...ctx, payer: newPayer };
 
-    // resolveProtocolFee returns undefined for unregistered payer
+    // resolveProtocolFee still returns the 4 accounts for unregistered payer
     const protocolFee = await newClient.resolveProtocolFee(newPayer.publicKey);
-    expect(protocolFee).toBeUndefined();
+    expect(protocolFee).toBeDefined();
 
-    // createWallet works fine — no fee, no extra accounts
+    // The feeRecordPda is derived but unlikely to exist on-chain for a fresh payer
+    const [expectedFeeRecordPda] = newClient.findFeeRecord(newPayer.publicKey);
+    expect(protocolFee!.feeRecordPda.toBase58()).toBe(
+      expectedFeeRecordPda.toBase58(),
+    );
+    const feeRecordInfo = await ctx.connection.getAccountInfo(
+      protocolFee!.feeRecordPda,
+    );
+    expect(feeRecordInfo).toBeNull();
+
+    // Sum shard balances before
+    let shardBalanceBefore = 0;
+    for (let i = 0; i < NUM_SHARDS; i++) {
+      const [shardPda] = newClient.findTreasuryShard(i);
+      shardBalanceBefore += await ctx.connection.getBalance(shardPda);
+    }
+
+    // createWallet: fee IS charged, but FeeRecord (uninitialized) is not mutated
     const ownerKp = Keypair.generate();
     const { instructions } = await newClient.createWallet({
       payer: newPayer.publicKey,
@@ -249,6 +266,20 @@ describe('Protocol Fees', () => {
       owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
     });
     await sendTx(newCtx, instructions);
+
+    // Treasury should have received the creation fee
+    let shardBalanceAfter = 0;
+    for (let i = 0; i < NUM_SHARDS; i++) {
+      const [shardPda] = newClient.findTreasuryShard(i);
+      shardBalanceAfter += await ctx.connection.getBalance(shardPda);
+    }
+    expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(CREATION_FEE));
+
+    // FeeRecord PDA still doesn't exist — program ignored it
+    const feeRecordAfter = await ctx.connection.getAccountInfo(
+      protocolFee!.feeRecordPda,
+    );
+    expect(feeRecordAfter).toBeNull();
   });
 
   it('withdraws fees from treasury shards', async () => {
