@@ -285,9 +285,8 @@ impl Authenticator for Secp256r1Authenticator {
         let instruction_pubkey_bytes = &auth_data[pubkey_offset..pubkey_offset + 33];
         let expected_pubkey: &[u8; 33] = instruction_pubkey_bytes.try_into().unwrap();
 
-        let mut signed_message = Vec::with_capacity(authenticator_data_raw.len() + 32);
-        signed_message.extend_from_slice(authenticator_data_raw);
-        signed_message.extend_from_slice(&client_data_hash);
+        // The precompile's signed message is authenticator_data ∥ client_data_hash.
+        // Pass the two slices separately to avoid an intermediate Vec allocation.
 
         // Introspect the secp256r1 precompile instruction (must be the previous instruction)
         let sysvar_instructions = accounts
@@ -312,7 +311,8 @@ impl Authenticator for Secp256r1Authenticator {
         verify_secp256r1_instruction_data(
             secp_ix.get_instruction_data(),
             expected_pubkey,
-            &signed_message,
+            authenticator_data_raw,
+            &client_data_hash,
         )?;
 
         // Signature verified successfully — commit the counter update

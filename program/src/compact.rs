@@ -162,6 +162,15 @@ pub const MAX_COMPACT_INSTRUCTIONS: usize = 16;
 /// Parse multiple CompactInstructions from bytes
 /// Format: [num_instructions: u8][instruction_0][instruction_1]...
 pub fn parse_compact_instructions(bytes: &[u8]) -> Result<Vec<CompactInstruction>, ProgramError> {
+    parse_compact_instructions_with_len(bytes).map(|(ixs, _)| ixs)
+}
+
+/// Parse + return total bytes consumed. Used by the Execute processor to
+/// split the instruction data into the compact-instructions prefix and the
+/// auth payload suffix without re-serializing.
+pub fn parse_compact_instructions_with_len(
+    bytes: &[u8],
+) -> Result<(Vec<CompactInstruction>, usize), ProgramError> {
     if bytes.is_empty() {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -180,7 +189,8 @@ pub fn parse_compact_instructions(bytes: &[u8]) -> Result<Vec<CompactInstruction
         remaining = rest;
     }
 
-    Ok(instructions)
+    let consumed = bytes.len() - remaining.len();
+    Ok((instructions, consumed))
 }
 
 /// Serialize multiple CompactInstructions to bytes

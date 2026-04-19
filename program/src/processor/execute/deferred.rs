@@ -209,26 +209,29 @@ fn compute_sha256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Compute SHA256 hash of all account pubkeys referenced by compact instructions.
-/// Same logic as execute.rs::compute_accounts_hash.
+/// Matches execute::immediate::compute_accounts_hash.
+///
+/// Optimisation: pass each 32-byte pubkey as a separate slice to sol_sha256
+/// instead of concatenating them into an owned Vec first.
 fn compute_accounts_hash(
     accounts: &[AccountInfo],
     compact_instructions: &[crate::compact::CompactInstruction],
 ) -> Result<[u8; 32], ProgramError> {
-    let mut pubkeys_data = Vec::new();
+    let mut refs: Vec<&[u8]> = Vec::with_capacity(compact_instructions.len() * 4);
 
     for ix in compact_instructions {
         let program_idx = ix.program_id_index as usize;
         if program_idx >= accounts.len() {
             return Err(ProgramError::InvalidInstructionData);
         }
-        pubkeys_data.extend_from_slice(accounts[program_idx].key().as_ref());
+        refs.push(accounts[program_idx].key().as_ref());
 
         for &acc_idx in &ix.accounts {
             let idx = acc_idx as usize;
             if idx >= accounts.len() {
                 return Err(ProgramError::InvalidInstructionData);
             }
-            pubkeys_data.extend_from_slice(accounts[idx].key().as_ref());
+            refs.push(accounts[idx].key().as_ref());
         }
     }
 
@@ -237,15 +240,15 @@ fn compute_accounts_hash(
     #[cfg(target_os = "solana")]
     unsafe {
         pinocchio::syscalls::sol_sha256(
-            [pubkeys_data.as_slice()].as_ptr() as *const u8,
-            1,
+            refs.as_ptr() as *const u8,
+            refs.len() as u64,
             hash.as_mut_ptr(),
         );
     }
     #[cfg(not(target_os = "solana"))]
     {
         hash = [0xAA; 32];
-        let _ = pubkeys_data;
+        let _ = refs;
     }
 
     Ok(hash)

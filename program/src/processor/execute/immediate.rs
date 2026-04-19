@@ -2,7 +2,7 @@ use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
-    compact::parse_compact_instructions,
+    compact::parse_compact_instructions_with_len,
     error::AuthError,
     processor::execute::actions::{
         evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
@@ -85,12 +85,13 @@ pub fn process(
         return Err(ProgramError::InvalidAccountData);
     };
 
-    // Parse compact instructions
-    let compact_instructions = parse_compact_instructions(instruction_data)?;
-
-    // Serialize compact instructions to get their byte length
-    let compact_bytes = crate::compact::serialize_compact_instructions(&compact_instructions);
-    let compact_len = compact_bytes.len();
+    // Parse compact instructions and get their consumed byte length. The
+    // length is used to split `instruction_data` into the compact-instructions
+    // prefix (the data_payload bound into the Secp256r1 signature) and the
+    // auth payload suffix. Tracking the parse cursor avoids re-serializing
+    // just to measure length.
+    let (compact_instructions, compact_len) =
+        parse_compact_instructions_with_len(instruction_data)?;
 
     // Track whether this is a session-based execution and the current slot
     let mut is_session = false;
@@ -349,26 +350,33 @@ pub fn process(
     Ok(())
 }
 
-/// Compute SHA256 hash of all account pubkeys referenced by compact instructions (Issue #11)
+/// Compute SHA256 hash of all account pubkeys referenced by compact instructions (Issue #11).
+///
+/// Optimisation: pass each 32-byte pubkey as a separate slice to sol_sha256
+/// instead of concatenating them into an owned Vec first. sol_sha256 accepts
+/// an array of slices natively, so the concat step was pure overhead.
 fn compute_accounts_hash(
     accounts: &[AccountInfo],
     compact_instructions: &[crate::compact::CompactInstruction],
 ) -> Result<[u8; 32], ProgramError> {
-    let mut pubkeys_data = Vec::new();
+    // Collect slice references (16 bytes each) instead of copying 32-byte pubkeys.
+    // With MAX_COMPACT_INSTRUCTIONS = 16 and a reasonable per-ix account count,
+    // this fits comfortably on the BPF heap.
+    let mut refs: Vec<&[u8]> = Vec::with_capacity(compact_instructions.len() * 4);
 
     for ix in compact_instructions {
         let program_idx = ix.program_id_index as usize;
         if program_idx >= accounts.len() {
             return Err(ProgramError::InvalidInstructionData);
         }
-        pubkeys_data.extend_from_slice(accounts[program_idx].key().as_ref());
+        refs.push(accounts[program_idx].key().as_ref());
 
         for &acc_idx in &ix.accounts {
             let idx = acc_idx as usize;
             if idx >= accounts.len() {
                 return Err(ProgramError::InvalidInstructionData);
             }
-            pubkeys_data.extend_from_slice(accounts[idx].key().as_ref());
+            refs.push(accounts[idx].key().as_ref());
         }
     }
 
@@ -377,15 +385,15 @@ fn compute_accounts_hash(
     #[cfg(target_os = "solana")]
     unsafe {
         pinocchio::syscalls::sol_sha256(
-            [pubkeys_data.as_slice()].as_ptr() as *const u8,
-            1,
+            refs.as_ptr() as *const u8,
+            refs.len() as u64,
             hash.as_mut_ptr(),
         );
     }
     #[cfg(not(target_os = "solana"))]
     {
         hash = [0xAA; 32];
-        let _ = pubkeys_data;
+        let _ = refs;
     }
 
     Ok(hash)

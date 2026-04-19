@@ -61,12 +61,18 @@ impl Secp256r1SignatureOffsets {
 }
 
 /// Verify the secp256r1 instruction data contains the expected signature and
-/// public key. This also validates that the secp256r1 precompile offsets point
-/// to the expected locations, ensuring proper data alignment.
+/// public key. Also validates that the secp256r1 precompile offsets point to
+/// the expected locations, ensuring proper data alignment.
+///
+/// The expected precompile message is passed as TWO slices — the
+/// authenticator_data and the clientDataJSON hash — which are concatenated
+/// by the on-chain secp256r1 precompile as its signed message. Accepting
+/// two slices here lets the caller skip a Vec allocation for the concat.
 pub fn verify_secp256r1_instruction_data(
     instruction_data: &[u8],
     expected_pubkey: &[u8; 33],
-    expected_message: &[u8],
+    auth_data: &[u8],
+    client_data_hash: &[u8; 32],
 ) -> Result<(), ProgramError> {
     // Minimum check: must have at least the header and offsets
     if instruction_data.len() < DATA_START {
@@ -111,24 +117,31 @@ pub fn verify_secp256r1_instruction_data(
     if offsets.message_data_offset as usize != MESSAGE_DATA_OFFSET {
         return Err(AuthError::InvalidInstruction.into());
     }
-    if offsets.message_data_size as usize != expected_message.len() {
+    let expected_msg_len = auth_data.len() + client_data_hash.len();
+    if offsets.message_data_size as usize != expected_msg_len {
         return Err(AuthError::InvalidInstruction.into());
     }
 
     // Dynamic length check: instruction must contain the full message
-    if instruction_data.len() < MESSAGE_DATA_OFFSET + expected_message.len() {
+    if instruction_data.len() < MESSAGE_DATA_OFFSET + expected_msg_len {
         return Err(AuthError::InvalidInstruction.into());
     }
 
     let pubkey_data = &instruction_data
         [PUBKEY_DATA_OFFSET..PUBKEY_DATA_OFFSET + COMPRESSED_PUBKEY_SERIALIZED_SIZE];
-    let message_data =
-        &instruction_data[MESSAGE_DATA_OFFSET..MESSAGE_DATA_OFFSET + expected_message.len()];
-
     if pubkey_data != expected_pubkey {
         return Err(AuthError::InvalidPubkey.into());
     }
-    if message_data != expected_message {
+
+    // Compare the precompile's message area against the two caller-supplied
+    // slices piecewise — no concat, no allocation.
+    let msg_auth = &instruction_data[MESSAGE_DATA_OFFSET..MESSAGE_DATA_OFFSET + auth_data.len()];
+    if msg_auth != auth_data {
+        return Err(AuthError::InvalidMessageHash.into());
+    }
+    let hash_start = MESSAGE_DATA_OFFSET + auth_data.len();
+    let msg_hash = &instruction_data[hash_start..hash_start + client_data_hash.len()];
+    if msg_hash != client_data_hash {
         return Err(AuthError::InvalidMessageHash.into());
     }
     Ok(())
@@ -177,18 +190,24 @@ mod tests {
         let message = [0x11; 32];
 
         let ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_ok());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_ok());
     }
 
     #[test]
     fn test_verify_variable_length_message() {
-        // Mode 1 messages are authenticatorData(37+) + clientDataJsonHash(32) = 69+ bytes
+        // Mode 1 messages are authenticatorData(37+) + clientDataJsonHash(32) = 69+ bytes.
+        // We split into the two halves exactly like the caller does post-refactor.
         let pubkey = [0x03; 33];
         let signature = [0xCD; 64];
-        let message = [0x22; 69]; // typical WebAuthn message length
+        let message = [0x22; 69];
 
         let ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_ok());
+        let auth_data: &[u8] = &message[..37];
+        let client_data_hash: &[u8; 32] = &message[37..].try_into().unwrap();
+        assert!(
+            verify_secp256r1_instruction_data(&ix_data, &pubkey, auth_data, client_data_hash)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -199,7 +218,8 @@ mod tests {
         let message = [0x11; 32];
 
         let ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
-        let err = verify_secp256r1_instruction_data(&ix_data, &wrong_pubkey, &message).unwrap_err();
+        let err =
+            verify_secp256r1_instruction_data(&ix_data, &wrong_pubkey, &[], &message).unwrap_err();
         assert_eq!(err, AuthError::InvalidPubkey.into());
     }
 
@@ -212,7 +232,7 @@ mod tests {
 
         let ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         let err =
-            verify_secp256r1_instruction_data(&ix_data, &pubkey, &wrong_message).unwrap_err();
+            verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &wrong_message).unwrap_err();
         assert_eq!(err, AuthError::InvalidMessageHash.into());
     }
 
@@ -224,7 +244,7 @@ mod tests {
 
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         ix_data[0] = 0; // zero signatures
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -235,7 +255,7 @@ mod tests {
 
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         ix_data[0] = 2; // two signatures
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -247,7 +267,7 @@ mod tests {
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         // Set signature_instruction_index to 0 instead of 0xFFFF
         ix_data[4..6].copy_from_slice(&0u16.to_le_bytes());
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -259,7 +279,7 @@ mod tests {
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         // Set public_key_instruction_index to 1 instead of 0xFFFF
         ix_data[8..10].copy_from_slice(&1u16.to_le_bytes());
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -271,7 +291,7 @@ mod tests {
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         // Set message_instruction_index to 0 instead of 0xFFFF
         ix_data[14..16].copy_from_slice(&0u16.to_le_bytes());
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -283,7 +303,7 @@ mod tests {
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         // Tamper pubkey_offset to point elsewhere
         ix_data[6..8].copy_from_slice(&200u16.to_le_bytes());
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -295,7 +315,7 @@ mod tests {
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         // Tamper message_data_offset
         ix_data[10..12].copy_from_slice(&50u16.to_le_bytes());
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -307,7 +327,7 @@ mod tests {
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         // Tamper signature_offset
         ix_data[2..4].copy_from_slice(&100u16.to_le_bytes());
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -319,7 +339,7 @@ mod tests {
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         // Set message_data_size to wrong value
         ix_data[12..14].copy_from_slice(&64u16.to_le_bytes());
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -328,7 +348,7 @@ mod tests {
         let message = [0x11; 32];
 
         // Only 2 bytes — way too short
-        assert!(verify_secp256r1_instruction_data(&[0x01, 0x00], &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&[0x01, 0x00], &pubkey, &[], &message).is_err());
     }
 
     #[test]
@@ -340,7 +360,7 @@ mod tests {
         let mut ix_data = build_precompile_ix_data(&pubkey, &signature, &message);
         // Truncate — remove last 10 bytes so message area is incomplete
         ix_data.truncate(ix_data.len() - 10);
-        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &message).is_err());
+        assert!(verify_secp256r1_instruction_data(&ix_data, &pubkey, &[], &message).is_err());
     }
 
     #[test]
