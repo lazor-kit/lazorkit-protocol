@@ -157,6 +157,16 @@ const { instructions } = await client.transferSol({
 - **Expired blacklist** entries are **silently dropped** — the ban has lifted
 - **Unrestricted sessions** (no actions) remain fully open until the session itself expires
 
+### Session Action Scoping (important)
+
+Session actions apply narrowly — understand what they do and don't cover before granting session keys broad access:
+
+- **`TokenLimit` / `TokenMaxPerTx` / `TokenRecurringLimit` apply only to the mint you list.** A session with `TokenLimit(USDC)` still has **unrestricted** access to any *other* SPL token the vault holds (USDT, WIF, etc.). To fully lock down token spending, add a TokenAction for **every** mint the vault holds or restrict which programs the session can call via `ProgramWhitelist`.
+
+- **`ProgramWhitelist` only checks the *program ID* being invoked**, not which instruction inside that program. The on-chain program does enforce vault metadata invariants (owner + data length) and per-mint token account authority invariants (owner, delegate, close_authority) to prevent escape via `System::Assign`, SPL Token `SetAuthority`, `Approve`, etc. Those checks apply automatically whenever a session has actions. For *unlisted* mints, no per-account authority protection is applied — users are expected to enumerate every mint they care about.
+
+- **Best practice**: a "SOL-only spender" session should use `ProgramWhitelist: [SystemProgram]` + `SolMaxPerTx` + `SolLimit`. A token spender should list every mint in a `TokenAction` plus `ProgramWhitelist: [TokenProgram]`.
+
 ---
 
 ## Architecture
