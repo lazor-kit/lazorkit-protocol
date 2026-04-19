@@ -19,14 +19,21 @@ npm install @lazorkit/sdk-legacy
 ## Quick start
 
 ```typescript
-import { Connection, Transaction, sendAndConfirmTransaction, SystemProgram } from '@solana/web3.js';
-import { LazorKitClient } from '@lazorkit/sdk-legacy';
+import { Connection, Keypair, Transaction, sendAndConfirmTransaction, SystemProgram } from '@solana/web3.js';
+import { LazorKitClient, ed25519 } from '@lazorkit/sdk-legacy';
 import * as crypto from 'crypto';
 
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
 const client = new LazorKitClient(connection);
+```
 
-// Create a passkey-owned wallet
+### Create a wallet
+
+The `owner` field accepts either of two auth types. A wallet can later hold any mix of Ed25519 and Secp256r1 authorities across its owner / admin / spender roles.
+
+**Passkey owner** (Secp256r1 — end-user WebAuthn flows):
+
+```typescript
 const { instructions, walletPda, vaultPda, authorityPda } = await client.createWallet({
   payer: payer.publicKey,
   userSeed: crypto.randomBytes(32),
@@ -43,7 +50,90 @@ await sendAndConfirmTransaction(connection, new Transaction().add(...instruction
 const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
 ```
 
-## Signing a passkey transaction (two-phase flow)
+**Ed25519 owner** (regular Solana keypair — bots, backends, programmatic signing):
+
+```typescript
+const ownerKp = Keypair.generate();
+const { instructions, walletPda, vaultPda, authorityPda } = await client.createWallet({
+  payer: payer.publicKey,
+  userSeed: crypto.randomBytes(32),
+  owner: {
+    type: 'ed25519',
+    publicKey: ownerKp.publicKey,
+  },
+});
+await sendAndConfirmTransaction(connection, new Transaction().add(...instructions), [payer]);
+
+// Lookup — pass 'ed25519' as the second arg
+const [wallet] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+```
+
+### Add more authorities
+
+Any mix of auth types on the same wallet. Typical patterns:
+
+- Passkey owner + Ed25519 admin — user's phone is the owner, a backend bot manages sessions on their behalf.
+- Ed25519 owner + Secp256r1 spender — the backend creates and manages the wallet, the user's passkey does day-to-day spends.
+
+```typescript
+import { ROLE_ADMIN, ROLE_SPENDER } from '@lazorkit/sdk-legacy';
+
+// Ed25519 owner adds an Ed25519 admin
+const adminKp = Keypair.generate();
+const { instructions, newAuthorityPda } = await client.addAuthority({
+  payer: payer.publicKey,
+  walletPda,
+  adminSigner: ed25519(ownerKp.publicKey),
+  newAuthority: { type: 'ed25519', publicKey: adminKp.publicKey },
+  role: ROLE_ADMIN,
+});
+await sendAndConfirmTransaction(connection, new Transaction().add(...instructions), [payer, ownerKp]);
+
+// Ed25519 owner adds a Secp256r1 (passkey) spender — the user's phone
+const { instructions: addPasskeyIxs } = await client.addAuthority({
+  payer: payer.publicKey,
+  walletPda,
+  adminSigner: ed25519(ownerKp.publicKey),
+  newAuthority: {
+    type: 'secp256r1',
+    credentialIdHash,
+    compressedPubkey,
+    rpId: 'your-app.com',
+  },
+  role: ROLE_SPENDER,
+});
+```
+
+To let a **passkey** admin add the new authority, use `prepareAddAuthority` + `finalizeAddAuthority` (same two-phase pattern as `prepareExecute` below).
+
+## Signing a transaction
+
+### Ed25519 authority (simple)
+
+The keypair signs the transaction at the Solana level — no prepare/finalize needed. Just pass the public key as the signer and include the keypair in the tx signers.
+
+```typescript
+const { instructions } = await client.execute({
+  payer: payer.publicKey,
+  walletPda,
+  signer: ed25519(ownerKp.publicKey),
+  instructions: [SystemProgram.transfer({
+    fromPubkey: vaultPda, toPubkey: recipient, lamports: 1_000_000,
+  })],
+});
+await sendAndConfirmTransaction(connection, new Transaction().add(...instructions), [payer, ownerKp]);
+
+// Convenience helper:
+const { instructions: xferIxs } = await client.transferSol({
+  payer: payer.publicKey,
+  walletPda,
+  signer: ed25519(ownerKp.publicKey),
+  recipient,
+  lamports: 1_000_000n,
+});
+```
+
+### Passkey authority (two-phase flow)
 
 Real WebAuthn is asynchronous — the browser popup happens between challenge computation and transaction construction. The SDK splits signing accordingly.
 
@@ -104,22 +194,6 @@ async function getWebAuthnResponse(
     clientDataJson: new Uint8Array(response.clientDataJSON),
   };
 }
-```
-
-## Ed25519 signer (bots, backends, in-process tests)
-
-Pass an Ed25519 keypair's public key — it signs the transaction at the Solana level, no prepare/finalize needed.
-
-```typescript
-import { ed25519 } from '@lazorkit/sdk-legacy';
-
-const { instructions } = await client.execute({
-  payer: payer.publicKey,
-  walletPda,
-  signer: ed25519(ownerKp.publicKey),
-  instructions: [SystemProgram.transfer({ ... })],
-});
-await sendAndConfirmTransaction(connection, new Transaction().add(...instructions), [payer, ownerKp]);
 ```
 
 ## High-level client API
