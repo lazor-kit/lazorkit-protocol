@@ -4,7 +4,10 @@ use crate::{
     },
     compact::parse_compact_instructions,
     error::AuthError,
-    processor::execute::actions::{evaluate_post_actions, evaluate_pre_actions, snapshot_token_balances},
+    processor::execute::actions::{
+        evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
+        snapshot_token_balances, verify_token_authorities_unchanged,
+    },
     state::{authority::AuthorityAccountHeader, session::has_actions, AccountDiscriminator},
 };
 use pinocchio::{
@@ -216,6 +219,32 @@ pub fn process(
         Vec::new()
     };
 
+    // ── Session invariants (defense against System::Assign / SetAuthority escapes) ──
+    // A session that whitelists System Program (a common pattern for SOL transfers)
+    // could otherwise craft `System::Assign(vault, attacker)` — the lamport-based
+    // limits see no outflow, but ownership of the vault silently transfers to the
+    // attacker, who then drains it in a follow-up tx. Same class of attack via
+    // SPL Token's `SetAuthority` / `Approve` on vault-owned token accounts.
+    //
+    // Snapshot the vault's metadata + every listed-mint vault-owned token account's
+    // authority fields BEFORE the CPI loop; verify unchanged AFTER.
+    let session_has_actions = is_session && has_actions(authority_data);
+    let vault_owner_before = if session_has_actions {
+        Some(*vault_pda.owner())
+    } else {
+        None
+    };
+    let vault_data_len_before = if session_has_actions {
+        Some(unsafe { vault_pda.borrow_data_unchecked().len() })
+    } else {
+        None
+    };
+    let token_authority_snapshots = if session_has_actions {
+        snapshot_token_authorities(authority_data, accounts, vault_pda.key())?
+    } else {
+        Vec::new()
+    };
+
     // Track gross SOL outflow across all CPIs (for SolMaxPerTx check)
     let mut vault_lamports_gross_out: u64 = 0;
     let mut prev_vault_lamports = vault_lamports_before;
@@ -274,9 +303,27 @@ pub fn process(
         }
     }
 
+    // ── Post-CPI session invariants ────────────────────────────────────
+    // Verify vault's ownership and data layout were not tampered with. Any
+    // change (System::Assign, Allocate, AllocateWithSeed, AssignWithSeed) is
+    // rejected. This complements the balance-based limits below.
+    if let Some(owner_before) = vault_owner_before {
+        if *vault_pda.owner() != owner_before {
+            return Err(AuthError::SessionVaultOwnerChanged.into());
+        }
+    }
+    if let Some(len_before) = vault_data_len_before {
+        let len_after = unsafe { vault_pda.borrow_data_unchecked().len() };
+        if len_after != len_before {
+            return Err(AuthError::SessionVaultDataLenChanged.into());
+        }
+    }
+    // Verify no SetAuthority / Approve on listed-mint vault-owned token accounts.
+    verify_token_authorities_unchanged(&token_authority_snapshots, accounts)?;
+
     // Post-CPI action checks (spending limits)
     // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
-    if is_session && has_actions(authority_data) {
+    if session_has_actions {
         evaluate_post_actions(
             authority_data,
             accounts,
