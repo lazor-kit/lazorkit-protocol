@@ -2,7 +2,7 @@ use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
-    compact::parse_compact_instructions_with_len,
+    compact::{parse_compact_instructions_ref_with_len, CompactInstructionRef},
     error::AuthError,
     processor::execute::actions::{
         evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
@@ -91,7 +91,7 @@ pub fn process(
     // auth payload suffix. Tracking the parse cursor avoids re-serializing
     // just to measure length.
     let (compact_instructions, compact_len) =
-        parse_compact_instructions_with_len(instruction_data)?;
+        parse_compact_instructions_ref_with_len(instruction_data)?;
 
     // Track whether this is a session-based execution and the current slot
     let mut is_session = false;
@@ -260,44 +260,48 @@ pub fn process(
     let mut vault_lamports_gross_out: u64 = 0;
     let mut prev_vault_lamports = vault_lamports_before;
 
+    // Reuse the same Vecs across all inner CPIs — allocated once, cleared +
+    // repushed each iteration. Saves 2 Vec::with_capacity allocations per
+    // inner instruction vs. .collect()ing fresh Vecs each time.
+    const MAX_INNER_ACCOUNTS: usize = 32;
+    let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
+    let mut cpi_accounts: Vec<Account> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
+
+    // PDA signer seeds (constant across the loop)
+    let vault_bump_arr = [vault_bump];
+    let seeds = [
+        Seed::from(b"vault"),
+        Seed::from(wallet_pda.key().as_ref()),
+        Seed::from(&vault_bump_arr),
+    ];
+
     // Execute each compact instruction
     for compact_ix in &compact_instructions {
         let decompressed = compact_ix.decompress(accounts)?;
-
-        let account_metas: Vec<AccountMeta> = decompressed
-            .accounts
-            .iter()
-            .map(|acc| AccountMeta {
-                pubkey: acc.key(),
-                is_signer: acc.is_signer() || acc.key() == vault_pda.key(),
-                is_writable: acc.is_writable(),
-            })
-            .collect();
 
         // Prevent self-reentrancy (Issue #10)
         if decompressed.program_id.as_ref() == program_id.as_ref() {
             return Err(AuthError::SelfReentrancyNotAllowed.into());
         }
 
+        account_metas.clear();
+        cpi_accounts.clear();
+        for &acc in &decompressed.accounts {
+            account_metas.push(AccountMeta {
+                pubkey: acc.key(),
+                is_signer: acc.is_signer() || acc.key() == vault_pda.key(),
+                is_writable: acc.is_writable(),
+            });
+            cpi_accounts.push(Account::from(acc));
+        }
+
         let ix = Instruction {
             program_id: decompressed.program_id,
             accounts: &account_metas,
-            data: &decompressed.data,
+            data: decompressed.data,
         };
 
-        let vault_bump_arr = [vault_bump];
-        let seeds = [
-            Seed::from(b"vault"),
-            Seed::from(wallet_pda.key().as_ref()),
-            Seed::from(&vault_bump_arr),
-        ];
         let signer: Signer = (&seeds).into();
-
-        let cpi_accounts: Vec<Account> = decompressed
-            .accounts
-            .iter()
-            .map(|acc| Account::from(*acc))
-            .collect();
 
         unsafe {
             invoke_signed_unchecked(&ix, &cpi_accounts, &[signer]);
@@ -357,7 +361,7 @@ pub fn process(
 /// an array of slices natively, so the concat step was pure overhead.
 fn compute_accounts_hash(
     accounts: &[AccountInfo],
-    compact_instructions: &[crate::compact::CompactInstruction],
+    compact_instructions: &[CompactInstructionRef<'_>],
 ) -> Result<[u8; 32], ProgramError> {
     // Collect slice references (16 bytes each) instead of copying 32-byte pubkeys.
     // With MAX_COMPACT_INSTRUCTIONS = 16 and a reasonable per-ix account count,
@@ -371,7 +375,7 @@ fn compute_accounts_hash(
         }
         refs.push(accounts[program_idx].key().as_ref());
 
-        for &acc_idx in &ix.accounts {
+        for &acc_idx in ix.accounts {
             let idx = acc_idx as usize;
             if idx >= accounts.len() {
                 return Err(ProgramError::InvalidInstructionData);

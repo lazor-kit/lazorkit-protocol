@@ -15,7 +15,7 @@
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
 
 use crate::{
-    compact::CompactInstruction,
+    compact::CompactInstructionRef,
     error::AuthError,
     state::{
         action::{parse_actions, read_u64, write_u64, ActionType, ActionView},
@@ -67,7 +67,7 @@ pub struct TokenAuthoritySnapshot {
 /// Returns early with Ok(()) if no actions exist.
 pub fn evaluate_pre_actions(
     session_data: &[u8],
-    compact_instructions: &[CompactInstruction],
+    compact_instructions: &[CompactInstructionRef<'_>],
     accounts: &[AccountInfo],
     current_slot: u64,
 ) -> Result<(), ProgramError> {
