@@ -261,11 +261,37 @@ pub fn extract_top_level_string_field<'a>(
                     cursor += 1;
                 }
             } else {
-                // Non-string value (number, bool, null, object, array) — skip to next comma or }
-                // Track nested structures
+                // Non-string value (number, bool, null, object, array) — skip
+                // until the next comma or closing brace at the same depth.
+                // Track nested braces and brackets, and when we encounter a
+                // string, consume it entirely so that `{`, `}`, `[`, `]`, or
+                // `,` inside the string body don't corrupt depth tracking.
+                //
+                // Without the inner string-skip, a payload like
+                //   {"tokenBinding":{"id":"x}y"},"challenge":"real"}
+                // would have the `}` inside "x}y" mistakenly close the nested
+                // object and the parser would then mis-locate the top-level
+                // "challenge" entry.
                 let mut nest: usize = 0;
                 while cursor < json.len() {
                     match json[cursor] {
+                        b'"' => {
+                            // Consume the string; inner quotes/braces/commas
+                            // must not affect outer nesting state.
+                            cursor += 1;
+                            while cursor < json.len() {
+                                let b = json[cursor];
+                                if b == b'"' {
+                                    cursor += 1;
+                                    break;
+                                }
+                                if b == b'\\' {
+                                    return Err(AuthError::InvalidMessage.into());
+                                }
+                                cursor += 1;
+                            }
+                            continue;
+                        }
                         b'{' | b'[' => nest += 1,
                         b'}' | b']' => {
                             if nest == 0 {
@@ -442,6 +468,72 @@ mod tests {
             extract_top_level_string_field(json, b"challenge").unwrap(),
             b"real"
         );
+    }
+
+    // ─── M1 regression: string content inside nested value must not
+    //     corrupt depth tracking ──────────────────────────────────────
+
+    #[test]
+    fn test_extract_skips_string_containing_close_brace_in_nested_object() {
+        // Pre-fix, the `}` inside "x}y" would mistakenly close the nested
+        // object, and the parser would then mis-locate the top-level
+        // "challenge" entry. Post-fix, the inner string is consumed as a
+        // whole so nested depth stays at 1 until the real `}` at end of
+        // the tokenBinding value.
+        let json = br#"{"tokenBinding":{"id":"x}y"},"challenge":"real"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"real"
+        );
+    }
+
+    #[test]
+    fn test_extract_skips_string_containing_close_bracket() {
+        let json = br#"{"arr":[{"id":"x]y"}],"challenge":"real"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"real"
+        );
+    }
+
+    #[test]
+    fn test_extract_skips_string_containing_comma_in_nested_object() {
+        // Comma inside a string at non-zero depth — should not affect anything,
+        // but once we `continue` to the top of the skip loop we could be fooled
+        // into thinking the comma terminates the value.
+        let json = br#"{"obj":{"k":"a,b,c"},"challenge":"real"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"real"
+        );
+    }
+
+    #[test]
+    fn test_extract_skips_string_containing_open_brace_in_array() {
+        let json = br#"{"arr":[{"id":"x{y"}],"challenge":"real"}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"real"
+        );
+    }
+
+    #[test]
+    fn test_extract_challenge_before_tokenbinding_still_works() {
+        // Safety: ensure the fix doesn't break the common happy path.
+        let json = br#"{"type":"webauthn.get","challenge":"real","tokenBinding":{"id":"x}y"}}"#;
+        assert_eq!(
+            extract_top_level_string_field(json, b"challenge").unwrap(),
+            b"real"
+        );
+    }
+
+    #[test]
+    fn test_extract_rejects_backslash_in_skipped_string_inside_nested() {
+        // Backslashes are rejected in string values everywhere, including
+        // strings inside a skipped nested object. This prevents escape
+        // injection reaching the parser via nested fields.
+        let json = br#"{"obj":{"id":"a\"b"},"challenge":"real"}"#;
+        assert!(extract_top_level_string_field(json, b"challenge").is_err());
     }
 
     // ─── base64url_encode_no_pad tests ──────────────────────────────────
