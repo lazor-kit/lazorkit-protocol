@@ -22,11 +22,15 @@ export function generateAuthenticatorData(rpId: string): Uint8Array {
  * Callback interface for Secp256r1 (passkey/WebAuthn) signing.
  * The SDK never touches private keys.
  *
+ * Secp256r1 authorities are **passkeys only** — real browser authenticators
+ * producing raw clientDataJSON. Programmatic/bot signing should use
+ * Ed25519 authorities instead.
+ *
  * The sign() method receives a SHA-256 challenge and must:
- * 1. Build clientDataJSON: `{ type: "webauthn.get", challenge: base64url(challenge), origin: "https://<rpId>", crossOrigin: false }`
- * 2. Compute clientDataJsonHash = SHA256(clientDataJSON)
- * 3. Sign: signature = ECDSA_SIGN(authenticatorData || clientDataJsonHash)
- * 4. Return { signature (64-byte raw r||s, low-S normalized), authenticatorData, clientDataJsonHash }
+ * 1. Call `navigator.credentials.get({ challenge, ... })` or the platform equivalent
+ * 2. Return the raw WebAuthn response — signature, authenticatorData, and the
+ *    raw clientDataJSON bytes (the on-chain program validates `challenge` and
+ *    `type` fields directly from these bytes)
  */
 export interface Secp256r1Signer {
   /** Compressed public key (33 bytes) */
@@ -37,13 +41,8 @@ export interface Secp256r1Signer {
   rpId: string;
   /**
    * Signs the SHA-256 challenge with the passkey.
-   * Returns { signature, authenticatorData, clientDataJsonHash, clientDataJson? }.
-   *
-   * If `clientDataJson` (raw bytes) is returned, the SDK uses Mode 1 (raw clientDataJSON)
-   * which forwards the exact bytes to the on-chain program. This is required for real
-   * browser authenticators whose clientDataJSON varies by platform.
-   *
-   * If `clientDataJson` is omitted, Mode 0 (on-chain reconstruction) is used.
+   * MUST return the raw `clientDataJson` bytes — the SDK no longer supports
+   * the on-chain-reconstructed (Mode 0) flow.
    */
   sign(challenge: Uint8Array): Promise<{
     /** 64-byte raw ECDSA signature (r || s), low-S normalized */
@@ -52,8 +51,8 @@ export interface Secp256r1Signer {
     authenticatorData: Uint8Array;
     /** SHA256 of the clientDataJSON */
     clientDataJsonHash: Uint8Array;
-    /** Raw clientDataJSON bytes from the authenticator (enables Mode 1 if provided) */
-    clientDataJson?: Uint8Array;
+    /** Raw clientDataJSON bytes from the authenticator */
+    clientDataJson: Uint8Array;
   }>;
 }
 
@@ -97,65 +96,45 @@ export async function readAuthorityPubkey(
   return new Uint8Array(info.data.slice(80, 80 + 33));
 }
 
-/** Mode 1 flag: bit 7 of the flags byte signals raw clientDataJSON mode. */
-export const MODE_RAW_CLIENT_DATA_JSON = 0x80;
-
 /**
- * Builds the auth_payload bytes for a Secp256r1 operation.
+ * Builds the auth_payload bytes for a Secp256r1 Execute (raw clientDataJSON).
  *
- * **Mode 0** (reconstructed, default):
- *   [slot(8)][counter(4)][sysvarIxIdx(1)][typeAndFlags(1)][authenticatorData(M)]
- *
- * **Mode 1** (raw clientDataJSON — pass `clientDataJson`):
- *   [slot(8)][counter(4)][sysvarIxIdx(1)][0x80(1)][authDataLen(2 LE)][authenticatorData(M)][cdjLen(2 LE)][clientDataJson(N)]
+ * Layout:
+ *   [slot(8)][counter(4)][sysvarIxIdx(1)][reserved(1)]
+ *   [authDataLen(2 LE)][authenticatorData(M)]
+ *   [cdjLen(2 LE)][clientDataJson(N)]
  */
 export function buildAuthPayload(params: {
   slot: bigint;
   counter: number;
   sysvarIxIndex: number;
-  typeAndFlags: number;
   authenticatorData: Uint8Array;
-  /** If provided, builds Mode 1 (raw clientDataJSON) payload */
-  clientDataJson?: Uint8Array;
+  clientDataJson: Uint8Array;
 }): Uint8Array {
-  if (params.clientDataJson) {
-    // Mode 1: raw clientDataJSON
-    const authDataLen = params.authenticatorData.length;
-    const cdjLen = params.clientDataJson.length;
-    const totalLen = 8 + 4 + 1 + 1 + 2 + authDataLen + 2 + cdjLen;
-    const buf = Buffer.alloc(totalLen);
-    let offset = 0;
-
-    buf.writeBigUInt64LE(params.slot, offset); offset += 8;
-    buf.writeUInt32LE(params.counter, offset); offset += 4;
-    buf.writeUInt8(params.sysvarIxIndex, offset); offset += 1;
-    buf.writeUInt8(MODE_RAW_CLIENT_DATA_JSON, offset); offset += 1;
-    buf.writeUInt16LE(authDataLen, offset); offset += 2;
-    Buffer.from(params.authenticatorData).copy(buf, offset); offset += authDataLen;
-    buf.writeUInt16LE(cdjLen, offset); offset += 2;
-    Buffer.from(params.clientDataJson).copy(buf, offset);
-
-    return new Uint8Array(buf);
-  }
-
-  // Mode 0: reconstructed clientDataJSON (existing behavior)
-  const totalLen = 8 + 4 + 1 + 1 + params.authenticatorData.length;
+  const authDataLen = params.authenticatorData.length;
+  const cdjLen = params.clientDataJson.length;
+  const totalLen = 8 + 4 + 1 + 1 + 2 + authDataLen + 2 + cdjLen;
   const buf = Buffer.alloc(totalLen);
   let offset = 0;
 
   buf.writeBigUInt64LE(params.slot, offset); offset += 8;
   buf.writeUInt32LE(params.counter, offset); offset += 4;
   buf.writeUInt8(params.sysvarIxIndex, offset); offset += 1;
-  buf.writeUInt8(params.typeAndFlags, offset); offset += 1;
-  Buffer.from(params.authenticatorData).copy(buf, offset);
+  // Reserved byte (formerly Mode 1 flag — now always set for backwards-compatible
+  // auth_payload_prefix layout).
+  buf.writeUInt8(0x80, offset); offset += 1;
+  buf.writeUInt16LE(authDataLen, offset); offset += 2;
+  Buffer.from(params.authenticatorData).copy(buf, offset); offset += authDataLen;
+  buf.writeUInt16LE(cdjLen, offset); offset += 2;
+  Buffer.from(params.clientDataJson).copy(buf, offset);
 
   return new Uint8Array(buf);
 }
 
 /**
- * Builds the 14-byte fixed prefix of the auth_payload for Mode 1 challenge computation.
- * The challenge must be computed BEFORE signing (we don't yet have authenticatorData/clientDataJSON),
- * so only the deterministic prefix is hashed.
+ * Builds the 14-byte fixed prefix of the auth_payload for challenge computation.
+ * The challenge is computed BEFORE signing — at that point we don't yet have
+ * authenticatorData/clientDataJSON, so only the deterministic prefix is hashed.
  */
 export function buildAuthPayloadPrefix(params: {
   slot: bigint;
@@ -166,7 +145,7 @@ export function buildAuthPayloadPrefix(params: {
   buf.writeBigUInt64LE(params.slot, 0);
   buf.writeUInt32LE(params.counter, 8);
   buf.writeUInt8(params.sysvarIxIndex, 12);
-  buf.writeUInt8(MODE_RAW_CLIENT_DATA_JSON, 13);
+  buf.writeUInt8(0x80, 13);
   return new Uint8Array(buf);
 }
 

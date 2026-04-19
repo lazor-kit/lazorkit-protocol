@@ -1,49 +1,9 @@
 use crate::error::AuthError;
 use pinocchio::program_error::ProgramError;
 
-/// Packed flags for clientDataJson reconstruction
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub struct ClientDataJsonReconstructionParams {
-    pub type_and_flags: u8,
-}
-
-impl ClientDataJsonReconstructionParams {
-    #[allow(dead_code)]
-    const TYPE_CREATE: u8 = 0x00;
-    const TYPE_GET: u8 = 0x10;
-    const FLAG_CROSS_ORIGIN: u8 = 0x01;
-    const FLAG_HTTP_ORIGIN: u8 = 0x02;
-    const FLAG_GOOGLE_EXTRA: u8 = 0x04;
-
-    pub fn auth_type(&self) -> AuthType {
-        if (self.type_and_flags & 0xF0) == Self::TYPE_GET {
-            AuthType::Get
-        } else {
-            AuthType::Create
-        }
-    }
-
-    pub fn is_cross_origin(&self) -> bool {
-        self.type_and_flags & Self::FLAG_CROSS_ORIGIN != 0
-    }
-
-    pub fn is_http(&self) -> bool {
-        self.type_and_flags & Self::FLAG_HTTP_ORIGIN != 0
-    }
-
-    pub fn has_google_extra(&self) -> bool {
-        self.type_and_flags & Self::FLAG_GOOGLE_EXTRA != 0
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum AuthType {
-    Create,
-    Get,
-}
-
-/// Simple Base64URL encoder without padding
+/// Simple Base64URL encoder without padding.
+/// Used to compare an on-chain-computed challenge against the base64url value
+/// the browser authenticator placed inside clientDataJSON.
 pub fn base64url_encode_no_pad(data: &[u8]) -> Vec<u8> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut result = Vec::with_capacity(data.len().div_ceil(3) * 4);
@@ -68,54 +28,8 @@ pub fn base64url_encode_no_pad(data: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Reconstructs the clientDataJson
-pub fn reconstruct_client_data_json(
-    params: &ClientDataJsonReconstructionParams,
-    rp_id: &[u8],
-    challenge: &[u8],
-) -> Vec<u8> {
-    let challenge_b64url = base64url_encode_no_pad(challenge);
-    let type_str: &[u8] = match params.auth_type() {
-        AuthType::Create => b"webauthn.create",
-        AuthType::Get => b"webauthn.get",
-    };
-
-    let prefix: &[u8] = if params.is_http() {
-        b"http://"
-    } else {
-        b"https://"
-    };
-    let cross_origin: &[u8] = if params.is_cross_origin() {
-        b"true"
-    } else {
-        b"false"
-    };
-
-    let mut json = Vec::with_capacity(256);
-    json.extend_from_slice(b"{\"type\":\"");
-    json.extend_from_slice(type_str);
-    json.extend_from_slice(b"\",\"challenge\":\"");
-    json.extend_from_slice(&challenge_b64url);
-    json.extend_from_slice(b"\",\"origin\":\"");
-    json.extend_from_slice(prefix);
-    json.extend_from_slice(rp_id);
-    json.extend_from_slice(b"\",\"crossOrigin\":");
-    json.extend_from_slice(cross_origin);
-
-    if params.has_google_extra() {
-        json.extend_from_slice(b",\"other_keys_can_be_added_here\":\"do not compare clientDataJSON against a template. See https://goo.gl/yabPex\"");
-    }
-
-    json.extend_from_slice(b"}");
-    json
-}
-
 /// Minimum authenticator data length: rpIdHash(32) + flags(1) + counter(4) = 37
 pub const AUTH_DATA_MIN_LEN: usize = 37;
-
-/// Mode bit in the flags byte (auth_payload[13]).
-/// When set, the client sends raw clientDataJSON instead of reconstruction flags.
-pub const MODE_RAW_CLIENT_DATA_JSON: u8 = 0x80;
 
 /// Parser for WebAuthn authenticator data
 pub struct AuthDataParser<'a> {
@@ -578,60 +492,6 @@ mod tests {
         );
     }
 
-    // ─── reconstruct_client_data_json tests ─────────────────────────────
-
-    #[test]
-    fn test_reconstruct_webauthn_get_https() {
-        let params = ClientDataJsonReconstructionParams {
-            type_and_flags: 0x10, // webauthn.get + https
-        };
-        let json = reconstruct_client_data_json(&params, b"example.com", b"challenge123");
-        let json_str = std::str::from_utf8(&json).unwrap();
-        assert!(json_str.starts_with(r#"{"type":"webauthn.get","challenge":""#));
-        assert!(json_str.contains(r#""origin":"https://example.com""#));
-        assert!(json_str.contains(r#""crossOrigin":false"#));
-    }
-
-    #[test]
-    fn test_reconstruct_webauthn_get_http() {
-        let params = ClientDataJsonReconstructionParams {
-            type_and_flags: 0x12, // webauthn.get + http
-        };
-        let json = reconstruct_client_data_json(&params, b"localhost", b"test");
-        let json_str = std::str::from_utf8(&json).unwrap();
-        assert!(json_str.contains(r#""origin":"http://localhost""#));
-    }
-
-    #[test]
-    fn test_reconstruct_cross_origin() {
-        let params = ClientDataJsonReconstructionParams {
-            type_and_flags: 0x11, // webauthn.get + https + crossOrigin
-        };
-        let json = reconstruct_client_data_json(&params, b"example.com", b"test");
-        let json_str = std::str::from_utf8(&json).unwrap();
-        assert!(json_str.contains(r#""crossOrigin":true"#));
-    }
-
-    #[test]
-    fn test_reconstruct_google_extra() {
-        let params = ClientDataJsonReconstructionParams {
-            type_and_flags: 0x14, // webauthn.get + https + google extra
-        };
-        let json = reconstruct_client_data_json(&params, b"example.com", b"test");
-        let json_str = std::str::from_utf8(&json).unwrap();
-        assert!(json_str.contains(r#""other_keys_can_be_added_here""#));
-    }
-
-    #[test]
-    fn test_reconstruct_webauthn_create() {
-        let params = ClientDataJsonReconstructionParams {
-            type_and_flags: 0x00, // webauthn.create + https
-        };
-        let json = reconstruct_client_data_json(&params, b"example.com", b"test");
-        let json_str = std::str::from_utf8(&json).unwrap();
-        assert!(json_str.contains(r#""type":"webauthn.create""#));
-    }
-
     // ─── AuthDataParser tests ───────────────────────────────────────────
 
     #[test]
@@ -669,80 +529,6 @@ mod tests {
         data[32] = 0x41; // user present + attested credential data
         let parser = AuthDataParser::new(&data).unwrap();
         assert!(parser.is_user_present());
-    }
-
-    // ─── MODE_RAW_CLIENT_DATA_JSON tests ────────────────────────────────
-
-    #[test]
-    fn test_mode_bit_does_not_conflict_with_existing_flags() {
-        // All valid Mode 0 flag values should have bit 7 clear
-        let valid_mode0_flags: &[u8] = &[
-            0x00, // webauthn.create + https
-            0x01, // webauthn.create + https + crossOrigin
-            0x02, // webauthn.create + http
-            0x04, // webauthn.create + google extra
-            0x10, // webauthn.get + https
-            0x11, // webauthn.get + https + crossOrigin
-            0x12, // webauthn.get + http
-            0x14, // webauthn.get + google extra
-            0x17, // webauthn.get + all flags
-        ];
-        for &flags in valid_mode0_flags {
-            assert_eq!(
-                flags & MODE_RAW_CLIENT_DATA_JSON,
-                0,
-                "Mode 0 flag 0x{:02x} must not have bit 7 set",
-                flags
-            );
-        }
-    }
-
-    #[test]
-    fn test_mode_raw_is_detected() {
-        assert_ne!(0x80 & MODE_RAW_CLIENT_DATA_JSON, 0);
-        assert_ne!(0xFF & MODE_RAW_CLIENT_DATA_JSON, 0);
-    }
-
-    // ─── Round-trip: reconstruct then extract ───────────────────────────
-
-    #[test]
-    fn test_roundtrip_reconstruct_then_extract() {
-        let challenge = [0xABu8; 32];
-        let params = ClientDataJsonReconstructionParams {
-            type_and_flags: 0x10,
-        };
-        let json = reconstruct_client_data_json(&params, b"example.com", &challenge);
-
-        // Extract challenge back from reconstructed JSON
-        let extracted_challenge =
-            extract_top_level_string_field(&json, b"challenge").unwrap();
-        let expected_b64 = base64url_encode_no_pad(&challenge);
-        assert_eq!(extracted_challenge, expected_b64.as_slice());
-
-        // Extract type
-        let extracted_type = extract_top_level_string_field(&json, b"type").unwrap();
-        assert_eq!(extracted_type, b"webauthn.get");
-
-        // Extract origin
-        let extracted_origin = extract_top_level_string_field(&json, b"origin").unwrap();
-        assert_eq!(extracted_origin, b"https://example.com");
-    }
-
-    #[test]
-    fn test_roundtrip_with_google_extra() {
-        let challenge = [0xCDu8; 32];
-        let params = ClientDataJsonReconstructionParams {
-            type_and_flags: 0x14, // google extra
-        };
-        let json = reconstruct_client_data_json(&params, b"google.com", &challenge);
-
-        let extracted_challenge =
-            extract_top_level_string_field(&json, b"challenge").unwrap();
-        let expected_b64 = base64url_encode_no_pad(&challenge);
-        assert_eq!(extracted_challenge, expected_b64.as_slice());
-
-        let extracted_type = extract_top_level_string_field(&json, b"type").unwrap();
-        assert_eq!(extracted_type, b"webauthn.get");
     }
 
     // ─── Real-world clientDataJSON samples ──────────────────────────────

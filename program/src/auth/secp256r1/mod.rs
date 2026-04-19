@@ -15,10 +15,7 @@ pub mod introspection;
 pub mod webauthn;
 
 use self::introspection::verify_secp256r1_instruction_data;
-use self::webauthn::{
-    base64url_encode_no_pad, extract_top_level_string_field, reconstruct_client_data_json,
-    AuthDataParser, ClientDataJsonReconstructionParams, MODE_RAW_CLIENT_DATA_JSON,
-};
+use self::webauthn::{base64url_encode_no_pad, extract_top_level_string_field, AuthDataParser};
 
 use crate::auth::traits::Authenticator;
 use crate::utils::get_stack_height;
@@ -32,16 +29,20 @@ pub struct Secp256r1Authenticator;
 impl Authenticator for Secp256r1Authenticator {
     /// Authenticates a Secp256r1 signature (WebAuthn/Passkeys).
     ///
-    /// Two modes, selected by bit 7 of auth_payload[13]:
+    /// Auth payload layout (raw clientDataJSON — the only supported mode):
+    ///   [slot(8)] [counter(4)] [sysvarIxIdx(1)] [_reserved(1)]
+    ///   [authDataLen(2 LE)] [authenticatorData(M)]
+    ///   [cdjLen(2 LE)] [clientDataJson(N)]
     ///
-    /// **Mode 0** (reconstructed, bit 7 clear) — for programmatic/bot signing:
-    ///   [slot(8)] [counter(4)] [sysvarIxIdx(1)] [flags(1)] [authenticatorData(M)]
+    /// rpIdHash is pre-computed at authority creation and stored on the
+    /// Authority account, so every Execute saves one sol_sha256 syscall and
+    /// the Authority account size is fixed (145 bytes for Secp256r1).
     ///
-    /// **Mode 1** (raw clientDataJSON, bit 7 set) — for real browser authenticators:
-    ///   [slot(8)] [counter(4)] [sysvarIxIdx(1)] [0x80(1)] [authDataLen(2 LE)] [authenticatorData(M)] [cdjLen(2 LE)] [clientDataJson(N)]
+    /// Counter is a program-controlled u32 odometer. Client must submit
+    /// `on_chain_counter + 1`.
     ///
-    /// rpId is stored on the authority account (not in the payload).
-    /// Counter is a program-controlled u32 odometer. Client must submit `on_chain_counter + 1`.
+    /// Programmatic/bot signing should use Ed25519 authorities instead —
+    /// Secp256r1 is passkeys-only.
     fn authenticate(
         &self,
         accounts: &[AccountInfo],
@@ -51,16 +52,16 @@ impl Authenticator for Secp256r1Authenticator {
         discriminator: &[u8],
         program_id: &Pubkey,
     ) -> Result<(), ProgramError> {
-        // Minimum: slot(8) + counter(4) + sysvarIxIdx(1) + flags/mode(1) = 14
-        if auth_payload.len() < 14 {
+        // Minimum: slot(8) + counter(4) + sysvarIxIdx(1) + reserved(1) = 14,
+        // plus authDataLen(2) + cdjLen(2) = 18 before any payload bytes.
+        if auth_payload.len() < 18 {
             return Err(AuthError::InvalidAuthorityPayload.into());
         }
 
         let slot = u64::from_le_bytes(auth_payload[0..8].try_into().unwrap());
         let submitted_counter = u32::from_le_bytes(auth_payload[8..12].try_into().unwrap());
         let sysvar_ix_index = auth_payload[12] as usize;
-        let mode_byte = auth_payload[13];
-        let is_raw_mode = mode_byte & MODE_RAW_CLIENT_DATA_JSON != 0;
+        // auth_payload[13] reserved (carried over from legacy mode byte).
 
         // Anti-CPI check: prevent cross-program authentication attacks
         if get_stack_height() > 1 {
@@ -92,56 +93,29 @@ impl Authenticator for Secp256r1Authenticator {
             return Err(AuthError::SignatureReused.into());
         }
 
-        // Secp256r1 on-chain data layout:
-        //   [Header(48)] [credential_id_hash(32)] [Pubkey(33)] [rpIdLen(1)] [rpId(N)]
-        let pubkey_offset = header_size + 32;
-        if auth_data.len() < pubkey_offset + 33 {
+        // Secp256r1 on-chain data layout (fixed 145 bytes total):
+        //   [Header(48)] [credential_id_hash(32)] [Pubkey(33)] [rpIdHash(32)]
+        let pubkey_offset = header_size + 32; // 80
+        let rp_id_hash_offset = pubkey_offset + 33; // 113
+        if auth_data.len() < rp_id_hash_offset + 32 {
             return Err(AuthError::InvalidAuthorityPayload.into());
         }
-
-        // Read rpId from authority account data
-        let rp_id_len_offset = pubkey_offset + 33;
-        if auth_data.len() < rp_id_len_offset + 1 {
-            return Err(AuthError::InvalidAuthorityPayload.into());
-        }
-        let rp_id_len = auth_data[rp_id_len_offset] as usize;
-        let rp_id_offset = rp_id_len_offset + 1;
-        if auth_data.len() < rp_id_offset + rp_id_len {
-            return Err(AuthError::InvalidAuthorityPayload.into());
-        }
-        let rp_id = &auth_data[rp_id_offset..rp_id_offset + rp_id_len];
-
-        #[allow(unused_assignments)]
-        let mut computed_rp_id_hash = [0u8; 32];
-        #[cfg(target_os = "solana")]
-        unsafe {
-            let _res = pinocchio::syscalls::sol_sha256(
-                [rp_id].as_ptr() as *const u8,
-                1,
-                computed_rp_id_hash.as_mut_ptr(),
-            );
-        }
-        #[cfg(not(target_os = "solana"))]
-        {
-            computed_rp_id_hash = [0u8; 32];
-        }
+        let stored_rp_id_hash = &auth_data[rp_id_hash_offset..rp_id_hash_offset + 32];
 
         let payer = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
         if !payer.is_signer() {
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        // Build challenge hash.
-        // Mode 0: SHA256(discriminator || auth_payload || signed_payload || payer || counter || program_id)
-        // Mode 1: SHA256(discriminator || auth_payload[..14] || signed_payload || payer || counter || program_id)
-        //   (Only the 14-byte fixed prefix is used, because the rest contains clientDataJSON
-        //   which is produced by the authenticator AFTER signing the challenge.)
+        // Challenge hash:
+        //   SHA256(discriminator || auth_payload[..14] || signed_payload
+        //          || payer || counter || program_id)
+        //
+        // Only the 14-byte fixed prefix of auth_payload is included because the
+        // remainder contains clientDataJSON — which is produced by the
+        // authenticator *after* signing the challenge, so it can't be in the
+        // hash input.
         let counter_bytes = expected_counter.to_le_bytes();
-        let challenge_input = if is_raw_mode {
-            &auth_payload[..14]
-        } else {
-            auth_payload
-        };
         #[allow(unused_assignments)]
         let mut hasher = [0u8; 32];
         #[cfg(target_os = "solana")]
@@ -149,7 +123,7 @@ impl Authenticator for Secp256r1Authenticator {
             let _res = pinocchio::syscalls::sol_sha256(
                 [
                     discriminator,
-                    challenge_input,
+                    &auth_payload[..14],
                     signed_payload,
                     payer.key().as_ref(),
                     &counter_bytes,
@@ -162,108 +136,66 @@ impl Authenticator for Secp256r1Authenticator {
         }
         #[cfg(not(target_os = "solana"))]
         {
-            let _ = signed_payload;
-            let _ = discriminator;
-            let _ = counter_bytes;
-            let _ = program_id;
-            let _ = challenge_input;
+            let _ = (signed_payload, discriminator, counter_bytes, program_id);
             hasher = [0u8; 32];
         }
 
-        // --- Mode branch: produce (authenticator_data_raw, client_data_hash) ---
-        let authenticator_data_raw: &[u8];
+        // --- Parse Mode 1 payload: authenticatorData + clientDataJSON ---
+        let auth_data_len =
+            u16::from_le_bytes(auth_payload[14..16].try_into().unwrap()) as usize;
+        if auth_payload.len() < 16 + auth_data_len + 2 {
+            return Err(AuthError::InvalidAuthorityPayload.into());
+        }
+        let authenticator_data_raw = &auth_payload[16..16 + auth_data_len];
+
+        let cdj_len_offset = 16 + auth_data_len;
+        let cdj_len =
+            u16::from_le_bytes(auth_payload[cdj_len_offset..cdj_len_offset + 2].try_into().unwrap())
+                as usize;
+        let cdj_offset = cdj_len_offset + 2;
+        // L2: strict length — trailing bytes after cdj are not covered by
+        // challenge hash or precompile message, so they're rejected.
+        if cdj_len == 0 || auth_payload.len() != cdj_offset + cdj_len {
+            return Err(AuthError::InvalidAuthorityPayload.into());
+        }
+        let raw_client_data_json = &auth_payload[cdj_offset..cdj_offset + cdj_len];
+
+        // L1: We intentionally do NOT validate the `origin` field inside the
+        // clientDataJSON. The binding that matters is the authenticator's
+        // `rpIdHash` (checked below against the on-chain stored rpIdHash),
+        // which the authenticator hardware/OS computes from the registered
+        // relying party and refuses to sign cross-origin.
+
+        // Validate "type" field is "webauthn.get"
+        let type_value = extract_top_level_string_field(raw_client_data_json, b"type")?;
+        if type_value != b"webauthn.get" {
+            return Err(AuthError::InvalidAuthenticationKind.into());
+        }
+
+        // Validate "challenge" field matches expected base64url(challenge_hash).
+        // L3: constant-time byte comparison.
+        let challenge_value =
+            extract_top_level_string_field(raw_client_data_json, b"challenge")?;
+        let expected_challenge_b64 = base64url_encode_no_pad(&hasher);
+        if !ct_eq(challenge_value, expected_challenge_b64.as_slice()) {
+            return Err(AuthError::InvalidMessageHash.into());
+        }
+
+        // Hash the raw clientDataJSON
         #[allow(unused_assignments)]
         let mut client_data_hash = [0u8; 32];
-
-        if is_raw_mode {
-            // Mode 1: Raw clientDataJSON from real authenticator
-            // Layout after fixed prefix: [authDataLen(2)][authData(M)][cdjLen(2)][cdj(N)]
-            if auth_payload.len() < 16 {
-                return Err(AuthError::InvalidAuthorityPayload.into());
-            }
-            let auth_data_len =
-                u16::from_le_bytes(auth_payload[14..16].try_into().unwrap()) as usize;
-            if auth_payload.len() < 16 + auth_data_len + 2 {
-                return Err(AuthError::InvalidAuthorityPayload.into());
-            }
-            authenticator_data_raw = &auth_payload[16..16 + auth_data_len];
-
-            let cdj_len_offset = 16 + auth_data_len;
-            let cdj_len = u16::from_le_bytes(
-                auth_payload[cdj_len_offset..cdj_len_offset + 2]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            let cdj_offset = cdj_len_offset + 2;
-            // L2: require exact length. Trailing bytes after the declared cdj are
-            // not covered by the challenge hash or the precompile message, so they
-            // carry no meaning — reject rather than silently accept.
-            if cdj_len == 0 || auth_payload.len() != cdj_offset + cdj_len {
-                return Err(AuthError::InvalidAuthorityPayload.into());
-            }
-            let raw_client_data_json = &auth_payload[cdj_offset..cdj_offset + cdj_len];
-
-            // L1: We intentionally do NOT validate the `origin` field inside the
-            // clientDataJSON. The binding that matters is the authenticator's
-            // `rpIdHash` (checked below against the on-chain stored rpId), which
-            // the authenticator hardware/OS computes from the registered relying
-            // party and refuses to sign cross-origin. Validating origin here
-            // would break non-https origins (Android APKs, localhost dev) without
-            // adding security the rpIdHash check doesn't already provide.
-
-            // Validate "type" field is "webauthn.get"
-            let type_value = extract_top_level_string_field(raw_client_data_json, b"type")?;
-            if type_value != b"webauthn.get" {
-                return Err(AuthError::InvalidAuthenticationKind.into());
-            }
-
-            // Validate "challenge" field matches expected base64url(challenge_hash).
-            // L3: constant-time byte comparison. The expected value is a SHA-256
-            // output so an attacker can't realistically exploit a timing channel,
-            // but constant-time is free and makes the guarantee explicit.
-            let challenge_value =
-                extract_top_level_string_field(raw_client_data_json, b"challenge")?;
-            let expected_challenge_b64 = base64url_encode_no_pad(&hasher);
-            if !ct_eq(challenge_value, expected_challenge_b64.as_slice()) {
-                return Err(AuthError::InvalidMessageHash.into());
-            }
-
-            // Hash the raw clientDataJSON
-            #[cfg(target_os = "solana")]
-            unsafe {
-                let _res = pinocchio::syscalls::sol_sha256(
-                    [raw_client_data_json].as_ptr() as *const u8,
-                    1,
-                    client_data_hash.as_mut_ptr(),
-                );
-            }
-            #[cfg(not(target_os = "solana"))]
-            {
-                let _ = raw_client_data_json;
-                client_data_hash = [0u8; 32];
-            }
-        } else {
-            // Mode 0: Reconstruct clientDataJSON on-chain (existing behavior)
-            let reconstruction_params = ClientDataJsonReconstructionParams {
-                type_and_flags: mode_byte,
-            };
-            authenticator_data_raw = &auth_payload[14..];
-
-            let client_data_json =
-                reconstruct_client_data_json(&reconstruction_params, rp_id, &hasher);
-            #[cfg(target_os = "solana")]
-            unsafe {
-                let _res = pinocchio::syscalls::sol_sha256(
-                    [client_data_json.as_slice()].as_ptr() as *const u8,
-                    1,
-                    client_data_hash.as_mut_ptr(),
-                );
-            }
-            #[cfg(not(target_os = "solana"))]
-            {
-                let _ = client_data_json;
-                client_data_hash = [0u8; 32];
-            }
+        #[cfg(target_os = "solana")]
+        unsafe {
+            let _res = pinocchio::syscalls::sol_sha256(
+                [raw_client_data_json].as_ptr() as *const u8,
+                1,
+                client_data_hash.as_mut_ptr(),
+            );
+        }
+        #[cfg(not(target_os = "solana"))]
+        {
+            let _ = raw_client_data_json;
+            client_data_hash = [0u8; 32];
         }
 
         // --- Shared validation (both modes) ---
@@ -276,8 +208,8 @@ impl Authenticator for Secp256r1Authenticator {
         // Note: We intentionally do NOT check the WebAuthn hardware counter.
         // Synced passkeys (iCloud, Google) may return 0 or non-incrementing values.
 
-        // Validate rpIdHash in authenticatorData matches the stored rpId
-        if auth_data_parser.rp_id_hash() != computed_rp_id_hash {
+        // Validate rpIdHash in authenticatorData matches the stored rpIdHash.
+        if auth_data_parser.rp_id_hash() != stored_rp_id_hash {
             return Err(AuthError::InvalidPubkey.into());
         }
 

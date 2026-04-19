@@ -10,7 +10,6 @@ import {
   buildAuthPayloadPrefix,
   buildSecp256r1Challenge,
   generateAuthenticatorData,
-  MODE_RAW_CLIENT_DATA_JSON,
   type Secp256r1Signer,
 } from '../../sdk/sdk-legacy/src/utils/secp256r1';
 import type { WebAuthnResponse } from '../../sdk/sdk-legacy/src/utils/signing';
@@ -73,44 +72,8 @@ function bytesToBase64UrlNoPad(bytes: Uint8Array): string {
 }
 
 /**
- * Creates a Secp256r1Signer from a mock key, compatible with LazorKitClient.
- *
- * The signer implements the full WebAuthn-compatible signing flow:
- * 1. Generates authenticatorData from rpId
- * 2. Builds clientDataJSON with the challenge
- * 3. Signs authenticatorData + SHA256(clientDataJSON)
- * 4. Returns { signature (low-S), authenticatorData, clientDataJsonHash }
- */
-export function createMockSigner(key: MockSecp256r1Key): Secp256r1Signer {
-  return {
-    publicKeyBytes: key.publicKeyBytes,
-    credentialIdHash: key.credentialIdHash,
-    rpId: key.rpId,
-    async sign(challenge: Uint8Array) {
-      const authenticatorData = generateAuthenticatorData(key.rpId);
-
-      const clientDataJson = JSON.stringify({
-        type: 'webauthn.get',
-        challenge: bytesToBase64UrlNoPad(challenge),
-        origin: `https://${key.rpId}`,
-        crossOrigin: false,
-      });
-      const clientDataJsonHash = new Uint8Array(
-        crypto.createHash('sha256').update(clientDataJson).digest(),
-      );
-
-      const messageToSign = Buffer.concat([authenticatorData, clientDataJsonHash]);
-      const signatureBase64 = await key.privateKey.sign(Buffer.from(messageToSign));
-      const signature = enforceLowS(new Uint8Array(Buffer.from(signatureBase64, 'base64')));
-
-      return { signature, authenticatorData, clientDataJsonHash };
-    },
-  };
-}
-
-/**
- * Creates a Secp256r1Signer that returns raw clientDataJSON (Mode 1).
- * Simulates a real browser authenticator response for testing.
+ * Creates a Secp256r1Signer that returns raw clientDataJSON — the only
+ * supported auth mode. Simulates a real browser authenticator.
  */
 export function createMockRawSigner(key: MockSecp256r1Key): Secp256r1Signer {
   return {
@@ -176,73 +139,10 @@ export async function fakeWebAuthnSign(
  *
  * Use `createMockSigner()` + `LazorKitClient` for simpler tests.
  */
-export async function signSecp256r1(params: {
-  key: MockSecp256r1Key;
-  discriminator: Uint8Array;
-  signedPayload: Uint8Array;
-  slot: bigint;
-  counter: number;
-  payer: PublicKey;
-  sysvarIxIndex: number;
-  programId?: PublicKey;
-}): Promise<{
-  authPayload: Uint8Array;
-  precompileIx: TransactionInstruction;
-}> {
-  const pid = params.programId ?? PROGRAM_ID;
-  const authenticatorData = generateAuthenticatorData(params.key.rpId);
-
-  // Build auth payload (optimized: no rpId, no slotHashes index, u32 counter)
-  const authPayload = buildAuthPayload({
-    slot: params.slot,
-    counter: params.counter,
-    sysvarIxIndex: params.sysvarIxIndex,
-    typeAndFlags: 0x10, // webauthn.get + https
-    authenticatorData,
-  });
-
-  // Compute challenge hash (7 elements)
-  const challengeHash = buildSecp256r1Challenge({
-    discriminator: params.discriminator,
-    authPayload,
-    signedPayload: params.signedPayload,
-    slot: params.slot,
-    payer: params.payer,
-    counter: params.counter,
-    programId: pid,
-  });
-
-  // Build clientDataJSON and compute the actual message to sign
-  const clientDataJson = JSON.stringify({
-    type: 'webauthn.get',
-    challenge: bytesToBase64UrlNoPad(challengeHash),
-    origin: `https://${params.key.rpId}`,
-    crossOrigin: false,
-  });
-  const clientDataJsonHash = crypto.createHash('sha256').update(clientDataJson).digest();
-
-  const messageToSign = Buffer.concat([
-    authenticatorData,
-    clientDataJsonHash,
-  ]);
-
-  // Sign with ecdsa-secp256r1
-  const signatureBase64 = await params.key.privateKey.sign(Buffer.from(messageToSign));
-  const rawSig = enforceLowS(new Uint8Array(Buffer.from(signatureBase64, 'base64')));
-
-  // Build precompile instruction
-  const precompileIx = buildPrecompileIx(
-    params.key.publicKeyBytes,
-    new Uint8Array(messageToSign),
-    rawSig,
-  );
-
-  return { authPayload, precompileIx };
-}
-
 /**
- * Full Secp256r1 signing flow using Mode 1 (raw clientDataJSON) for low-level tests.
- * Uses the 14-byte prefix for challenge computation, then builds the full Mode 1 payload.
+ * Full Secp256r1 signing flow (raw clientDataJSON) for low-level tests.
+ * Uses the 14-byte prefix for challenge computation, then builds the full
+ * auth payload with authenticatorData + raw clientDataJSON.
  */
 export async function signSecp256r1Raw(params: {
   key: MockSecp256r1Key;
@@ -296,12 +196,11 @@ export async function signSecp256r1Raw(params: {
   const signatureBase64 = await params.key.privateKey.sign(Buffer.from(messageToSign));
   const rawSig = enforceLowS(new Uint8Array(Buffer.from(signatureBase64, 'base64')));
 
-  // Build full Mode 1 auth payload
+  // Build full auth payload
   const authPayload = buildAuthPayload({
     slot: params.slot,
     counter: params.counter,
     sysvarIxIndex: params.sysvarIxIndex,
-    typeAndFlags: MODE_RAW_CLIENT_DATA_JSON,
     authenticatorData,
     clientDataJson: clientDataJsonBytes,
   });

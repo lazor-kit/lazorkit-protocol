@@ -31,8 +31,9 @@ export interface Ed25519SignerConfig {
 /**
  * Secp256r1 (passkey / WebAuthn) signer.
  *
- * Defaults to Mode 1 (raw clientDataJSON) which works with all real browser authenticators.
- * Set `rawMode: false` to use Mode 0 (on-chain reconstruction) for programmatic/bot signing.
+ * LazorKit supports a single auth mode for Secp256r1: raw clientDataJSON from
+ * a real browser authenticator. For programmatic/bot signing, use Ed25519
+ * authorities instead.
  */
 export interface Secp256r1SignerConfig {
   type: 'secp256r1';
@@ -41,8 +42,6 @@ export interface Secp256r1SignerConfig {
   authorityPda?: PublicKey;
   /** Override slot (auto-fetched from connection if omitted) */
   slotOverride?: bigint;
-  /** WebAuthn mode. Defaults to true (raw clientDataJSON). Set false for programmatic signing. */
-  rawMode?: boolean;
 }
 
 /** Session key signer */
@@ -162,7 +161,7 @@ export function ed25519(publicKey: PublicKey, authorityPda?: PublicKey): Ed25519
 
 export function secp256r1(
   signer: Secp256r1Signer,
-  opts?: { authorityPda?: PublicKey; slotOverride?: bigint; rawMode?: boolean },
+  opts?: { authorityPda?: PublicKey; slotOverride?: bigint },
 ): Secp256r1SignerConfig {
   return { type: 'secp256r1', signer, ...opts };
 }
