@@ -16,7 +16,7 @@ import {
   findFeeRecordPda,
   findTreasuryShardPda,
 } from './pdas';
-import { readAuthorityCounter } from './secp256r1';
+import { readAuthorityCounter, readAuthorityPubkey } from './secp256r1';
 import {
   packCompactInstructions,
   computeAccountsHash,
@@ -341,9 +341,11 @@ export class LazorKitClient {
   private async resolveSecp256r1(walletPda: PublicKey, p: Secp256r1Params) {
     const authorityPda =
       p.authorityPda ?? this.findAuthority(walletPda, p.credentialIdHash)[0];
+    const publicKeyBytes =
+      p.publicKeyBytes ?? (await readAuthorityPubkey(this.connection, authorityPda));
     const slot = p.slotOverride ?? BigInt(await this.connection.getSlot());
     const counter = (await this.readCounter(authorityPda)) + 1;
-    return { authorityPda, slot, counter };
+    return { authorityPda, publicKeyBytes, slot, counter };
   }
 
   private buildSecp256r1Auth(
@@ -362,7 +364,7 @@ export class LazorKitClient {
     instructions: TransactionInstruction[];
   }): Promise<PreparedExecute> {
     const [vaultPda] = this.findVault(params.walletPda);
-    const { authorityPda, slot, counter } = await this.resolveSecp256r1(
+    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
@@ -407,7 +409,7 @@ export class LazorKitClient {
       counter,
       payer: params.payer,
       programId: this.programId,
-      publicKeyBytes: params.secp256r1.publicKeyBytes,
+      publicKeyBytes,
     });
 
     return {
@@ -468,7 +470,7 @@ export class LazorKitClient {
       params.walletPda,
       credentialOrPubkey,
     );
-    const { authorityPda, slot, counter } = await this.resolveSecp256r1(
+    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
@@ -490,7 +492,7 @@ export class LazorKitClient {
       counter,
       payer: params.payer,
       programId: this.programId,
-      publicKeyBytes: params.secp256r1.publicKeyBytes,
+      publicKeyBytes,
     });
 
     return {
@@ -550,7 +552,7 @@ export class LazorKitClient {
     refundDestination?: PublicKey;
   }): Promise<PreparedRemoveAuthority> {
     const refundDest = params.refundDestination ?? params.payer;
-    const { authorityPda, slot, counter } = await this.resolveSecp256r1(
+    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
@@ -568,7 +570,7 @@ export class LazorKitClient {
       counter,
       payer: params.payer,
       programId: this.programId,
-      publicKeyBytes: params.secp256r1.publicKeyBytes,
+      publicKeyBytes,
     });
 
     return {
@@ -626,7 +628,7 @@ export class LazorKitClient {
       credentialOrPubkey,
     );
     const refundDest = params.refundDestination ?? params.payer;
-    const { authorityPda, slot, counter } = await this.resolveSecp256r1(
+    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
@@ -651,7 +653,7 @@ export class LazorKitClient {
       counter,
       payer: params.payer,
       programId: this.programId,
-      publicKeyBytes: params.secp256r1.publicKeyBytes,
+      publicKeyBytes,
     });
 
     return {
@@ -716,7 +718,7 @@ export class LazorKitClient {
   }): Promise<PreparedCreateSession> {
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
-    const { authorityPda, slot, counter } = await this.resolveSecp256r1(
+    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
@@ -740,7 +742,7 @@ export class LazorKitClient {
       counter,
       payer: params.payer,
       programId: this.programId,
-      publicKeyBytes: params.secp256r1.publicKeyBytes,
+      publicKeyBytes,
     });
 
     return {
@@ -793,7 +795,7 @@ export class LazorKitClient {
     refundDestination?: PublicKey;
   }): Promise<PreparedRevokeSession> {
     const refundDest = params.refundDestination ?? params.payer;
-    const { authorityPda, slot, counter } = await this.resolveSecp256r1(
+    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
@@ -811,7 +813,7 @@ export class LazorKitClient {
       counter,
       payer: params.payer,
       programId: this.programId,
-      publicKeyBytes: params.secp256r1.publicKeyBytes,
+      publicKeyBytes,
     });
 
     return {
@@ -859,7 +861,7 @@ export class LazorKitClient {
     expiryOffset?: number;
   }): Promise<PreparedAuthorize> {
     const [vaultPda] = this.findVault(params.walletPda);
-    const { authorityPda, slot, counter } = await this.resolveSecp256r1(
+    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
@@ -912,7 +914,7 @@ export class LazorKitClient {
       counter,
       payer: params.payer,
       programId: this.programId,
-      publicKeyBytes: params.secp256r1.publicKeyBytes,
+      publicKeyBytes,
     });
 
     return {

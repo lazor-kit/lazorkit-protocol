@@ -66,14 +66,85 @@ export interface DeferredPayload {
   remainingAccounts: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
 }
 
+/** Wire-serializable form of a `DeferredPayload` (all fields are plain JSON types). */
+export interface DeferredPayloadJson {
+  walletPda: string;        // base58
+  deferredExecPda: string;  // base58
+  compactInstructions: {
+    programIdIndex: number;
+    accountIndexes: number[];
+    data: string;           // base64
+  }[];
+  remainingAccounts: {
+    pubkey: string;         // base58
+    isSigner: boolean;
+    isWritable: boolean;
+  }[];
+}
+
+/**
+ * Serializes a `DeferredPayload` into a JSON string safe to send over the wire
+ * (HTTP, WebSocket, store-and-forward). Pair with `deserializeDeferredPayload()`
+ * on the receiving end.
+ */
+export function serializeDeferredPayload(payload: DeferredPayload): string {
+  const json: DeferredPayloadJson = {
+    walletPda: payload.walletPda.toBase58(),
+    deferredExecPda: payload.deferredExecPda.toBase58(),
+    compactInstructions: payload.compactInstructions.map((ix) => ({
+      programIdIndex: ix.programIdIndex,
+      accountIndexes: ix.accountIndexes,
+      data: Buffer.from(ix.data).toString('base64'),
+    })),
+    remainingAccounts: payload.remainingAccounts.map((a) => ({
+      pubkey: a.pubkey.toBase58(),
+      isSigner: a.isSigner,
+      isWritable: a.isWritable,
+    })),
+  };
+  return JSON.stringify(json);
+}
+
+/**
+ * Reconstructs a `DeferredPayload` from a string produced by `serializeDeferredPayload()`.
+ * Throws if the input is malformed.
+ */
+export function deserializeDeferredPayload(serialized: string): DeferredPayload {
+  const json = JSON.parse(serialized) as DeferredPayloadJson;
+  if (
+    typeof json !== 'object' ||
+    json === null ||
+    typeof json.walletPda !== 'string' ||
+    typeof json.deferredExecPda !== 'string' ||
+    !Array.isArray(json.compactInstructions) ||
+    !Array.isArray(json.remainingAccounts)
+  ) {
+    throw new Error('Invalid DeferredPayload JSON shape');
+  }
+  return {
+    walletPda: new PublicKey(json.walletPda),
+    deferredExecPda: new PublicKey(json.deferredExecPda),
+    compactInstructions: json.compactInstructions.map((ix) => ({
+      programIdIndex: ix.programIdIndex,
+      accountIndexes: ix.accountIndexes,
+      data: new Uint8Array(Buffer.from(ix.data, 'base64')),
+    })),
+    remainingAccounts: json.remainingAccounts.map((a) => ({
+      pubkey: new PublicKey(a.pubkey),
+      isSigner: a.isSigner,
+      isWritable: a.isWritable,
+    })),
+  };
+}
+
 // ─── Secp256r1 prepare/finalize types ────────────────────────────────
 
 /** Secp256r1 identity for prepare methods (no signer callback needed) */
 export interface Secp256r1Params {
   /** SHA256 of the credential ID (32 bytes) — used as PDA seed */
   credentialIdHash: Uint8Array;
-  /** Compressed public key (33 bytes) */
-  publicKeyBytes: Uint8Array;
+  /** Compressed public key (33 bytes). Auto-fetched from the on-chain authority account if omitted. */
+  publicKeyBytes?: Uint8Array;
   /** Pre-derived authority PDA (auto-derived from credentialIdHash if omitted) */
   authorityPda?: PublicKey;
   /** Override slot (auto-fetched from connection if omitted) */

@@ -72,6 +72,31 @@ export async function readAuthorityCounter(
   return view.getUint32(8, true); // offset 8, little-endian, u32
 }
 
+/**
+ * Reads the compressed Secp256r1 public key (33 bytes) from an on-chain
+ * authority account. Layout:
+ *   [header(48)] [credential_id_hash(32)] [compressed_pubkey(33)] ...
+ *
+ * Throws if the account doesn't exist, isn't an Authority, or isn't a Secp256r1
+ * authority.
+ */
+export async function readAuthorityPubkey(
+  connection: Connection,
+  authorityPda: PublicKey,
+): Promise<Uint8Array> {
+  const info = await connection.getAccountInfo(authorityPda);
+  if (!info) throw new Error(`Authority account not found: ${authorityPda.toBase58()}`);
+  // Header is 48 bytes, credential_id_hash is 32 bytes, pubkey is 33 bytes.
+  // Min size = 48 + 32 + 33 = 113 bytes for a Secp256r1 authority.
+  if (info.data.length < 113) throw new Error('Authority account too small for Secp256r1');
+  // Byte 0 is the account discriminator: Authority = 2.
+  if (info.data[0] !== 2) throw new Error('Not an Authority account');
+  // Byte 1 is the authority_type: Secp256r1 = 1.
+  if (info.data[1] !== 1) throw new Error('Authority is not Secp256r1');
+  // Pubkey at offset 48 + 32 = 80, length 33.
+  return new Uint8Array(info.data.slice(80, 80 + 33));
+}
+
 /** Mode 1 flag: bit 7 of the flags byte signals raw clientDataJSON mode. */
 export const MODE_RAW_CLIENT_DATA_JSON = 0x80;
 
