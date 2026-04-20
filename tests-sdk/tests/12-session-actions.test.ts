@@ -54,7 +54,7 @@ describe('Session Actions', () => {
     ownerKp = Keypair.generate();
     const userSeed = crypto.randomBytes(32);
 
-    const result = client.createWallet({
+    const result = await client.createWallet({
       payer: ctx.payer.publicKey,
       userSeed,
       owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
@@ -67,7 +67,10 @@ describe('Session Actions', () => {
 
     // Fund the vault generously — multiple airdrops to ensure enough for all tests
     for (let i = 0; i < 3; i++) {
-      const sig = await ctx.connection.requestAirdrop(vaultPda, 10 * LAMPORTS_PER_SOL);
+      const sig = await ctx.connection.requestAirdrop(
+        vaultPda,
+        10 * LAMPORTS_PER_SOL,
+      );
       await ctx.connection.confirmTransaction(sig, 'confirmed');
     }
   });
@@ -103,7 +106,11 @@ describe('Session Actions', () => {
       walletPda,
       signer: session(sessionPda, sessionKp.publicKey),
       instructions: [
-        SystemProgram.transfer({ fromPubkey: vaultPda, toPubkey: recipient, lamports }),
+        SystemProgram.transfer({
+          fromPubkey: vaultPda,
+          toPubkey: recipient,
+          lamports,
+        }),
       ],
     });
     return instructions;
@@ -117,7 +124,12 @@ describe('Session Actions', () => {
     it('no actions — fully open session works', async () => {
       const { sessionKp, sessionPda } = await createSessionWith([]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       await sendTx(ctx, ixs, [sessionKp]);
       const balance = await ctx.connection.getBalance(recipient);
@@ -128,18 +140,24 @@ describe('Session Actions', () => {
       const sessionKp = Keypair.generate();
       const currentSlot = await getSlot(ctx);
 
-      const { instructions: createIxs, sessionPda } = await client.createSession({
-        payer: ctx.payer.publicKey,
-        walletPda,
-        adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
-        sessionKey: sessionKp.publicKey,
-        expiresAt: currentSlot + 50_000n,
-        // no actions field at all
-      });
+      const { instructions: createIxs, sessionPda } =
+        await client.createSession({
+          payer: ctx.payer.publicKey,
+          walletPda,
+          adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
+          sessionKey: sessionKp.publicKey,
+          expiresAt: currentSlot + 50_000n,
+          // no actions field at all
+        });
       await sendTx(ctx, createIxs, [ownerKp]);
 
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 2_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        2_000_000,
+      );
       await sendTx(ctx, ixs, [sessionKp]);
       expect(await ctx.connection.getBalance(recipient)).toBe(2_000_000);
     });
@@ -155,7 +173,12 @@ describe('Session Actions', () => {
         Actions.programWhitelist(SystemProgram.programId),
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       await sendTx(ctx, ixs, [sessionKp]);
       expect(await ctx.connection.getBalance(recipient)).toBe(1_000_000);
@@ -167,7 +190,12 @@ describe('Session Actions', () => {
         Actions.programWhitelist(randomProgram),
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       // Error 3021 = ActionProgramNotWhitelisted
       await sendTxExpectError(ctx, ixs, [sessionKp], 3021);
@@ -179,7 +207,12 @@ describe('Session Actions', () => {
         Actions.programWhitelist(Keypair.generate().publicKey), // extra allowed program
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       await sendTx(ctx, ixs, [sessionKp]);
       expect(await ctx.connection.getBalance(recipient)).toBe(1_000_000);
@@ -196,7 +229,12 @@ describe('Session Actions', () => {
         Actions.programBlacklist(SystemProgram.programId),
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       // Error 3022 = ActionProgramBlacklisted
       await sendTxExpectError(ctx, ixs, [sessionKp], 3022);
@@ -208,7 +246,12 @@ describe('Session Actions', () => {
         Actions.programBlacklist(randomProgram), // only blocks randomProgram
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       await sendTx(ctx, ixs, [sessionKp]);
       expect(await ctx.connection.getBalance(recipient)).toBe(1_000_000);
@@ -225,7 +268,12 @@ describe('Session Actions', () => {
         Actions.solMaxPerTx(2_000_000n),
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       await sendTx(ctx, ixs, [sessionKp]);
       expect(await ctx.connection.getBalance(recipient)).toBe(1_000_000);
@@ -236,7 +284,12 @@ describe('Session Actions', () => {
         Actions.solMaxPerTx(500_000n),
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       // Error 3023 = ActionSolMaxPerTxExceeded
       await sendTxExpectError(ctx, ixs, [sessionKp], 3023);
@@ -247,7 +300,12 @@ describe('Session Actions', () => {
         Actions.solMaxPerTx(1_000_000n),
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, 1_000_000);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
 
       await sendTx(ctx, ixs, [sessionKp]);
       expect(await ctx.connection.getBalance(recipient)).toBe(1_000_000);
@@ -293,10 +351,18 @@ describe('Session Actions', () => {
       const r2 = Keypair.generate().publicKey;
 
       // Tx1: 1 SOL (3 → 2 remaining)
-      await sendTx(ctx, await executeTransfer(sessionKp, sessionPda, r1, LAMPORTS_PER_SOL), [sessionKp]);
+      await sendTx(
+        ctx,
+        await executeTransfer(sessionKp, sessionPda, r1, LAMPORTS_PER_SOL),
+        [sessionKp],
+      );
 
       // Tx2: 1 SOL (2 → 1 remaining)
-      await sendTx(ctx, await executeTransfer(sessionKp, sessionPda, r2, LAMPORTS_PER_SOL), [sessionKp]);
+      await sendTx(
+        ctx,
+        await executeTransfer(sessionKp, sessionPda, r2, LAMPORTS_PER_SOL),
+        [sessionKp],
+      );
 
       // Tx3: 2 SOL — exceeds remaining 1 SOL
       const r3 = Keypair.generate().publicKey;
@@ -316,7 +382,12 @@ describe('Session Actions', () => {
         Actions.solLimit(BigInt(LAMPORTS_PER_SOL / 2)),
       ]);
       const recipient = Keypair.generate().publicKey;
-      const ixs = await executeTransfer(sessionKp, sessionPda, recipient, LAMPORTS_PER_SOL);
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        LAMPORTS_PER_SOL,
+      );
 
       await sendTxExpectError(ctx, ixs, [sessionKp], 3024);
     });
@@ -329,7 +400,11 @@ describe('Session Actions', () => {
       const r2 = Keypair.generate().publicKey;
 
       // Drain entire limit
-      await sendTx(ctx, await executeTransfer(sessionKp, sessionPda, r1, LAMPORTS_PER_SOL), [sessionKp]);
+      await sendTx(
+        ctx,
+        await executeTransfer(sessionKp, sessionPda, r1, LAMPORTS_PER_SOL),
+        [sessionKp],
+      );
 
       // Further spending should fail
       await sendTxExpectError(
@@ -348,13 +423,25 @@ describe('Session Actions', () => {
   describe('SolRecurringLimit', () => {
     it('enforces limit within window', async () => {
       const { sessionKp, sessionPda } = await createSessionWith([
-        Actions.solRecurringLimit({ limit: BigInt(2 * LAMPORTS_PER_SOL), window: 50_000n }),
+        Actions.solRecurringLimit({
+          limit: BigInt(2 * LAMPORTS_PER_SOL),
+          window: 50_000n,
+        }),
       ]);
       const r1 = Keypair.generate().publicKey;
       const r2 = Keypair.generate().publicKey;
 
       // Tx1: 1.5 SOL — OK
-      await sendTx(ctx, await executeTransfer(sessionKp, sessionPda, r1, 1.5 * LAMPORTS_PER_SOL), [sessionKp]);
+      await sendTx(
+        ctx,
+        await executeTransfer(
+          sessionKp,
+          sessionPda,
+          r1,
+          1.5 * LAMPORTS_PER_SOL,
+        ),
+        [sessionKp],
+      );
 
       // Tx2: 1 SOL — would total 2.5 SOL > 2 SOL limit
       await sendTxExpectError(
@@ -381,7 +468,11 @@ describe('Session Actions', () => {
 
       // Under both limits — OK
       const r1 = Keypair.generate().publicKey;
-      await sendTx(ctx, await executeTransfer(sessionKp, sessionPda, r1, 1_000_000), [sessionKp]);
+      await sendTx(
+        ctx,
+        await executeTransfer(sessionKp, sessionPda, r1, 1_000_000),
+        [sessionKp],
+      );
       expect(await ctx.connection.getBalance(r1)).toBe(1_000_000);
     });
 
@@ -407,7 +498,11 @@ describe('Session Actions', () => {
       ]);
 
       const r1 = Keypair.generate().publicKey;
-      await sendTx(ctx, await executeTransfer(sessionKp, sessionPda, r1, 1_000_000), [sessionKp]);
+      await sendTx(
+        ctx,
+        await executeTransfer(sessionKp, sessionPda, r1, 1_000_000),
+        [sessionKp],
+      );
 
       const r2 = Keypair.generate().publicKey;
       await sendTxExpectError(
@@ -478,7 +573,12 @@ describe('Session Actions', () => {
       // Deplete Session A
       await sendTx(
         ctx,
-        await executeTransfer(sessionA.sessionKp, sessionA.sessionPda, r1, 1_000_000),
+        await executeTransfer(
+          sessionA.sessionKp,
+          sessionA.sessionPda,
+          r1,
+          1_000_000,
+        ),
         [sessionA.sessionKp],
       );
 
@@ -493,7 +593,12 @@ describe('Session Actions', () => {
       // Session B still works
       await sendTx(
         ctx,
-        await executeTransfer(sessionB.sessionKp, sessionB.sessionPda, r2, 3_000_000),
+        await executeTransfer(
+          sessionB.sessionKp,
+          sessionB.sessionPda,
+          r2,
+          3_000_000,
+        ),
         [sessionB.sessionKp],
       );
 

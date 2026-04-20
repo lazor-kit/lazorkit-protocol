@@ -21,11 +21,7 @@ import {
   getSlot,
   type TestContext,
 } from './common';
-import {
-  LazorKitClient,
-  ed25519,
-  session,
-} from '../../sdk/sdk-legacy/src';
+import { LazorKitClient, ed25519, session } from '../../sdk/sdk-legacy/src';
 
 describe('Session Execute', () => {
   let ctx: TestContext;
@@ -55,7 +51,10 @@ describe('Session Execute', () => {
     await sendTx(ctx, result.instructions);
 
     // Fund the vault
-    const sig = await ctx.connection.requestAirdrop(vaultPda, 5 * LAMPORTS_PER_SOL);
+    const sig = await ctx.connection.requestAirdrop(
+      vaultPda,
+      5 * LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(sig, 'confirmed');
   });
 
@@ -175,7 +174,7 @@ describe('Session Execute', () => {
     await sendTx(ctx, createIxs, [ownerKp]);
 
     // Wait for the session to expire (~4 seconds at ~2.5 slots/sec)
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await new Promise((resolve) => setTimeout(resolve, 5000));
 
     const recipient = Keypair.generate().publicKey;
     const { instructions } = await client.execute({

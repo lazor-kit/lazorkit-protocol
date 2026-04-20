@@ -22,11 +22,15 @@ export function generateAuthenticatorData(rpId: string): Uint8Array {
  * Callback interface for Secp256r1 (passkey/WebAuthn) signing.
  * The SDK never touches private keys.
  *
+ * Secp256r1 authorities are **passkeys only** — real browser authenticators
+ * producing raw clientDataJSON. Programmatic/bot signing should use
+ * Ed25519 authorities instead.
+ *
  * The sign() method receives a SHA-256 challenge and must:
- * 1. Build clientDataJSON: `{ type: "webauthn.get", challenge: base64url(challenge), origin: "https://<rpId>", crossOrigin: false }`
- * 2. Compute clientDataJsonHash = SHA256(clientDataJSON)
- * 3. Sign: signature = ECDSA_SIGN(authenticatorData || clientDataJsonHash)
- * 4. Return { signature (64-byte raw r||s, low-S normalized), authenticatorData, clientDataJsonHash }
+ * 1. Call `navigator.credentials.get({ challenge, ... })` or the platform equivalent
+ * 2. Return the raw WebAuthn response — signature, authenticatorData, and the
+ *    raw clientDataJSON bytes (the on-chain program validates `challenge` and
+ *    `type` fields directly from these bytes)
  */
 export interface Secp256r1Signer {
   /** Compressed public key (33 bytes) */
@@ -37,7 +41,8 @@ export interface Secp256r1Signer {
   rpId: string;
   /**
    * Signs the SHA-256 challenge with the passkey.
-   * Returns { signature, authenticatorData, clientDataJsonHash }.
+   * MUST return the raw `clientDataJson` bytes — the SDK no longer supports
+   * the on-chain-reconstructed (Mode 0) flow.
    */
   sign(challenge: Uint8Array): Promise<{
     /** 64-byte raw ECDSA signature (r || s), low-S normalized */
@@ -46,6 +51,8 @@ export interface Secp256r1Signer {
     authenticatorData: Uint8Array;
     /** SHA256 of the clientDataJSON */
     clientDataJsonHash: Uint8Array;
+    /** Raw clientDataJSON bytes from the authenticator */
+    clientDataJson: Uint8Array;
   }>;
 }
 
@@ -65,32 +72,80 @@ export async function readAuthorityCounter(
 }
 
 /**
- * Builds the auth_payload bytes for a Secp256r1 operation.
+ * Reads the compressed Secp256r1 public key (33 bytes) from an on-chain
+ * authority account. Layout:
+ *   [header(48)] [credential_id_hash(32)] [compressed_pubkey(33)] ...
  *
- * Layout (optimized — rpId stored on-chain, counter is u32):
- *   [slot(8)][counter(4)][sysvarIxIdx(1)][typeAndFlags(1)][authenticatorData(M)]
+ * Throws if the account doesn't exist, isn't an Authority, or isn't a Secp256r1
+ * authority.
+ */
+export async function readAuthorityPubkey(
+  connection: Connection,
+  authorityPda: PublicKey,
+): Promise<Uint8Array> {
+  const info = await connection.getAccountInfo(authorityPda);
+  if (!info) throw new Error(`Authority account not found: ${authorityPda.toBase58()}`);
+  // Header is 48 bytes, credential_id_hash is 32 bytes, pubkey is 33 bytes.
+  // Min size = 48 + 32 + 33 = 113 bytes for a Secp256r1 authority.
+  if (info.data.length < 113) throw new Error('Authority account too small for Secp256r1');
+  // Byte 0 is the account discriminator: Authority = 2.
+  if (info.data[0] !== 2) throw new Error('Not an Authority account');
+  // Byte 1 is the authority_type: Secp256r1 = 1.
+  if (info.data[1] !== 1) throw new Error('Authority is not Secp256r1');
+  // Pubkey at offset 48 + 32 = 80, length 33.
+  return new Uint8Array(info.data.slice(80, 80 + 33));
+}
+
+/**
+ * Builds the auth_payload bytes for a Secp256r1 Execute (raw clientDataJSON).
+ *
+ * Layout:
+ *   [slot(8)][counter(4)][sysvarIxIdx(1)][reserved(1)]
+ *   [authDataLen(2 LE)][authenticatorData(M)]
+ *   [cdjLen(2 LE)][clientDataJson(N)]
  */
 export function buildAuthPayload(params: {
   slot: bigint;
   counter: number;
   sysvarIxIndex: number;
-  typeAndFlags: number;
   authenticatorData: Uint8Array;
+  clientDataJson: Uint8Array;
 }): Uint8Array {
-  const totalLen = 8 + 4 + 1 + 1 + params.authenticatorData.length;
+  const authDataLen = params.authenticatorData.length;
+  const cdjLen = params.clientDataJson.length;
+  const totalLen = 8 + 4 + 1 + 1 + 2 + authDataLen + 2 + cdjLen;
   const buf = Buffer.alloc(totalLen);
   let offset = 0;
 
-  buf.writeBigUInt64LE(params.slot, offset);
-  offset += 8;
-  buf.writeUInt32LE(params.counter, offset);
-  offset += 4;
-  buf.writeUInt8(params.sysvarIxIndex, offset);
-  offset += 1;
-  buf.writeUInt8(params.typeAndFlags, offset);
-  offset += 1;
-  Buffer.from(params.authenticatorData).copy(buf, offset);
+  buf.writeBigUInt64LE(params.slot, offset); offset += 8;
+  buf.writeUInt32LE(params.counter, offset); offset += 4;
+  buf.writeUInt8(params.sysvarIxIndex, offset); offset += 1;
+  // Reserved byte (formerly Mode 1 flag — now always set for backwards-compatible
+  // auth_payload_prefix layout).
+  buf.writeUInt8(0x80, offset); offset += 1;
+  buf.writeUInt16LE(authDataLen, offset); offset += 2;
+  Buffer.from(params.authenticatorData).copy(buf, offset); offset += authDataLen;
+  buf.writeUInt16LE(cdjLen, offset); offset += 2;
+  Buffer.from(params.clientDataJson).copy(buf, offset);
 
+  return new Uint8Array(buf);
+}
+
+/**
+ * Builds the 14-byte fixed prefix of the auth_payload for challenge computation.
+ * The challenge is computed BEFORE signing — at that point we don't yet have
+ * authenticatorData/clientDataJSON, so only the deterministic prefix is hashed.
+ */
+export function buildAuthPayloadPrefix(params: {
+  slot: bigint;
+  counter: number;
+  sysvarIxIndex: number;
+}): Uint8Array {
+  const buf = Buffer.alloc(14);
+  buf.writeBigUInt64LE(params.slot, 0);
+  buf.writeUInt32LE(params.counter, 8);
+  buf.writeUInt8(params.sysvarIxIndex, 12);
+  buf.writeUInt8(0x80, 13);
   return new Uint8Array(buf);
 }
 

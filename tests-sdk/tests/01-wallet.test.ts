@@ -24,11 +24,13 @@ describe('CreateWallet', () => {
     const ownerKp = Keypair.generate();
     const userSeed = crypto.randomBytes(32);
 
-    const { instructions, walletPda, authorityPda } = await client.createWallet({
-      payer: ctx.payer.publicKey,
-      userSeed,
-      owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
-    });
+    const { instructions, walletPda, authorityPda } = await client.createWallet(
+      {
+        payer: ctx.payer.publicKey,
+        userSeed,
+        owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
+      },
+    );
 
     await sendTx(ctx, instructions);
 
@@ -48,7 +50,10 @@ describe('CreateWallet', () => {
     expect(authority.wallet.equals(walletPda)).toBe(true);
 
     // === Simulate "user comes back" — find wallet by pubkey ===
-    const [found] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+    const [found] = await client.findWalletsByAuthority(
+      ownerKp.publicKey.toBytes(),
+      'ed25519',
+    );
     expect(found).toBeDefined();
     expect(found.walletPda.equals(walletPda)).toBe(true);
     expect(found.authorityPda.equals(authorityPda)).toBe(true);
@@ -60,16 +65,18 @@ describe('CreateWallet', () => {
     const key = await generateMockSecp256r1Key();
     const userSeed = crypto.randomBytes(32);
 
-    const { instructions, walletPda, authorityPda } = await client.createWallet({
-      payer: ctx.payer.publicKey,
-      userSeed,
-      owner: {
-        type: 'secp256r1',
-        credentialIdHash: key.credentialIdHash,
-        compressedPubkey: key.publicKeyBytes,
-        rpId: key.rpId,
+    const { instructions, walletPda, authorityPda } = await client.createWallet(
+      {
+        payer: ctx.payer.publicKey,
+        userSeed,
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: key.credentialIdHash,
+          compressedPubkey: key.publicKeyBytes,
+          rpId: key.rpId,
+        },
       },
-    });
+    );
 
     await sendTx(ctx, instructions);
 

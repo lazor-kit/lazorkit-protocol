@@ -44,7 +44,11 @@ import {
   createExecuteDeferredIx,
   computeInstructionsHash,
 } from '../../sdk/sdk-legacy/src';
-import { generateMockSecp256r1Key, signSecp256r1 } from './secp256r1Utils';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
+import {
+  prepareSecp256r1,
+  finalizeSecp256r1,
+} from '../../sdk/sdk-legacy/src/utils/signing';
 
 const RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
 
@@ -297,15 +301,18 @@ async function benchExecuteSecp256r1(connection: Connection, payer: Keypair): Pr
   const accountsHash = computeAccountsHash(allAccountMetas, compactIxs);
   const signedPayload = Buffer.concat([packed, accountsHash]);
 
-  const { authPayload, precompileIx } = await signSecp256r1({
-    key,
+  const prepared = prepareSecp256r1({
     discriminator: new Uint8Array([DISC_EXECUTE]),
     signedPayload,
+    sysvarIxIndex: 4,
     slot,
     counter: 1,
     payer: payer.publicKey,
-    sysvarIxIndex: 4,
+    programId: PROGRAM_ID,
+    publicKeyBytes: key.publicKeyBytes,
   });
+  const webauthnResponse = await fakeWebAuthnSign(key, prepared.challenge);
+  const { authPayload, precompileIx } = finalizeSecp256r1(prepared, webauthnResponse);
 
   const ix = createExecuteIx({
     payer: payer.publicKey,
@@ -526,15 +533,18 @@ async function benchDeferredExecution(
 
   const signedPayload = Buffer.concat([instructionsHash, accountsHash]);
 
-  const { authPayload, precompileIx } = await signSecp256r1({
-    key,
+  const prepared = prepareSecp256r1({
     discriminator: new Uint8Array([DISC_AUTHORIZE]),
     signedPayload,
+    sysvarIxIndex: 6,
     slot,
     counter: 1,
     payer: payer.publicKey,
-    sysvarIxIndex: 6,
+    programId: PROGRAM_ID,
+    publicKeyBytes: key.publicKeyBytes,
   });
+  const webauthnResponse = await fakeWebAuthnSign(key, prepared.challenge);
+  const { authPayload, precompileIx } = finalizeSecp256r1(prepared, webauthnResponse);
 
   const [deferredExecPda] = findDeferredExecPda(walletPda, authPda, 1);
 
@@ -653,15 +663,18 @@ async function benchDeferredMultiInstruction(
   const accountsHash = computeAccountsHash(tx2AccountMetas, compactIxs);
   const signedPayload = Buffer.concat([instructionsHash, accountsHash]);
 
-  const { authPayload, precompileIx } = await signSecp256r1({
-    key,
+  const prepared = prepareSecp256r1({
     discriminator: new Uint8Array([DISC_AUTHORIZE]),
     signedPayload,
+    sysvarIxIndex: 6,
     slot,
     counter: 1,
     payer: payer.publicKey,
-    sysvarIxIndex: 6,
+    programId: PROGRAM_ID,
+    publicKeyBytes: key.publicKeyBytes,
   });
+  const webauthnResponse = await fakeWebAuthnSign(key, prepared.challenge);
+  const { authPayload, precompileIx } = finalizeSecp256r1(prepared, webauthnResponse);
 
   const [deferredExecPda] = findDeferredExecPda(walletPda, authPda, 1);
 

@@ -25,7 +25,12 @@ import {
   PROGRAM_ID,
   type TestContext,
 } from './common';
-import { generateMockSecp256r1Key, createMockSigner, signSecp256r1 } from './secp256r1Utils';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
+import {
+  prepareSecp256r1 as prepareSecp256r1Low,
+  finalizeSecp256r1 as finalizeSecp256r1Low,
+  concatParts,
+} from '../../sdk/sdk-legacy/src/utils/signing';
 import {
   LazorKitClient,
   AUTH_TYPE_ED25519,
@@ -33,7 +38,6 @@ import {
   ROLE_ADMIN,
   ROLE_SPENDER,
   ed25519,
-  secp256r1,
   findWalletPda,
   findVaultPda,
   findAuthorityPda,
@@ -83,15 +87,20 @@ describe('Security', () => {
       expect(counterBefore).toBe(0);
 
       const adminKp = Keypair.generate();
-      const signer = createMockSigner(ownerKey);
 
-      const { instructions } = await client.addAuthority({
+      const prepared = await client.prepareAddAuthority({
         payer: ctx.payer.publicKey,
         walletPda,
-        adminSigner: secp256r1(signer, { authorityPda: ownerAuthPda }),
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthPda,
+        },
         newAuthority: { type: 'ed25519', publicKey: adminKp.publicKey },
         role: ROLE_ADMIN,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeAddAuthority(prepared, response);
       await sendTx(ctx, instructions);
 
       const counterAfter = await client.readCounter(ownerAuthPda);
@@ -103,15 +112,20 @@ describe('Security', () => {
 
       const sessionKp = Keypair.generate();
       const currentSlot = await getSlot(ctx);
-      const signer = createMockSigner(ownerKey);
 
-      const { instructions } = await client.createSession({
+      const prepared = await client.prepareCreateSession({
         payer: ctx.payer.publicKey,
         walletPda,
-        adminSigner: secp256r1(signer, { authorityPda: ownerAuthPda }),
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthPda,
+        },
         sessionKey: sessionKp.publicKey,
         expiresAt: currentSlot + 9000n,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeCreateSession(prepared, response);
       await sendTx(ctx, instructions);
 
       const counterAfter = await client.readCounter(ownerAuthPda);
@@ -121,25 +135,42 @@ describe('Security', () => {
     it('counter increments after removeAuthority', async () => {
       // First add a spender to remove
       const spenderKp = Keypair.generate();
-      const signer = createMockSigner(ownerKey);
 
-      const addResult = await client.addAuthority({
+      const addPrepared = await client.prepareAddAuthority({
         payer: ctx.payer.publicKey,
         walletPda,
-        adminSigner: secp256r1(signer, { authorityPda: ownerAuthPda }),
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthPda,
+        },
         newAuthority: { type: 'ed25519', publicKey: spenderKp.publicKey },
         role: ROLE_SPENDER,
       });
+      const addResponse = await fakeWebAuthnSign(
+        ownerKey,
+        addPrepared.challenge,
+      );
+      const addResult = client.finalizeAddAuthority(addPrepared, addResponse);
       await sendTx(ctx, addResult.instructions);
 
       const counterBefore = await client.readCounter(ownerAuthPda);
 
-      const { instructions } = await client.removeAuthority({
+      const prepared = await client.prepareRemoveAuthority({
         payer: ctx.payer.publicKey,
         walletPda,
-        adminSigner: secp256r1(signer, { authorityPda: ownerAuthPda }),
-        targetAuthorityPda: addResult.newAuthorityPda,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthPda,
+        },
+        targetAuthorityPda: addPrepared.newAuthorityPda,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeRemoveAuthority(
+        prepared,
+        response,
+      );
       await sendTx(ctx, instructions);
 
       const counterAfter = await client.readCounter(ownerAuthPda);
@@ -162,7 +193,10 @@ describe('Security', () => {
       await sendTx(ctx, result.instructions);
 
       // Fund the vault
-      const sig = await ctx.connection.requestAirdrop(result.vaultPda, 2 * LAMPORTS_PER_SOL);
+      const sig = await ctx.connection.requestAirdrop(
+        result.vaultPda,
+        2 * LAMPORTS_PER_SOL,
+      );
       await ctx.connection.confirmTransaction(sig, 'confirmed');
 
       // Try to execute an instruction that calls back into the LazorKit program
@@ -200,7 +234,10 @@ describe('Security', () => {
         owner: { type: 'ed25519', publicKey: ownerA.publicKey },
       });
       await sendTx(ctx, resultA.instructions);
-      const sigA = await ctx.connection.requestAirdrop(resultA.vaultPda, 2 * LAMPORTS_PER_SOL);
+      const sigA = await ctx.connection.requestAirdrop(
+        resultA.vaultPda,
+        2 * LAMPORTS_PER_SOL,
+      );
       await ctx.connection.confirmTransaction(sigA, 'confirmed');
 
       // Create wallet B
@@ -212,7 +249,10 @@ describe('Security', () => {
         owner: { type: 'ed25519', publicKey: ownerB.publicKey },
       });
       await sendTx(ctx, resultB.instructions);
-      const sigB = await ctx.connection.requestAirdrop(resultB.vaultPda, 2 * LAMPORTS_PER_SOL);
+      const sigB = await ctx.connection.requestAirdrop(
+        resultB.vaultPda,
+        2 * LAMPORTS_PER_SOL,
+      );
       await ctx.connection.confirmTransaction(sigB, 'confirmed');
 
       // Try to use ownerA's authority to add authority on walletB
@@ -250,18 +290,24 @@ describe('Security', () => {
       });
       await sendTx(ctx, result.instructions);
 
-      const sig = await ctx.connection.requestAirdrop(result.vaultPda, 2 * LAMPORTS_PER_SOL);
+      const sig = await ctx.connection.requestAirdrop(
+        result.vaultPda,
+        2 * LAMPORTS_PER_SOL,
+      );
       await ctx.connection.confirmTransaction(sig, 'confirmed');
 
       const recipientA = Keypair.generate().publicKey;
       const recipientB = Keypair.generate().publicKey;
 
       // Sign for transfer to recipientA
-      const signer = createMockSigner(ownerKey);
-      const { instructions: goodIxs } = await client.execute({
+      const prepared = await client.prepareExecute({
         payer: ctx.payer.publicKey,
         walletPda: result.walletPda,
-        signer: secp256r1(signer, { authorityPda: result.authorityPda }),
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: result.authorityPda,
+        },
         instructions: [
           SystemProgram.transfer({
             fromPubkey: result.vaultPda,
@@ -270,6 +316,11 @@ describe('Security', () => {
           }),
         ],
       });
+      const execResponse = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions: goodIxs } = client.finalizeExecute(
+        prepared,
+        execResponse,
+      );
 
       // Verify the legitimate transaction works
       const balanceBefore = await ctx.connection.getBalance(recipientA);
@@ -290,9 +341,16 @@ describe('Security', () => {
       });
 
       // Build layout with recipientA
-      const fixedAccounts = [ctx.payer.publicKey, result.walletPda, authorityPda, result.vaultPda, SYSVAR_INSTRUCTIONS_PUBKEY];
-      const { compactInstructions, remainingAccounts } =
-        (await import('../../sdk/sdk-legacy/src/utils/compact')).buildCompactLayout(fixedAccounts, [transferIx]);
+      const fixedAccounts = [
+        ctx.payer.publicKey,
+        result.walletPda,
+        authorityPda,
+        result.vaultPda,
+        SYSVAR_INSTRUCTIONS_PUBKEY,
+      ];
+      const { compactInstructions, remainingAccounts } = (
+        await import('../../sdk/sdk-legacy/src/utils/compact')
+      ).buildCompactLayout(fixedAccounts, [transferIx]);
       const packed = packCompactInstructions(compactInstructions);
 
       // Compute accounts hash with recipientA (the one we sign)
@@ -301,27 +359,42 @@ describe('Security', () => {
         { pubkey: result.walletPda, isSigner: false, isWritable: false },
         { pubkey: authorityPda, isSigner: false, isWritable: true },
         { pubkey: result.vaultPda, isSigner: false, isWritable: true },
-        { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+        {
+          pubkey: SYSVAR_INSTRUCTIONS_PUBKEY,
+          isSigner: false,
+          isWritable: false,
+        },
         ...remainingAccounts,
       ];
-      const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
+      const accountsHash = computeAccountsHash(
+        allAccountMetas,
+        compactInstructions,
+      );
 
-      const { concatParts } = await import('../../sdk/sdk-legacy/src/utils/signing');
       const signedPayload = concatParts([packed, accountsHash]);
 
       // Sign with the correct data (recipientA in accounts hash)
-      const { authPayload, precompileIx } = await signSecp256r1({
-        key: ownerKey,
+      const tamperedPrepared = prepareSecp256r1Low({
         discriminator: new Uint8Array([DISC_EXECUTE]),
         signedPayload,
+        sysvarIxIndex: 4,
         slot,
         counter,
         payer: ctx.payer.publicKey,
-        sysvarIxIndex: 4,
+        programId: PROGRAM_ID,
+        publicKeyBytes: ownerKey.publicKeyBytes,
       });
+      const tamperedResponse = await fakeWebAuthnSign(
+        ownerKey,
+        tamperedPrepared.challenge,
+      );
+      const { authPayload, precompileIx } = finalizeSecp256r1Low(
+        tamperedPrepared,
+        tamperedResponse,
+      );
 
       // Now build the TAMPERED instruction with recipientB swapped in
-      const tamperedRemaining = remainingAccounts.map(acc => {
+      const tamperedRemaining = remainingAccounts.map((acc) => {
         if (acc.pubkey.equals(recipientA)) {
           return { ...acc, pubkey: recipientB };
         }

@@ -12,7 +12,7 @@
 ```
 /program           Rust smart contract (pinocchio, zero-copy)
 /sdk/sdk-legacy    TypeScript SDK (@solana/web3.js v1, hand-written)
-/tests-sdk         Integration tests (vitest, ~75 tests)
+/tests-sdk         Integration tests (vitest, ~103 tests)
 /scripts           Build/deploy/sync automation
 /no-padding        Custom NoPadding derive macro
 /assertions        Custom assertion helpers
@@ -24,7 +24,7 @@
 # Build everything (program + IDL + SDK)
 ./scripts/build-all.sh
 
-# Run Rust unit tests (129 tests)
+# Run Rust unit tests (~165 tests)
 cargo test
 
 # Run SDK integration tests (starts validator, runs tests, stops validator)
@@ -53,7 +53,7 @@ cargo test
 cd tests-sdk && npm run test:local
 ```
 
-This starts a local validator with the program loaded, runs all ~75 tests, then stops the validator.
+This starts a local validator with the program loaded, runs all ~103 tests, then stops the validator.
 
 **Manual (two terminals):**
 

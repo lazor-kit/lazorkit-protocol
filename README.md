@@ -1,88 +1,137 @@
 # LazorKit Protocol
 
-A high-performance smart wallet on Solana with passkey (WebAuthn/Secp256r1) authentication, role-based access control, and session keys with programmable spending limits. Built with [pinocchio](https://github.com/febo/pinocchio) for zero-copy serialization.
+A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r1)** authentication for end-user flows and **Ed25519** authentication for bots / backends / programmatic signing — mixed freely on the same wallet. Built with [pinocchio](https://github.com/febo/pinocchio) for zero-copy serialization.
 
----
+- **Two auth types, one wallet** — passkeys (Apple Touch ID / Face ID, Windows Hello, Android biometrics, security keys) and Ed25519 (regular Solana keypairs). Any mix is supported: a passkey owner with an Ed25519 admin bot, or vice versa.
+- **RBAC** — Owner / Admin / Spender with strict role hierarchy.
+- **Session keys with policies** — ephemeral signers restricted by per-tx / per-window / lifetime SOL + token caps, and program whitelists.
+- **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps).
+- **Wallet lookup** — find wallets by credential hash or public key; no need to store `walletPda` locally.
+- **Parallel execution** — different authorities on the same wallet never block each other.
 
-## Key Features
+## Install
 
-- **Passkey Authentication**: WebAuthn/Secp256r1 (Apple Secure Enclave, Touch ID, Windows Hello) + Ed25519
-- **Role-Based Access Control**: Owner / Admin / Spender with strict permission hierarchy
-- **Session Keys with Actions**: Ephemeral keys with programmable spending limits, per-tx caps, and program whitelist/blacklist
-- **Deferred Execution**: 2-tx flow for large payloads (e.g. Jupiter swaps) exceeding the single-tx limit
-- **Wallet Lookup**: Find wallets by credential hash — no need to store `walletPda`
-- **Parallel Execution**: Different authorities execute concurrently (per-authority PDA, no shared write locks)
-- **Odometer Replay Protection**: Monotonic u32 counter per authority (works with synced passkeys)
+```bash
+npm install @lazorkit/sdk-legacy
+```
 
----
+Program ID: `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` (devnet).
 
-## Quick Start
+## Quick start
 
 ```typescript
-import { Connection, Keypair, Transaction, sendAndConfirmTransaction, SystemProgram } from '@solana/web3.js';
-import { LazorKitClient, ed25519, secp256r1, session, ROLE_ADMIN } from '@lazorkit/sdk-legacy';
+import { Connection, Keypair, SystemProgram } from '@solana/web3.js';
+import { LazorKitClient, ed25519 } from '@lazorkit/sdk-legacy';
 import * as crypto from 'crypto';
 
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
 const client = new LazorKitClient(connection);
 ```
 
-### Create a Wallet
+### Create a wallet
+
+**Passkey owner** (end-user wallet, signs with WebAuthn):
 
 ```typescript
-const { instructions, walletPda, vaultPda } = client.createWallet({
+const { instructions, walletPda, vaultPda, authorityPda } = await client.createWallet({
   payer: payer.publicKey,
   userSeed: crypto.randomBytes(32),
   owner: {
     type: 'secp256r1',
-    credentialIdHash,       // 32-byte SHA256 of WebAuthn credential ID
-    compressedPubkey,       // 33-byte compressed Secp256r1 public key
+    credentialIdHash,   // SHA-256 of WebAuthn credential ID
+    compressedPubkey,   // 33-byte compressed public key
     rpId: 'your-app.com',
   },
 });
+// Returning user: find the wallet again from just the credential hash
+const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
 ```
 
-### Transfer SOL
+**Ed25519 owner** (bot / backend / programmatic signing):
+
+```typescript
+const ownerKp = Keypair.generate();
+const { instructions, walletPda, vaultPda, authorityPda } = await client.createWallet({
+  payer: payer.publicKey,
+  userSeed: crypto.randomBytes(32),
+  owner: {
+    type: 'ed25519',
+    publicKey: ownerKp.publicKey,
+  },
+});
+// Lookup works for Ed25519 too
+const [wallet] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+```
+
+### Add another authority to the same wallet
+
+Wallets can hold any mix of auth types. Common setups:
+
+- A passkey owner + an Ed25519 admin (a bot that manages sessions on behalf of the user).
+- An Ed25519 owner + a Secp256r1 spender (the backend creates the wallet, the user's passkey does day-to-day spends).
+
+```typescript
+import { ROLE_ADMIN } from '@lazorkit/sdk-legacy';
+
+const adminKp = Keypair.generate();
+const { instructions, newAuthorityPda } = await client.addAuthority({
+  payer: payer.publicKey,
+  walletPda,
+  adminSigner: ed25519(ownerKp.publicKey),          // Ed25519 owner signs
+  newAuthority: { type: 'ed25519', publicKey: adminKp.publicKey },
+  role: ROLE_ADMIN,
+});
+await sendTx(instructions, [payer, ownerKp]);
+```
+
+### Sign a transaction
+
+**Ed25519 authority** — signs at the regular Solana transaction level, no prepare/finalize needed:
 
 ```typescript
 const { instructions } = await client.transferSol({
   payer: payer.publicKey,
   walletPda,
-  signer: secp256r1(mySigner),
+  signer: ed25519(ownerKp.publicKey),
   recipient,
   lamports: 1_000_000n,
 });
+await sendTx(instructions, [payer, ownerKp]);
 ```
 
-### Find Wallet by Credential (Returning Users)
+**Passkey authority** — two-phase flow because WebAuthn is async:
 
 ```typescript
-const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
-// Returns: { walletPda, authorityPda, vaultPda, role, authorityType }
+// Phase 1 — SDK computes the challenge
+const prepared = await client.prepareExecute({
+  payer: payer.publicKey,
+  walletPda,
+  secp256r1: { credentialIdHash, authorityPda },
+  instructions: [SystemProgram.transfer({
+    fromPubkey: vaultPda,
+    toPubkey: recipient,
+    lamports: 1_000_000,
+  })],
+});
+
+// Phase 2 — browser authenticator signs
+const response = await navigator.credentials.get({
+  publicKey: { challenge: prepared.challenge, rpId: 'your-app.com', allowCredentials: [...] },
+});
+
+// Phase 3 — SDK builds the transaction
+const { instructions } = client.finalizeExecute(prepared, toWebAuthnResponse(response));
 ```
 
----
+Full SDK reference: [`sdk/sdk-legacy/README.md`](sdk/sdk-legacy/README.md).
 
-## Session Keys with Spending Limits
+## Session keys
 
-Session keys are ephemeral signers with an expiry and optional **actions** that restrict what they can do. This is the core permission system for delegated access.
-
-### Action Types
-
-| Type | Description | Data |
-|---|---|---|
-| `SolLimit` | Lifetime SOL spending cap | Decrements on each spend until 0 |
-| `SolRecurringLimit` | Per-window SOL cap (e.g. 1 SOL per day) | Resets each window period |
-| `SolMaxPerTx` | Max SOL gross outflow per single execute | Prevents large single transfers |
-| `TokenLimit` | Lifetime token spending cap (per mint) | Same as SolLimit but for SPL tokens |
-| `TokenRecurringLimit` | Per-window token cap (per mint) | Same as SolRecurringLimit for tokens |
-| `TokenMaxPerTx` | Max tokens per execute (per mint) | Same as SolMaxPerTx for tokens |
-| `ProgramWhitelist` | Only allow CPI to this program (repeatable) | Session can only call listed programs |
-| `ProgramBlacklist` | Block CPI to this program (repeatable) | Session cannot call listed programs |
-
-### Create a Restricted Session
+Ephemeral signers with an expiry and optional spending policies. Ideal for frequent transactions (gaming, DeFi) that would otherwise require passkey re-auth every time.
 
 ```typescript
+import { Actions } from '@lazorkit/sdk-legacy';
+
 const { instructions, sessionPda } = await client.createSession({
   payer: payer.publicKey,
   walletPda,
@@ -90,139 +139,69 @@ const { instructions, sessionPda } = await client.createSession({
   sessionKey: sessionKp.publicKey,
   expiresAt: currentSlot + 216_000n,  // ~1 day
   actions: [
-    // Max 1 SOL per transaction
-    { type: 'SolMaxPerTx', max: 1_000_000_000n },
-    // 10 SOL lifetime budget
-    { type: 'SolLimit', remaining: 10_000_000_000n },
-    // Only allow System Program transfers
-    { type: 'ProgramWhitelist', programId: SystemProgram.programId },
+    Actions.programWhitelist(SystemProgram.programId),
+    Actions.solMaxPerTx(1_000_000_000n),       // 1 SOL per tx
+    Actions.solLimit(10_000_000_000n),         // 10 SOL lifetime
   ],
 });
 ```
 
-### Create a Token-Limited Session
+**Action types**: `SolLimit`, `SolRecurringLimit`, `SolMaxPerTx`, `TokenLimit`, `TokenRecurringLimit`, `TokenMaxPerTx`, `ProgramWhitelist`, `ProgramBlacklist`.
 
-```typescript
-const { instructions, sessionPda } = await client.createSession({
-  payer: payer.publicKey,
-  walletPda,
-  adminSigner: secp256r1(ownerSigner),
-  sessionKey: sessionKp.publicKey,
-  expiresAt: currentSlot + 432_000n,  // ~2 days
-  actions: [
-    // 1000 USDC lifetime cap
-    { type: 'TokenLimit', mint: USDC_MINT, remaining: 1_000_000_000n },
-    // Max 100 USDC per transaction
-    { type: 'TokenMaxPerTx', mint: USDC_MINT, max: 100_000_000n },
-  ],
-});
-```
+**Important scoping notes**:
+- Token limits apply **per-mint**. A session with `TokenLimit(USDC)` has unrestricted access to other token mints the vault holds. Enumerate every mint you want bounded, or use `ProgramWhitelist` to restrict which programs the session can call.
+- `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit automatically enforces vault metadata + per-listed-mint token authority invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, etc.).
+- Expired spending limits = **fully exhausted** (deny). Expired whitelists = **hard deny**. Expired blacklists = silently dropped.
+- Omitting `actions` creates an unrestricted session — it can do anything the wallet can until it expires.
 
-### Unrestricted Session (No Actions)
+## Cost
 
-```typescript
-// Omit `actions` for a fully open session — session key can do anything the wallet can
-const { instructions, sessionPda } = await client.createSession({
-  payer: payer.publicKey,
-  walletPda,
-  adminSigner: ed25519(ownerKp.publicKey),
-  sessionKey: sessionKp.publicKey,
-  expiresAt: currentSlot + 9000n,
-});
-```
+Measured on devnet (November 2025):
 
-### Execute via Session Key
-
-```typescript
-const { instructions } = await client.transferSol({
-  payer: payer.publicKey,
-  walletPda,
-  signer: session(sessionPda, sessionKp.publicKey),
-  recipient,
-  lamports: 500_000_000n,  // 0.5 SOL — within the 1 SOL per-tx limit
-});
-```
-
-### Expired Action Behavior
-
-- **Expired spending limits** (SolLimit, TokenLimit, etc.) are treated as **fully exhausted** — any spend is rejected
-- **Expired whitelist** is a **hard deny** — all programs are blocked
-- **Expired blacklist** entries are **silently dropped** — the ban has lifted
-- **Unrestricted sessions** (no actions) remain fully open until the session itself expires
-
----
-
-## Architecture
-
-| Account | Seeds | Size | Description |
-|---|---|---|---|
-| Wallet PDA | `["wallet", user_seed]` | 8 | Identity anchor |
-| Vault PDA | `["vault", wallet]` | 0 | Holds SOL/tokens, program signs via PDA |
-| Authority PDA | `["authority", wallet, id_hash]` | 48+ | Per-key auth with role + counter |
-| Session PDA | `["session", wallet, session_key]` | 80+ | Ephemeral sub-key with expiry + optional actions |
-| DeferredExec PDA | `["deferred", wallet, authority, counter]` | 176 | Temporary pre-authorized execution |
-
-### Instructions
-
-| Disc | Instruction | Description |
-|------|-----------|-------------|
-| 0 | CreateWallet | Create wallet + vault + authority |
-| 1 | AddAuthority | Add Ed25519/Secp256r1 authority |
-| 2 | RemoveAuthority | Remove authority, refund rent |
-| 3 | TransferOwnership | Atomic owner swap |
-| 4 | Execute | Execute instructions via CPI |
-| 5 | CreateSession | Create session key (optional spending limits/whitelist) |
-| 6 | Authorize | Deferred execution TX1 |
-| 7 | ExecuteDeferred | Deferred execution TX2 |
-| 8 | ReclaimDeferred | Reclaim expired deferred auth |
-| 9 | RevokeSession | Early session revocation |
-
-See [docs/Architecture.md](docs/Architecture.md) for account structures, security mechanisms, and instruction details.
-
----
-
-## Cost Overview
-
-| Auth Type | Wallet Creation | Execute (per tx) |
+| Operation | Compute Units | Transaction fee |
 |---|---|---|
-| Ed25519 | 0.002399 SOL | 0.000005 SOL |
-| Secp256r1 (Passkey) | 0.002713 SOL | 0.000005 SOL |
-| Session Key | 0.001453 SOL (setup) | 0.000005 SOL |
+| Execute via session key | ~4,100 | 0.000005 SOL |
+| Execute with Ed25519 authority | ~5,900 | 0.000005 SOL |
+| Execute with passkey (Secp256r1) | ~9,440 | 0.000005 SOL |
+| CreateWallet | ~15,000–20,000 | 0.000005 SOL + rent |
 
-Session keys are ideal for frequent transactions — they skip the Secp256r1 precompile, resulting in lower CU and smaller transactions. Session rent is refundable after expiry.
+All paths fit comfortably within Solana's 200,000 CU default budget. The ~2,300 CU precompile verification is the largest fixed cost on the passkey path.
 
-See [docs/Costs.md](docs/Costs.md) for full CU benchmarks, rent costs, and deferred execution analysis.
+**One-time rent** (fully refundable when accounts close):
 
----
+| Account | Size | Rent |
+|---|---|---|
+| Wallet PDA | 8 bytes | 0.000947 SOL |
+| Authority (Ed25519) | 80 bytes | 0.001448 SOL |
+| Authority (Secp256r1) | 145 bytes | 0.001900 SOL |
+| Session | 80 bytes + actions (0–2048) | 0.001448+ SOL |
+
+**Total wallet creation cost**: ~0.0024 SOL (Ed25519) or ~0.0028 SOL (Secp256r1) — roughly $0.40 USD at $150/SOL.
+
+## Parallel execution
+
+Each authority has its own PDA, so different authorities on the same wallet execute **concurrently** on Solana's scheduler. An admin managing permissions doesn't block a session key sending payments. Only the same authority running two txs has a counter-conflict lock.
 
 ## Security
 
-Audited by **Accretion** (Solana Foundation funded) and internally audited pre-mainnet. See [AUDIT.md](AUDIT.md).
-
-Key security properties:
-- Odometer counter replay protection (per-authority monotonic u32)
-- Clock-based slot freshness (150-slot window)
-- CPI reentrancy prevention (stack_height check)
-- Expired session actions = hard deny (not unrestricted)
-- SolMaxPerTx uses gross outflow tracking (prevents DeFi round-trip bypass)
-- Token balance sum-all-accounts (prevents dummy account bypass)
+- Odometer counter replay protection (monotonic u32 per authority; works with synced passkeys).
+- Clock-based slot freshness (150-slot window).
+- CPI reentrancy prevention (`stack_height` check on every authenticated path).
+- Expired session limits treated as fully exhausted (never "unlocked").
+- `SolMaxPerTx` uses per-CPI gross-outflow tracking — DeFi round-trips can't bypass the per-tx cap by returning most lamports.
+- Vault + per-listed-mint token account invariants enforced during session execute (blocks `System::Assign`, `SetAuthority`, `Approve` escapes).
+- Token balance sums across all accounts (prevents dummy-account bypass).
 
 Report vulnerabilities via [SECURITY.md](SECURITY.md).
 
----
+## Further reading
 
-## Documentation
-
-| Document | Description |
+| | |
 |---|---|
-| [Architecture](docs/Architecture.md) | Account structures, security mechanisms, instruction reference |
-| [Costs](docs/Costs.md) | CU benchmarks, rent costs, transaction sizes |
-| [SDK API](sdk/sdk-legacy/README.md) | TypeScript SDK reference (`@lazorkit/sdk-legacy`) |
-| [Audit Report](AUDIT.md) | Pre-mainnet security audit findings |
-| [Development](DEVELOPMENT.md) | Build, test, deploy workflow |
-| [Changelog](CHANGELOG.md) | Version history |
-
----
+| [SDK API reference](sdk/sdk-legacy/README.md) | TypeScript client + instruction builders |
+| [Architecture](docs/Architecture.md) | Account layouts, security mechanisms, instruction reference |
+| [Development](DEVELOPMENT.md) | Local build + test workflow |
+| [Contributing](CONTRIBUTING.md) | PR guidelines |
 
 ## License
 

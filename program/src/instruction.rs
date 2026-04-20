@@ -26,13 +26,13 @@ pub enum ProgramIx {
     },
 
     /// Add a new authority to the wallet
-    #[account(0, signer, name = "payer", desc = "Transaction payer")]
+    #[account(0, signer, writable, name = "payer", desc = "Payer and rent contributor")]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,
-        signer,
+        writable,
         name = "admin_authority",
-        desc = "Admin authority PDA authorizing this action"
+        desc = "Admin authority PDA authorizing this action (counter incremented)"
     )]
     #[account(
         3,
@@ -57,13 +57,13 @@ pub enum ProgramIx {
     },
 
     /// Remove an authority from the wallet
-    #[account(0, signer, name = "payer", desc = "Transaction payer")]
+    #[account(0, signer, writable, name = "payer", desc = "Transaction payer")]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,
-        signer,
+        writable,
         name = "admin_authority",
-        desc = "Admin authority PDA authorizing this action"
+        desc = "Admin authority PDA authorizing this action (counter incremented)"
     )]
     #[account(
         3,
@@ -86,7 +86,7 @@ pub enum ProgramIx {
     RemoveAuthority,
 
     /// Transfer ownership (atomic swap of Owner role)
-    #[account(0, signer, name = "payer", desc = "Transaction payer")]
+    #[account(0, signer, writable, name = "payer", desc = "Payer and rent contributor")]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,
@@ -122,14 +122,15 @@ pub enum ProgramIx {
     },
 
     /// Execute transactions
-    #[account(0, signer, name = "payer", desc = "Transaction payer")]
+    #[account(0, signer, writable, name = "payer", desc = "Transaction payer")]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,
+        writable,
         name = "authority",
-        desc = "Authority or Session PDA authorizing execution"
+        desc = "Authority or Session PDA authorizing execution (counter incremented)"
     )]
-    #[account(3, name = "vault", desc = "Vault PDA")]
+    #[account(3, writable, name = "vault", desc = "Vault PDA (signer for CPI, lamports debited)")]
     #[account(
         4,
         optional,
@@ -148,9 +149,9 @@ pub enum ProgramIx {
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,
-        signer,
+        writable,
         name = "admin_authority",
-        desc = "Admin/Owner authority PDA authorizing logic"
+        desc = "Admin/Owner authority PDA authorizing logic (counter incremented)"
     )]
     #[account(3, writable, name = "session", desc = "New session PDA to be created")]
     #[account(4, name = "system_program", desc = "System Program")]
@@ -251,7 +252,7 @@ pub enum ProgramIx {
     /// Revoke a session key early (before expiry)
     ///
     /// Only Owner or Admin can revoke. Closes the session account and refunds rent.
-    #[account(0, signer, name = "payer", desc = "Transaction payer")]
+    #[account(0, signer, writable, name = "payer", desc = "Transaction payer")]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,

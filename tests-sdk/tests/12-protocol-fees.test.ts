@@ -1,10 +1,17 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import * as crypto from 'crypto';
-import { setupTest, sendTx, sendTxExpectError, type TestContext } from './common';
+import {
+  setupTest,
+  sendTx,
+  sendTxExpectError,
+  type TestContext,
+} from './common';
 import {
   LazorKitClient,
   PROGRAM_ID,
+  createWithdrawTreasuryIx,
+  createUpdateProtocolIx,
 } from '../../sdk/sdk-legacy/src';
 
 const NUM_SHARDS = 4;
@@ -23,7 +30,10 @@ describe('Protocol Fees', () => {
     adminKp = Keypair.generate();
     treasuryKp = Keypair.generate();
 
-    const sig = await ctx.connection.requestAirdrop(adminKp.publicKey, 2 * LAMPORTS_PER_SOL);
+    const sig = await ctx.connection.requestAirdrop(
+      adminKp.publicKey,
+      2 * LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(sig, 'confirmed');
   });
 
@@ -60,11 +70,13 @@ describe('Protocol Fees', () => {
 
   it('initializes treasury shards', async () => {
     for (let i = 0; i < NUM_SHARDS; i++) {
-      const { instructions, treasuryShardPda } = client.initializeTreasuryShard({
-        payer: ctx.payer.publicKey,
-        admin: adminKp.publicKey,
-        shardId: i,
-      });
+      const { instructions, treasuryShardPda } = client.initializeTreasuryShard(
+        {
+          payer: ctx.payer.publicKey,
+          admin: adminKp.publicKey,
+          shardId: i,
+        },
+      );
       await sendTx(ctx, instructions, [adminKp]);
 
       const info = await ctx.connection.getAccountInfo(treasuryShardPda);
@@ -98,7 +110,10 @@ describe('Protocol Fees', () => {
 
   it('rejects update from non-admin', async () => {
     const fakeAdmin = Keypair.generate();
-    const sig = await ctx.connection.requestAirdrop(fakeAdmin.publicKey, LAMPORTS_PER_SOL);
+    const sig = await ctx.connection.requestAirdrop(
+      fakeAdmin.publicKey,
+      LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(sig, 'confirmed');
 
     const { instructions } = client.updateProtocol({
@@ -180,7 +195,10 @@ describe('Protocol Fees', () => {
     await sendTx(ctx, createIxs);
 
     const [vaultPda] = client.findVault(walletPda);
-    const fundSig = await ctx.connection.requestAirdrop(vaultPda, 2 * LAMPORTS_PER_SOL);
+    const fundSig = await ctx.connection.requestAirdrop(
+      vaultPda,
+      2 * LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(fundSig, 'confirmed');
 
     let shardBalanceBefore = 0;
@@ -213,19 +231,39 @@ describe('Protocol Fees', () => {
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(EXECUTION_FEE));
   });
 
-  it('skips fee for unregistered payer (no extra config needed)', async () => {
+  it('charges fee for unregistered payer but skips FeeRecord counter update', async () => {
     const newPayer = Keypair.generate();
-    const sig = await ctx.connection.requestAirdrop(newPayer.publicKey, 5 * LAMPORTS_PER_SOL);
+    const sig = await ctx.connection.requestAirdrop(
+      newPayer.publicKey,
+      5 * LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(sig, 'confirmed');
 
     const newClient = new LazorKitClient(ctx.connection);
     const newCtx = { ...ctx, payer: newPayer };
 
-    // resolveProtocolFee returns undefined for unregistered payer
+    // resolveProtocolFee still returns the 4 accounts for unregistered payer
     const protocolFee = await newClient.resolveProtocolFee(newPayer.publicKey);
-    expect(protocolFee).toBeUndefined();
+    expect(protocolFee).toBeDefined();
 
-    // createWallet works fine — no fee, no extra accounts
+    // The feeRecordPda is derived but unlikely to exist on-chain for a fresh payer
+    const [expectedFeeRecordPda] = newClient.findFeeRecord(newPayer.publicKey);
+    expect(protocolFee!.feeRecordPda.toBase58()).toBe(
+      expectedFeeRecordPda.toBase58(),
+    );
+    const feeRecordInfo = await ctx.connection.getAccountInfo(
+      protocolFee!.feeRecordPda,
+    );
+    expect(feeRecordInfo).toBeNull();
+
+    // Sum shard balances before
+    let shardBalanceBefore = 0;
+    for (let i = 0; i < NUM_SHARDS; i++) {
+      const [shardPda] = newClient.findTreasuryShard(i);
+      shardBalanceBefore += await ctx.connection.getBalance(shardPda);
+    }
+
+    // createWallet: fee IS charged, but FeeRecord (uninitialized) is not mutated
     const ownerKp = Keypair.generate();
     const { instructions } = await newClient.createWallet({
       payer: newPayer.publicKey,
@@ -233,13 +271,32 @@ describe('Protocol Fees', () => {
       owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
     });
     await sendTx(newCtx, instructions);
+
+    // Treasury should have received the creation fee
+    let shardBalanceAfter = 0;
+    for (let i = 0; i < NUM_SHARDS; i++) {
+      const [shardPda] = newClient.findTreasuryShard(i);
+      shardBalanceAfter += await ctx.connection.getBalance(shardPda);
+    }
+    expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(CREATION_FEE));
+
+    // FeeRecord PDA still doesn't exist — program ignored it
+    const feeRecordAfter = await ctx.connection.getAccountInfo(
+      protocolFee!.feeRecordPda,
+    );
+    expect(feeRecordAfter).toBeNull();
   });
 
   it('withdraws fees from treasury shards', async () => {
-    const fundSig = await ctx.connection.requestAirdrop(treasuryKp.publicKey, LAMPORTS_PER_SOL);
+    const fundSig = await ctx.connection.requestAirdrop(
+      treasuryKp.publicKey,
+      LAMPORTS_PER_SOL,
+    );
     await ctx.connection.confirmTransaction(fundSig, 'confirmed');
 
-    const treasuryBefore = await ctx.connection.getBalance(treasuryKp.publicKey);
+    const treasuryBefore = await ctx.connection.getBalance(
+      treasuryKp.publicKey,
+    );
     let totalSwept = 0;
 
     for (let i = 0; i < NUM_SHARDS; i++) {
@@ -261,5 +318,53 @@ describe('Protocol Fees', () => {
     const treasuryAfter = await ctx.connection.getBalance(treasuryKp.publicKey);
     expect(treasuryAfter - treasuryBefore).toBe(totalSwept);
     expect(totalSwept).toBeGreaterThan(0);
+  });
+
+  // ── H2 — admin instructions must verify config_pda / shard_pda ownership ──
+  //
+  // Pre-fix, withdraw_treasury read config_pda without checking its owner.
+  // An attacker could supply a fake config (owned by their own program) with
+  // attacker-controlled `admin`/`treasury` fields, hand in the real LazorKit
+  // shard as `shard_pda`, and drain it. Post-fix, any non-program-owned
+  // config_pda or shard_pda is rejected with IllegalOwner before any writes.
+
+  it('H2: rejects WithdrawTreasury with fake (non-program-owned) config_pda', async () => {
+    const [shard0] = client.findTreasuryShard(0);
+    const fakeConfig = Keypair.generate().publicKey; // System-owned → owner check fails
+
+    const ix = createWithdrawTreasuryIx({
+      admin: adminKp.publicKey,
+      protocolConfigPda: fakeConfig,
+      treasuryShardPda: shard0,
+      treasury: treasuryKp.publicKey,
+    });
+    await sendTxExpectError(ctx, [ix], [adminKp]);
+  });
+
+  it('H2: rejects WithdrawTreasury with fake (non-program-owned) shard_pda', async () => {
+    const [protocolConfigPda] = client.findProtocolConfig();
+    const fakeShard = Keypair.generate().publicKey;
+
+    const ix = createWithdrawTreasuryIx({
+      admin: adminKp.publicKey,
+      protocolConfigPda,
+      treasuryShardPda: fakeShard,
+      treasury: treasuryKp.publicKey,
+    });
+    await sendTxExpectError(ctx, [ix], [adminKp]);
+  });
+
+  it('H2: rejects UpdateProtocol with fake config_pda', async () => {
+    const fakeConfig = Keypair.generate().publicKey;
+
+    const ix = createUpdateProtocolIx({
+      admin: adminKp.publicKey,
+      protocolConfigPda: fakeConfig,
+      creationFee: 9999n,
+      executionFee: 9999n,
+      enabled: true,
+      newTreasury: treasuryKp.publicKey,
+    });
+    await sendTxExpectError(ctx, [ix], [adminKp]);
   });
 });

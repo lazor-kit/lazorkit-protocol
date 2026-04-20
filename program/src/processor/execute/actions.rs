@@ -15,7 +15,7 @@
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
 
 use crate::{
-    compact::CompactInstruction,
+    compact::CompactInstructionRef,
     error::AuthError,
     state::{
         action::{parse_actions, read_u64, write_u64, ActionType, ActionView},
@@ -24,13 +24,17 @@ use crate::{
 };
 
 // ─── Token Account Layout (SPL Token) ────────────────────────────────
-// mint:   bytes 0..32
-// owner:  bytes 32..64
-// amount: bytes 64..72
+// mint:            bytes 0..32
+// owner:           bytes 32..64    (the authority for Transfer/Burn — changed by SetAuthority(AccountOwner))
+// amount:          bytes 64..72
+// delegate_coi:    bytes 72..108   (COption<Pubkey> — changed by Approve/Revoke)
+// close_authority: bytes 129..165  (COption<Pubkey> — changed by SetAuthority(CloseAccount))
 
 const TOKEN_MINT_OFFSET: usize = 0;
 const TOKEN_OWNER_OFFSET: usize = 32;
 const TOKEN_AMOUNT_OFFSET: usize = 64;
+const TOKEN_DELEGATE_OFFSET: usize = 72;
+const TOKEN_CLOSE_AUTHORITY_OFFSET: usize = 129;
 const TOKEN_ACCOUNT_MIN_SIZE: usize = 165;
 
 /// A snapshot of a token account balance for a specific mint.
@@ -39,13 +43,31 @@ pub struct TokenSnapshot {
     pub amount: u64,
 }
 
+/// Per-token-account snapshot of authority-related fields, captured BEFORE the
+/// CPI loop in a session+actions execute.
+///
+/// Detects SetAuthority attacks (changing owner/close_authority to attacker) and
+/// Approve-delegation attacks (granting delegate to attacker who drains outside
+/// the session). All three fields are frozen for vault-owned token accounts on
+/// listed mints while a session is executing.
+pub struct TokenAuthoritySnapshot {
+    /// The token account address (so we can re-find it post-CPI).
+    pub account_key: [u8; 32],
+    /// owner field bytes [32..64]
+    pub owner: [u8; 32],
+    /// delegate COption<Pubkey> bytes [72..108]
+    pub delegate: [u8; 36],
+    /// close_authority COption<Pubkey> bytes [129..165]
+    pub close_authority: [u8; 36],
+}
+
 /// Evaluate pre-CPI actions (program whitelist/blacklist).
 ///
 /// Call this BEFORE executing compact instructions.
 /// Returns early with Ok(()) if no actions exist.
 pub fn evaluate_pre_actions(
     session_data: &[u8],
-    compact_instructions: &[CompactInstruction],
+    compact_instructions: &[CompactInstructionRef<'_>],
     accounts: &[AccountInfo],
     current_slot: u64,
 ) -> Result<(), ProgramError> {
@@ -157,6 +179,138 @@ pub fn snapshot_token_balances(
     }
 
     Ok(snapshots)
+}
+
+/// Snapshot per-token-account authority fields for every vault-owned token
+/// account whose mint appears in a token action.
+///
+/// Paired with `verify_token_authorities_unchanged` post-CPI. Together they
+/// prevent `SetAuthority` and `Approve`-style escapes where the session key
+/// would otherwise reassign control of vault-owned token accounts without
+/// moving any lamports (so the balance-based limits would miss it).
+pub fn snapshot_token_authorities(
+    session_data: &[u8],
+    accounts: &[AccountInfo],
+    vault_key: &Pubkey,
+) -> Result<Vec<TokenAuthoritySnapshot>, ProgramError> {
+    if !has_actions(session_data) {
+        return Ok(Vec::new());
+    }
+
+    let actions_buf = &session_data[SESSION_HEADER_SIZE..];
+    let actions = parse_actions(actions_buf)?;
+
+    // Collect listed mints (same logic as snapshot_token_balances).
+    let mut mints: Vec<[u8; 32]> = Vec::new();
+    for action in &actions {
+        match action.action_type {
+            ActionType::TokenLimit
+            | ActionType::TokenRecurringLimit
+            | ActionType::TokenMaxPerTx => {
+                let mut mint = [0u8; 32];
+                mint.copy_from_slice(&actions_buf[action.data_offset..action.data_offset + 32]);
+                if !mints.iter().any(|m| m == &mint) {
+                    mints.push(mint);
+                }
+            }
+            _ => {}
+        }
+    }
+    if mints.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Scan all SPL-Token-owned accounts; snapshot each vault-owned one whose
+    // mint is listed in the session actions.
+    let mut out = Vec::new();
+    for acc in accounts {
+        let owner = acc.owner();
+        if owner.as_ref() != &SPL_TOKEN_PROGRAM_ID
+            && owner.as_ref() != &SPL_TOKEN_2022_PROGRAM_ID
+        {
+            continue;
+        }
+        let data = unsafe { acc.borrow_data_unchecked() };
+        if data.len() < TOKEN_ACCOUNT_MIN_SIZE {
+            continue;
+        }
+        // vault must currently own it
+        if &data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32] != vault_key.as_ref() {
+            continue;
+        }
+        // mint must be listed
+        let mut mint = [0u8; 32];
+        mint.copy_from_slice(&data[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32]);
+        if !mints.iter().any(|m| m == &mint) {
+            continue;
+        }
+
+        let mut owner_bytes = [0u8; 32];
+        owner_bytes.copy_from_slice(&data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32]);
+        let mut delegate = [0u8; 36];
+        delegate.copy_from_slice(&data[TOKEN_DELEGATE_OFFSET..TOKEN_DELEGATE_OFFSET + 36]);
+        let mut close_authority = [0u8; 36];
+        close_authority.copy_from_slice(
+            &data[TOKEN_CLOSE_AUTHORITY_OFFSET..TOKEN_CLOSE_AUTHORITY_OFFSET + 36],
+        );
+
+        let mut account_key = [0u8; 32];
+        account_key.copy_from_slice(acc.key().as_ref());
+
+        out.push(TokenAuthoritySnapshot {
+            account_key,
+            owner: owner_bytes,
+            delegate,
+            close_authority,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Verify that every snapshotted token account still has the same owner,
+/// delegate, and close_authority fields. Returns an error if any field has
+/// changed.
+pub fn verify_token_authorities_unchanged(
+    snapshots: &[TokenAuthoritySnapshot],
+    accounts: &[AccountInfo],
+) -> Result<(), ProgramError> {
+    for snap in snapshots {
+        // Find the account by key in the tx accounts list.
+        let acc = match accounts.iter().find(|a| a.key().as_ref() == snap.account_key) {
+            Some(a) => a,
+            // If the account disappeared (e.g. CloseAccount closed it), that's also a
+            // mutation we should reject. CloseAccount sends rent lamports to an
+            // attacker-chosen destination without touching the token balance.
+            None => return Err(AuthError::SessionTokenAuthorityChanged.into()),
+        };
+
+        // Must still be owned by SPL Token (not re-assigned to another program)
+        let owner = acc.owner();
+        if owner.as_ref() != &SPL_TOKEN_PROGRAM_ID
+            && owner.as_ref() != &SPL_TOKEN_2022_PROGRAM_ID
+        {
+            return Err(AuthError::SessionTokenAuthorityChanged.into());
+        }
+
+        let data = unsafe { acc.borrow_data_unchecked() };
+        if data.len() < TOKEN_ACCOUNT_MIN_SIZE {
+            return Err(AuthError::SessionTokenAuthorityChanged.into());
+        }
+
+        if &data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32] != snap.owner {
+            return Err(AuthError::SessionTokenAuthorityChanged.into());
+        }
+        if &data[TOKEN_DELEGATE_OFFSET..TOKEN_DELEGATE_OFFSET + 36] != snap.delegate {
+            return Err(AuthError::SessionTokenAuthorityChanged.into());
+        }
+        if &data[TOKEN_CLOSE_AUTHORITY_OFFSET..TOKEN_CLOSE_AUTHORITY_OFFSET + 36]
+            != snap.close_authority
+        {
+            return Err(AuthError::SessionTokenAuthorityChanged.into());
+        }
+    }
+    Ok(())
 }
 
 /// Evaluate post-CPI actions (spending limits).

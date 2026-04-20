@@ -18,7 +18,7 @@ use crate::{
 /// # Instruction Data:
 /// `[creation_fee(8)][execution_fee(8)][enabled(1)][_padding(7)][new_treasury(32)]` = 56 bytes
 pub fn process(
-    _program_id: &Pubkey,
+    program_id: &Pubkey,
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
@@ -42,6 +42,12 @@ pub fn process(
 
     if !admin.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Verify config_pda is owned by this program before reading its fields
+    // for authorization decisions. Defense-in-depth.
+    if config_pda.owner() != program_id {
+        return Err(ProgramError::IllegalOwner);
     }
 
     let data = config_pda.try_borrow_data()?;

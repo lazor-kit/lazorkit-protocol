@@ -13,7 +13,11 @@ import {
   getSlot,
   type TestContext,
 } from './common';
-import { generateMockSecp256r1Key, signSecp256r1 } from './secp256r1Utils';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
+import {
+  prepareSecp256r1,
+  finalizeSecp256r1,
+} from '../../sdk/sdk-legacy/src/utils/signing';
 import {
   findWalletPda,
   findVaultPda,
@@ -26,8 +30,6 @@ import {
   packCompactInstructions,
   computeAccountsHash,
   computeInstructionsHash,
-  buildAuthPayload,
-  buildSecp256r1Challenge,
   AUTH_TYPE_SECP256R1,
   DISC_AUTHORIZE,
   PROGRAM_ID,
@@ -118,18 +120,28 @@ describe('Deferred Execution', () => {
       const expiryOffset = 300;
       const expiryBuf = Buffer.alloc(2);
       expiryBuf.writeUInt16LE(expiryOffset);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
+      const signedPayload = Buffer.concat([
+        instructionsHash,
+        accountsHash,
+        expiryBuf,
+      ]);
 
       // Sign with Secp256r1
-      const { authPayload, precompileIx } = await signSecp256r1({
-        key: ownerKey,
+      const prepared = prepareSecp256r1({
         discriminator: new Uint8Array([DISC_AUTHORIZE]),
         signedPayload,
+        sysvarIxIndex: 6, // index 6 in Authorize tx accounts
         slot,
         counter: 1,
         payer: ctx.payer.publicKey,
-        sysvarIxIndex: 6, // index 6 in Authorize tx accounts
+        programId: PROGRAM_ID,
+        publicKeyBytes: ownerKey.publicKeyBytes,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { authPayload, precompileIx } = finalizeSecp256r1(
+        prepared,
+        response,
+      );
 
       // Derive deferred PDA (counter = 1)
       const [deferredExecPda] = findDeferredExecPda(
@@ -241,18 +253,28 @@ describe('Deferred Execution', () => {
       const expiryOffset = 300;
       const expiryBuf = Buffer.alloc(2);
       expiryBuf.writeUInt16LE(expiryOffset);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
+      const signedPayload = Buffer.concat([
+        instructionsHash,
+        accountsHash,
+        expiryBuf,
+      ]);
 
       // Counter is now 2 (after first test incremented to 1)
-      const { authPayload, precompileIx } = await signSecp256r1({
-        key: ownerKey,
+      const prepared = prepareSecp256r1({
         discriminator: new Uint8Array([DISC_AUTHORIZE]),
         signedPayload,
+        sysvarIxIndex: 6,
         slot,
         counter: 2,
         payer: ctx.payer.publicKey,
-        sysvarIxIndex: 6,
+        programId: PROGRAM_ID,
+        publicKeyBytes: ownerKey.publicKeyBytes,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { authPayload, precompileIx } = finalizeSecp256r1(
+        prepared,
+        response,
+      );
 
       const [deferredExecPda] = findDeferredExecPda(
         walletPda,
@@ -379,17 +401,27 @@ describe('Deferred Execution', () => {
       const expiryOffset = 300;
       const expiryBuf = Buffer.alloc(2);
       expiryBuf.writeUInt16LE(expiryOffset);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
+      const signedPayload = Buffer.concat([
+        instructionsHash,
+        accountsHash,
+        expiryBuf,
+      ]);
 
-      const { authPayload, precompileIx } = await signSecp256r1({
-        key: ownerKey,
+      const prepared = prepareSecp256r1({
         discriminator: new Uint8Array([DISC_AUTHORIZE]),
         signedPayload,
+        sysvarIxIndex: 6,
         slot,
         counter: 1,
         payer: ctx.payer.publicKey,
-        sysvarIxIndex: 6,
+        programId: PROGRAM_ID,
+        publicKeyBytes: ownerKey.publicKeyBytes,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { authPayload, precompileIx } = finalizeSecp256r1(
+        prepared,
+        response,
+      );
 
       const [deferredExecPda] = findDeferredExecPda(
         walletPda,
@@ -502,17 +534,27 @@ describe('Deferred Execution', () => {
       const expiryOffset = 300;
       const expiryBuf = Buffer.alloc(2);
       expiryBuf.writeUInt16LE(expiryOffset);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
+      const signedPayload = Buffer.concat([
+        instructionsHash,
+        accountsHash,
+        expiryBuf,
+      ]);
 
-      const { authPayload, precompileIx } = await signSecp256r1({
-        key: ownerKey,
+      const prepared = prepareSecp256r1({
         discriminator: new Uint8Array([DISC_AUTHORIZE]),
         signedPayload,
+        sysvarIxIndex: 6,
         slot,
         counter: 2,
         payer: ctx.payer.publicKey,
-        sysvarIxIndex: 6,
+        programId: PROGRAM_ID,
+        publicKeyBytes: ownerKey.publicKeyBytes,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { authPayload, precompileIx } = finalizeSecp256r1(
+        prepared,
+        response,
+      );
 
       const [deferredExecPda] = findDeferredExecPda(
         walletPda,
@@ -607,17 +649,27 @@ describe('Deferred Execution', () => {
       const expiryOffset = 9000;
       const expiryBuf = Buffer.alloc(2);
       expiryBuf.writeUInt16LE(expiryOffset);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
+      const signedPayload = Buffer.concat([
+        instructionsHash,
+        accountsHash,
+        expiryBuf,
+      ]);
 
-      const { authPayload, precompileIx } = await signSecp256r1({
-        key: ownerKey,
+      const prepared = prepareSecp256r1({
         discriminator: new Uint8Array([DISC_AUTHORIZE]),
         signedPayload,
+        sysvarIxIndex: 6,
         slot,
         counter: 3,
         payer: ctx.payer.publicKey,
-        sysvarIxIndex: 6,
+        programId: PROGRAM_ID,
+        publicKeyBytes: ownerKey.publicKeyBytes,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { authPayload, precompileIx } = finalizeSecp256r1(
+        prepared,
+        response,
+      );
 
       const [deferredExecPda] = findDeferredExecPda(
         walletPda,
@@ -706,17 +758,27 @@ describe('Deferred Execution', () => {
       const expiryOffset = 10;
       const expiryBuf = Buffer.alloc(2);
       expiryBuf.writeUInt16LE(expiryOffset);
-      const signedPayload = Buffer.concat([instructionsHash, accountsHash, expiryBuf]);
+      const signedPayload = Buffer.concat([
+        instructionsHash,
+        accountsHash,
+        expiryBuf,
+      ]);
 
-      const { authPayload, precompileIx } = await signSecp256r1({
-        key: ownerKey,
+      const prepared = prepareSecp256r1({
         discriminator: new Uint8Array([DISC_AUTHORIZE]),
         signedPayload,
+        sysvarIxIndex: 6,
         slot,
         counter: 4,
         payer: ctx.payer.publicKey,
-        sysvarIxIndex: 6,
+        programId: PROGRAM_ID,
+        publicKeyBytes: ownerKey.publicKeyBytes,
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { authPayload, precompileIx } = finalizeSecp256r1(
+        prepared,
+        response,
+      );
 
       const [deferredExecPda] = findDeferredExecPda(
         walletPda,

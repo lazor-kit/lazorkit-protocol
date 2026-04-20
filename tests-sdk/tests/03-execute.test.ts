@@ -7,12 +7,8 @@ import {
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import { setupTest, sendTx, type TestContext } from './common';
-import { generateMockSecp256r1Key, createMockSigner } from './secp256r1Utils';
-import {
-  LazorKitClient,
-  ed25519,
-  secp256r1,
-} from '../../sdk/sdk-legacy/src';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
+import { LazorKitClient, ed25519 } from '../../sdk/sdk-legacy/src';
 
 describe('Execute', () => {
   let ctx: TestContext;
@@ -42,13 +38,19 @@ describe('Execute', () => {
       await sendTx(ctx, result.instructions);
 
       // === User comes back — find wallet by pubkey ===
-      const [found] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+      const [found] = await client.findWalletsByAuthority(
+        ownerKp.publicKey.toBytes(),
+        'ed25519',
+      );
       walletPda = found.walletPda;
       vaultPda = found.vaultPda;
       ownerAuthorityPda = found.authorityPda;
 
       // Fund the vault so it can transfer SOL
-      const sig = await ctx.connection.requestAirdrop(vaultPda, 2 * LAMPORTS_PER_SOL);
+      const sig = await ctx.connection.requestAirdrop(
+        vaultPda,
+        2 * LAMPORTS_PER_SOL,
+      );
       await ctx.connection.confirmTransaction(sig, 'confirmed');
     });
 
@@ -100,24 +102,32 @@ describe('Execute', () => {
       await sendTx(ctx, result.instructions);
 
       // === User comes back — only has credentialIdHash ===
-      const [found] = await client.findWalletsByAuthority(ownerKey.credentialIdHash);
+      const [found] = await client.findWalletsByAuthority(
+        ownerKey.credentialIdHash,
+      );
       walletPda = found.walletPda;
       vaultPda = found.vaultPda;
       ownerAuthorityPda = found.authorityPda;
 
       // Fund the vault
-      const sig = await ctx.connection.requestAirdrop(vaultPda, 2 * LAMPORTS_PER_SOL);
+      const sig = await ctx.connection.requestAirdrop(
+        vaultPda,
+        2 * LAMPORTS_PER_SOL,
+      );
       await ctx.connection.confirmTransaction(sig, 'confirmed');
     });
 
     it('executes a SOL transfer via execute()', async () => {
       const recipient = Keypair.generate().publicKey;
-      const signer = createMockSigner(ownerKey);
 
-      const { instructions } = await client.execute({
+      const prepared = await client.prepareExecute({
         payer: ctx.payer.publicKey,
         walletPda,
-        signer: secp256r1(signer, { authorityPda: ownerAuthorityPda }),
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
         instructions: [
           SystemProgram.transfer({
             fromPubkey: vaultPda,
@@ -126,6 +136,8 @@ describe('Execute', () => {
           }),
         ],
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeExecute(prepared, response);
 
       const balanceBefore = await ctx.connection.getBalance(recipient);
       await sendTx(ctx, instructions);
@@ -134,17 +146,27 @@ describe('Execute', () => {
       expect(balanceAfter - balanceBefore).toBe(1_000_000);
     });
 
-    it('executes a SOL transfer with transferSol()', async () => {
+    it('executes a SOL transfer with transferSol() equivalent', async () => {
       const recipient = Keypair.generate().publicKey;
-      const signer = createMockSigner(ownerKey);
 
-      const { instructions } = await client.transferSol({
+      const prepared = await client.prepareExecute({
         payer: ctx.payer.publicKey,
         walletPda,
-        signer: secp256r1(signer, { authorityPda: ownerAuthorityPda }),
-        recipient,
-        lamports: 1_000_000n,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
+        instructions: [
+          SystemProgram.transfer({
+            fromPubkey: vaultPda,
+            toPubkey: recipient,
+            lamports: 1_000_000,
+          }),
+        ],
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeExecute(prepared, response);
 
       const balanceBefore = await ctx.connection.getBalance(recipient);
       await sendTx(ctx, instructions);
@@ -155,12 +177,15 @@ describe('Execute', () => {
 
     it('executes arbitrary instructions with execute()', async () => {
       const recipient = Keypair.generate().publicKey;
-      const signer = createMockSigner(ownerKey);
 
-      const { instructions } = await client.execute({
+      const prepared = await client.prepareExecute({
         payer: ctx.payer.publicKey,
         walletPda,
-        signer: secp256r1(signer, { authorityPda: ownerAuthorityPda }),
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
         instructions: [
           SystemProgram.transfer({
             fromPubkey: vaultPda,
@@ -169,6 +194,8 @@ describe('Execute', () => {
           }),
         ],
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeExecute(prepared, response);
 
       const balanceBefore = await ctx.connection.getBalance(recipient);
       await sendTx(ctx, instructions);
@@ -179,15 +206,25 @@ describe('Execute', () => {
 
     it('increments counter after successful execute', async () => {
       const recipient = Keypair.generate().publicKey;
-      const signer = createMockSigner(ownerKey);
 
-      const { instructions } = await client.transferSol({
+      const prepared = await client.prepareExecute({
         payer: ctx.payer.publicKey,
         walletPda,
-        signer: secp256r1(signer, { authorityPda: ownerAuthorityPda }),
-        recipient,
-        lamports: 1_000_000n,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
+        instructions: [
+          SystemProgram.transfer({
+            fromPubkey: vaultPda,
+            toPubkey: recipient,
+            lamports: 1_000_000,
+          }),
+        ],
       });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeExecute(prepared, response);
 
       await sendTx(ctx, instructions);
 

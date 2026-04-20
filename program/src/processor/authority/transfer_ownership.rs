@@ -213,9 +213,13 @@ pub fn process(
     }
     check_zero_data(new_owner, ProgramError::AccountAlreadyInitialized)?;
 
+    // Fixed sizes per auth type (see wallet/create.rs for layout).
     let header_size = std::mem::size_of::<AuthorityAccountHeader>();
-    let variable_size = full_auth_data.len();
-    let space = header_size + variable_size;
+    let space = match args.auth_type {
+        0 => header_size + 32,                // Ed25519: pubkey
+        1 => header_size + 32 + 33 + 32,      // Secp256r1: cred ∥ pubkey ∥ rpIdHash
+        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
+    };
     let rent = rent_obj.minimum_balance(space);
 
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
@@ -256,8 +260,35 @@ pub fn process(
         std::ptr::write_unaligned(data.as_mut_ptr() as *mut AuthorityAccountHeader, header);
     }
 
-    let variable_target = &mut data[header_size..];
-    variable_target.copy_from_slice(full_auth_data);
+    // Write variable data. For Secp256r1 hash rpId once here so every Execute
+    // saves a sol_sha256 syscall.
+    match args.auth_type {
+        0 => {
+            data[header_size..header_size + 32].copy_from_slice(&full_auth_data[..32]);
+        }
+        1 => {
+            data[header_size..header_size + 32].copy_from_slice(&full_auth_data[..32]);
+            data[header_size + 32..header_size + 32 + 33]
+                .copy_from_slice(&full_auth_data[32..32 + 33]);
+            let rp_id_len = full_auth_data[32 + 33] as usize;
+            let rp_id = &full_auth_data[32 + 33 + 1..32 + 33 + 1 + rp_id_len];
+            let rp_id_hash_offset = header_size + 32 + 33;
+            #[cfg(target_os = "solana")]
+            unsafe {
+                let _ = pinocchio::syscalls::sol_sha256(
+                    [rp_id].as_ptr() as *const u8,
+                    1,
+                    data[rp_id_hash_offset..rp_id_hash_offset + 32].as_mut_ptr(),
+                );
+            }
+            #[cfg(not(target_os = "solana"))]
+            {
+                let _ = rp_id;
+                data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
+            }
+        }
+        _ => unreachable!(),
+    }
 
     let current_lamports = unsafe { *current_owner.borrow_mut_lamports_unchecked() };
     let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };

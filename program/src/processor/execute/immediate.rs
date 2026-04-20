@@ -2,10 +2,14 @@ use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
-    compact::parse_compact_instructions,
+    compact::{parse_compact_instructions_ref_with_len, CompactInstructionRef},
     error::AuthError,
-    processor::execute::actions::{evaluate_post_actions, evaluate_pre_actions, snapshot_token_balances},
+    processor::execute::actions::{
+        evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
+        snapshot_token_balances, verify_token_authorities_unchanged,
+    },
     state::{authority::AuthorityAccountHeader, session::has_actions, AccountDiscriminator},
+    utils::get_stack_height,
 };
 use pinocchio::{
     account_info::AccountInfo,
@@ -81,12 +85,13 @@ pub fn process(
         return Err(ProgramError::InvalidAccountData);
     };
 
-    // Parse compact instructions
-    let compact_instructions = parse_compact_instructions(instruction_data)?;
-
-    // Serialize compact instructions to get their byte length
-    let compact_bytes = crate::compact::serialize_compact_instructions(&compact_instructions);
-    let compact_len = compact_bytes.len();
+    // Parse compact instructions and get their consumed byte length. The
+    // length is used to split `instruction_data` into the compact-instructions
+    // prefix (the data_payload bound into the Secp256r1 signature) and the
+    // auth payload suffix. Tracking the parse cursor avoids re-serializing
+    // just to measure length.
+    let (compact_instructions, compact_len) =
+        parse_compact_instructions_ref_with_len(instruction_data)?;
 
     // Track whether this is a session-based execution and the current slot
     let mut is_session = false;
@@ -145,6 +150,15 @@ pub fn process(
         }
         3 => {
             // Session — reuse the existing `authority_data` borrow; no re-borrow needed.
+
+            // L5: anti-CPI guard, mirroring the Secp256r1 authenticator check.
+            // A session-authenticated Execute is only valid as a top-level instruction
+            // (stack_height == 1). Rejecting CPI entry prevents any future bugs where
+            // a wrapper program could chain through Execute with forged account context.
+            if get_stack_height() > 1 {
+                return Err(AuthError::PermissionDenied.into());
+            }
+
             if authority_data.len()
                 < std::mem::size_of::<crate::state::session::SessionAccount>()
             {
@@ -216,48 +230,78 @@ pub fn process(
         Vec::new()
     };
 
+    // ── Session invariants (defense against System::Assign / SetAuthority escapes) ──
+    // A session that whitelists System Program (a common pattern for SOL transfers)
+    // could otherwise craft `System::Assign(vault, attacker)` — the lamport-based
+    // limits see no outflow, but ownership of the vault silently transfers to the
+    // attacker, who then drains it in a follow-up tx. Same class of attack via
+    // SPL Token's `SetAuthority` / `Approve` on vault-owned token accounts.
+    //
+    // Snapshot the vault's metadata + every listed-mint vault-owned token account's
+    // authority fields BEFORE the CPI loop; verify unchanged AFTER.
+    let session_has_actions = is_session && has_actions(authority_data);
+    let vault_owner_before = if session_has_actions {
+        Some(*vault_pda.owner())
+    } else {
+        None
+    };
+    let vault_data_len_before = if session_has_actions {
+        Some(unsafe { vault_pda.borrow_data_unchecked().len() })
+    } else {
+        None
+    };
+    let token_authority_snapshots = if session_has_actions {
+        snapshot_token_authorities(authority_data, accounts, vault_pda.key())?
+    } else {
+        Vec::new()
+    };
+
     // Track gross SOL outflow across all CPIs (for SolMaxPerTx check)
     let mut vault_lamports_gross_out: u64 = 0;
     let mut prev_vault_lamports = vault_lamports_before;
 
+    // Reuse the same Vecs across all inner CPIs — allocated once, cleared +
+    // repushed each iteration. Saves 2 Vec::with_capacity allocations per
+    // inner instruction vs. .collect()ing fresh Vecs each time.
+    const MAX_INNER_ACCOUNTS: usize = 32;
+    let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
+    let mut cpi_accounts: Vec<Account> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
+
+    // PDA signer seeds (constant across the loop)
+    let vault_bump_arr = [vault_bump];
+    let seeds = [
+        Seed::from(b"vault"),
+        Seed::from(wallet_pda.key().as_ref()),
+        Seed::from(&vault_bump_arr),
+    ];
+
     // Execute each compact instruction
     for compact_ix in &compact_instructions {
         let decompressed = compact_ix.decompress(accounts)?;
-
-        let account_metas: Vec<AccountMeta> = decompressed
-            .accounts
-            .iter()
-            .map(|acc| AccountMeta {
-                pubkey: acc.key(),
-                is_signer: acc.is_signer() || acc.key() == vault_pda.key(),
-                is_writable: acc.is_writable(),
-            })
-            .collect();
 
         // Prevent self-reentrancy (Issue #10)
         if decompressed.program_id.as_ref() == program_id.as_ref() {
             return Err(AuthError::SelfReentrancyNotAllowed.into());
         }
 
+        account_metas.clear();
+        cpi_accounts.clear();
+        for &acc in &decompressed.accounts {
+            account_metas.push(AccountMeta {
+                pubkey: acc.key(),
+                is_signer: acc.is_signer() || acc.key() == vault_pda.key(),
+                is_writable: acc.is_writable(),
+            });
+            cpi_accounts.push(Account::from(acc));
+        }
+
         let ix = Instruction {
             program_id: decompressed.program_id,
             accounts: &account_metas,
-            data: &decompressed.data,
+            data: decompressed.data,
         };
 
-        let vault_bump_arr = [vault_bump];
-        let seeds = [
-            Seed::from(b"vault"),
-            Seed::from(wallet_pda.key().as_ref()),
-            Seed::from(&vault_bump_arr),
-        ];
         let signer: Signer = (&seeds).into();
-
-        let cpi_accounts: Vec<Account> = decompressed
-            .accounts
-            .iter()
-            .map(|acc| Account::from(*acc))
-            .collect();
 
         unsafe {
             invoke_signed_unchecked(&ix, &cpi_accounts, &[signer]);
@@ -274,9 +318,27 @@ pub fn process(
         }
     }
 
+    // ── Post-CPI session invariants ────────────────────────────────────
+    // Verify vault's ownership and data layout were not tampered with. Any
+    // change (System::Assign, Allocate, AllocateWithSeed, AssignWithSeed) is
+    // rejected. This complements the balance-based limits below.
+    if let Some(owner_before) = vault_owner_before {
+        if *vault_pda.owner() != owner_before {
+            return Err(AuthError::SessionVaultOwnerChanged.into());
+        }
+    }
+    if let Some(len_before) = vault_data_len_before {
+        let len_after = unsafe { vault_pda.borrow_data_unchecked().len() };
+        if len_after != len_before {
+            return Err(AuthError::SessionVaultDataLenChanged.into());
+        }
+    }
+    // Verify no SetAuthority / Approve on listed-mint vault-owned token accounts.
+    verify_token_authorities_unchanged(&token_authority_snapshots, accounts)?;
+
     // Post-CPI action checks (spending limits)
     // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
-    if is_session && has_actions(authority_data) {
+    if session_has_actions {
         evaluate_post_actions(
             authority_data,
             accounts,
@@ -292,26 +354,33 @@ pub fn process(
     Ok(())
 }
 
-/// Compute SHA256 hash of all account pubkeys referenced by compact instructions (Issue #11)
+/// Compute SHA256 hash of all account pubkeys referenced by compact instructions (Issue #11).
+///
+/// Optimisation: pass each 32-byte pubkey as a separate slice to sol_sha256
+/// instead of concatenating them into an owned Vec first. sol_sha256 accepts
+/// an array of slices natively, so the concat step was pure overhead.
 fn compute_accounts_hash(
     accounts: &[AccountInfo],
-    compact_instructions: &[crate::compact::CompactInstruction],
+    compact_instructions: &[CompactInstructionRef<'_>],
 ) -> Result<[u8; 32], ProgramError> {
-    let mut pubkeys_data = Vec::new();
+    // Collect slice references (16 bytes each) instead of copying 32-byte pubkeys.
+    // With MAX_COMPACT_INSTRUCTIONS = 16 and a reasonable per-ix account count,
+    // this fits comfortably on the BPF heap.
+    let mut refs: Vec<&[u8]> = Vec::with_capacity(compact_instructions.len() * 4);
 
     for ix in compact_instructions {
         let program_idx = ix.program_id_index as usize;
         if program_idx >= accounts.len() {
             return Err(ProgramError::InvalidInstructionData);
         }
-        pubkeys_data.extend_from_slice(accounts[program_idx].key().as_ref());
+        refs.push(accounts[program_idx].key().as_ref());
 
-        for &acc_idx in &ix.accounts {
+        for &acc_idx in ix.accounts {
             let idx = acc_idx as usize;
             if idx >= accounts.len() {
                 return Err(ProgramError::InvalidInstructionData);
             }
-            pubkeys_data.extend_from_slice(accounts[idx].key().as_ref());
+            refs.push(accounts[idx].key().as_ref());
         }
     }
 
@@ -320,15 +389,15 @@ fn compute_accounts_hash(
     #[cfg(target_os = "solana")]
     unsafe {
         pinocchio::syscalls::sol_sha256(
-            [pubkeys_data.as_slice()].as_ptr() as *const u8,
-            1,
+            refs.as_ptr() as *const u8,
+            refs.len() as u64,
             hash.as_mut_ptr(),
         );
     }
     #[cfg(not(target_os = "solana"))]
     {
         hash = [0xAA; 32];
-        let _ = pubkeys_data;
+        let _ = refs;
     }
 
     Ok(hash)
