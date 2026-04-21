@@ -254,13 +254,6 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
   };
 }
 
-/** Gets the credential bytes (PDA seed) from a CreateWalletOwner */
-function ownerCredentialBytes(owner: CreateWalletOwner): Uint8Array {
-  return owner.type === 'ed25519'
-    ? owner.publicKey.toBytes()
-    : owner.credentialIdHash;
-}
-
 /**
  * Shared pipeline for prepareExecute + prepareAuthorize:
  *  1. runs buildCompactLayout over fixed keys + user instructions
