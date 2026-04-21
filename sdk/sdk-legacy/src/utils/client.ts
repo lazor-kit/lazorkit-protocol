@@ -176,6 +176,17 @@ export interface PreparedRevokeSession extends PreparedBase {
   };
 }
 
+/** One hit from `findWalletsByAuthority` — enough to bootstrap all downstream calls. */
+export interface WalletAuthorityRecord {
+  walletPda: PublicKey;
+  authorityPda: PublicKey;
+  vaultPda: PublicKey;
+  /** Role enum: 0=Owner, 1=Admin, 2=Spender */
+  role: number;
+  /** Authority type enum: 0=Ed25519, 1=Secp256r1 */
+  authorityType: number;
+}
+
 export interface PreparedAuthorize extends PreparedBase {
   deferredExecPda: PublicKey;
   counter: number;
@@ -248,6 +259,42 @@ function ownerCredentialBytes(owner: CreateWalletOwner): Uint8Array {
   return owner.type === 'ed25519'
     ? owner.publicKey.toBytes()
     : owner.credentialIdHash;
+}
+
+/**
+ * Shared pipeline for prepareExecute + prepareAuthorize:
+ *  1. runs buildCompactLayout over fixed keys + user instructions
+ *  2. assembles the full AccountMeta[] with per-fixed-account flags
+ *  3. computes the accounts hash that gets folded into the signed payload
+ *
+ * Call sites just need to declare the fixed accounts (with their signer/
+ * writable flags) and pass the user instructions.
+ */
+function buildCompactLayoutAndHash(
+  fixedAccounts: AccountMeta[],
+  userInstructions: TransactionInstruction[],
+): {
+  compactInstructions: CompactInstruction[];
+  remainingAccounts: AccountMeta[];
+  allAccountMetas: AccountMeta[];
+  accountsHash: Uint8Array;
+} {
+  const fixedKeys = fixedAccounts.map((a) => a.pubkey);
+  const { compactInstructions, remainingAccounts } = buildCompactLayout(
+    fixedKeys,
+    userInstructions,
+  );
+  const allAccountMetas: AccountMeta[] = [
+    ...fixedAccounts,
+    ...remainingAccounts,
+  ];
+  const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
+  return {
+    compactInstructions,
+    remainingAccounts,
+    allAccountMetas,
+    accountsHash,
+  };
 }
 
 export class LazorKitClient {
@@ -390,6 +437,33 @@ export class LazorKitClient {
     return { authorityPda, publicKeyBytes, slot, counter };
   }
 
+  /**
+   * Thin wrapper around `prepareSecp256r1` that injects this client's
+   * programId — every prepare method passes the same `payer` + `programId`
+   * + (1-byte) discriminator, so threading those through a helper keeps
+   * the per-op site focused on the signedPayload.
+   */
+  private buildPasskeySigning(args: {
+    discriminator: number;
+    sysvarIxIndex: number;
+    signedPayload: Uint8Array;
+    slot: bigint;
+    counter: number;
+    payer: PublicKey;
+    publicKeyBytes: Uint8Array;
+  }): PreparedSecp256r1 {
+    return prepareSecp256r1({
+      discriminator: new Uint8Array([args.discriminator]),
+      signedPayload: args.signedPayload,
+      sysvarIxIndex: args.sysvarIxIndex,
+      slot: args.slot,
+      counter: args.counter,
+      payer: args.payer,
+      programId: this.programId,
+      publicKeyBytes: args.publicKeyBytes,
+    });
+  }
+
   // ── prepareExecute / finalizeExecute ──
 
   async prepareExecute(params: {
@@ -406,45 +480,27 @@ export class LazorKitClient {
     ]);
     const { authorityPda, publicKeyBytes, slot, counter } = resolved;
 
-    const fixedAccounts = [
-      params.payer,
-      params.walletPda,
-      authorityPda,
-      vaultPda,
-      SYSVAR_INSTRUCTIONS_PUBKEY,
-    ];
-    const { compactInstructions, remainingAccounts } = buildCompactLayout(
-      fixedAccounts,
-      params.instructions,
-    );
+    const { compactInstructions, remainingAccounts, accountsHash } =
+      buildCompactLayoutAndHash(
+        [
+          { pubkey: params.payer, isSigner: true, isWritable: false },
+          { pubkey: params.walletPda, isSigner: false, isWritable: false },
+          { pubkey: authorityPda, isSigner: false, isWritable: true },
+          { pubkey: vaultPda, isSigner: false, isWritable: true },
+          { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+        ],
+        params.instructions,
+      );
     const packed = packCompactInstructions(compactInstructions);
-
-    const allAccountMetas: AccountMeta[] = [
-      { pubkey: params.payer, isSigner: true, isWritable: false },
-      { pubkey: params.walletPda, isSigner: false, isWritable: false },
-      { pubkey: authorityPda, isSigner: false, isWritable: true },
-      { pubkey: vaultPda, isSigner: false, isWritable: true },
-      {
-        pubkey: SYSVAR_INSTRUCTIONS_PUBKEY,
-        isSigner: false,
-        isWritable: false,
-      },
-      ...remainingAccounts,
-    ];
-    const accountsHash = computeAccountsHash(
-      allAccountMetas,
-      compactInstructions,
-    );
     const signedPayload = concatBytes([packed, accountsHash]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_EXECUTE]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_EXECUTE,
       sysvarIxIndex: SYSVAR_IX_INDEX_EXECUTE,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -529,14 +585,13 @@ export class LazorKitClient {
     );
     const signedPayload = concatBytes([dataPayload, params.payer.toBytes()]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_ADD_AUTHORITY]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_ADD_AUTHORITY,
       sysvarIxIndex: SYSVAR_IX_INDEX_ADD_AUTHORITY,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -613,14 +668,13 @@ export class LazorKitClient {
       refundDest.toBytes(),
     ]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_REMOVE_AUTHORITY]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_REMOVE_AUTHORITY,
       sysvarIxIndex: SYSVAR_IX_INDEX_REMOVE_AUTHORITY,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -696,14 +750,13 @@ export class LazorKitClient {
       refundDest.toBytes(),
     ]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_TRANSFER_OWNERSHIP]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_TRANSFER_OWNERSHIP,
       sysvarIxIndex: SYSVAR_IX_INDEX_TRANSFER_OWNERSHIP,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -791,14 +844,13 @@ export class LazorKitClient {
     );
     const signedPayload = concatBytes([dataPayload, params.payer.toBytes()]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_CREATE_SESSION]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_CREATE_SESSION,
       sysvarIxIndex: SYSVAR_IX_INDEX_CREATE_SESSION,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -868,14 +920,13 @@ export class LazorKitClient {
       refundDest.toBytes(),
     ]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_REVOKE_SESSION]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_REVOKE_SESSION,
       sysvarIxIndex: SYSVAR_IX_INDEX_REVOKE_SESSION,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -935,31 +986,20 @@ export class LazorKitClient {
       counter,
     );
 
-    const tx2FixedAccounts = [
-      params.payer,
-      params.walletPda,
-      vaultPda,
-      deferredExecPda,
-      params.payer,
-    ];
-    const { compactInstructions, remainingAccounts } = buildCompactLayout(
-      tx2FixedAccounts,
-      params.instructions,
-    );
-
+    // The compact layout reflects TX2 (ExecuteDeferred) account order, because
+    // that's the set of accounts the on-chain verifier will hash when replaying.
+    const { compactInstructions, remainingAccounts, accountsHash } =
+      buildCompactLayoutAndHash(
+        [
+          { pubkey: params.payer, isSigner: true, isWritable: true },
+          { pubkey: params.walletPda, isSigner: false, isWritable: true },
+          { pubkey: vaultPda, isSigner: false, isWritable: true },
+          { pubkey: deferredExecPda, isSigner: false, isWritable: true },
+          { pubkey: params.payer, isSigner: false, isWritable: true },
+        ],
+        params.instructions,
+      );
     const instructionsHash = computeInstructionsHash(compactInstructions);
-    const tx2AccountMetas: AccountMeta[] = [
-      { pubkey: params.payer, isSigner: true, isWritable: true },
-      { pubkey: params.walletPda, isSigner: false, isWritable: true },
-      { pubkey: vaultPda, isSigner: false, isWritable: true },
-      { pubkey: deferredExecPda, isSigner: false, isWritable: true },
-      { pubkey: params.payer, isSigner: false, isWritable: true },
-      ...remainingAccounts,
-    ];
-    const accountsHash = computeAccountsHash(
-      tx2AccountMetas,
-      compactInstructions,
-    );
     const expiryOffsetBuf = new Uint8Array(2);
     expiryOffsetBuf[0] = expiryOffset & 0xff;
     expiryOffsetBuf[1] = (expiryOffset >> 8) & 0xff;
@@ -969,14 +1009,13 @@ export class LazorKitClient {
       expiryOffsetBuf,
     ]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_AUTHORIZE]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_AUTHORIZE,
       sysvarIxIndex: SYSVAR_IX_INDEX_AUTHORIZE,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -1060,15 +1099,7 @@ export class LazorKitClient {
   async findWalletsByAuthority(
     credential: Uint8Array,
     authorityType: 'ed25519' | 'secp256r1' = 'secp256r1',
-  ): Promise<
-    Array<{
-      walletPda: PublicKey;
-      authorityPda: PublicKey;
-      vaultPda: PublicKey;
-      role: number;
-      authorityType: number;
-    }>
-  > {
+  ): Promise<WalletAuthorityRecord[]> {
     assertByteLength(credential, 32, 'credential');
 
     const typeValue =
