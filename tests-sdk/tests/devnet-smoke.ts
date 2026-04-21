@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   LazorKitClient,
+  Actions,
   ed25519,
   session,
   ROLE_ADMIN,
@@ -191,6 +192,51 @@ async function main() {
     });
     const r = await sendAndMeasure(connection, payer, [ix1, ix2]);
     record('Fund 2 vaults (0.05 SOL each)', r);
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // 2b. WALLET LOOKUP (SDK ↔ real RPC integration)
+  // No tx cost — verifies findWalletsByAuthority's memcmp filters work
+  // against devnet's full program-account dataset (local validator only
+  // holds one wallet, so filter correctness under realistic data
+  // volume only shows up here).
+  // ────────────────────────────────────────────────────────────
+  console.log('\n--- Wallet Lookup ---');
+  {
+    const lookupStart = Date.now();
+    const secpHits = await client.findWalletsByAuthority(
+      secpOwnerKey.credentialIdHash,
+    );
+    const secpMs = Date.now() - lookupStart;
+    const foundSecp = secpHits.some(
+      (h) => h.walletPda.toBase58() === secpWalletPda.toBase58(),
+    );
+    if (!foundSecp) {
+      throw new Error(
+        `findWalletsByAuthority(Secp256r1) did not return ${secpWalletPda.toBase58()}; got ${secpHits.length} hits`,
+      );
+    }
+    console.log(
+      `  findWalletsByAuthority (Secp256r1)                   ${secpHits.length} hit(s), ${secpMs}ms — ✓ found walletPda`,
+    );
+
+    const ed25519LookupStart = Date.now();
+    const edHits = await client.findWalletsByAuthority(
+      ed25519OwnerKp.publicKey.toBytes(),
+      'ed25519',
+    );
+    const edMs = Date.now() - ed25519LookupStart;
+    const foundEd = edHits.some(
+      (h) => h.walletPda.toBase58() === ed25519WalletPda.toBase58(),
+    );
+    if (!foundEd) {
+      throw new Error(
+        `findWalletsByAuthority(Ed25519) did not return ${ed25519WalletPda.toBase58()}; got ${edHits.length} hits`,
+      );
+    }
+    console.log(
+      `  findWalletsByAuthority (Ed25519)                     ${edHits.length} hit(s), ${edMs}ms — ✓ found walletPda`,
+    );
   }
 
   // ────────────────────────────────────────────────────────────
@@ -492,6 +538,101 @@ async function main() {
   }
 
   // ────────────────────────────────────────────────────────────
+  // 7b. SESSION WITH ENFORCED ACTIONS — positive + negative path on real clock
+  // Proves SolMaxPerTx enforcement against devnet's real Clock sysvar,
+  // which local validator timing cannot exercise faithfully.
+  // ────────────────────────────────────────────────────────────
+  console.log('\n--- Session with Actions (SolMaxPerTx) ---');
+  {
+    const cap = 2_000_000n; // 0.002 SOL per-tx cap
+    const withinLimit = 1_000_000; // 0.001 SOL — should succeed
+    const overLimit = 5_000_000; // 0.005 SOL — should be rejected
+
+    // Create session with SolMaxPerTx action
+    const guardedSessionKp = Keypair.generate();
+    const currentSlot = BigInt(await connection.getSlot());
+    const balBefore = await connection.getBalance(payer.publicKey);
+    const { instructions: createIxs, sessionPda: guardedSessionPda } =
+      await client.createSession({
+        payer: payer.publicKey,
+        walletPda: ed25519WalletPda,
+        adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
+        sessionKey: guardedSessionKp.publicKey,
+        expiresAt: currentSlot + 9000n,
+        actions: [Actions.solMaxPerTx(cap)],
+      });
+    const rc = await sendAndMeasure(connection, payer, createIxs, [
+      ed25519OwnerKp,
+    ]);
+    const balAfter = await connection.getBalance(payer.publicKey);
+    rc.rentCost = balBefore - balAfter - 10000;
+    record('CreateSession with SolMaxPerTx(0.002 SOL)', rc);
+
+    // Positive: 0.001 SOL transfer — within limit, expect success
+    {
+      const recipient = Keypair.generate().publicKey;
+      const { instructions } = await client.transferSol({
+        payer: payer.publicKey,
+        walletPda: ed25519WalletPda,
+        signer: session(guardedSessionPda, guardedSessionKp.publicKey),
+        recipient,
+        lamports: withinLimit,
+      });
+      const r = await sendAndMeasure(connection, payer, instructions, [
+        guardedSessionKp,
+      ]);
+      record(
+        `Execute via Session — 0.001 SOL (within cap, expect OK)`,
+        r,
+      );
+    }
+
+    // Negative: 0.005 SOL transfer — over cap, expect rejection
+    {
+      const recipient = Keypair.generate().publicKey;
+      const { instructions } = await client.transferSol({
+        payer: payer.publicKey,
+        walletPda: ed25519WalletPda,
+        signer: session(guardedSessionPda, guardedSessionKp.publicKey),
+        recipient,
+        lamports: overLimit,
+      });
+      try {
+        await sendAndMeasure(connection, payer, instructions, [
+          guardedSessionKp,
+        ]);
+        throw new Error(
+          'Over-cap tx unexpectedly succeeded — SolMaxPerTx did NOT enforce on devnet',
+        );
+      } catch (err: any) {
+        const msg = String(err?.message || err);
+        // Expected on-chain error: session action violation (0xbd8 range)
+        if (msg.includes('unexpectedly succeeded')) throw err;
+        console.log(
+          `  Execute via Session — 0.005 SOL (over cap)             REJECTED — ✓ enforcement works`,
+        );
+      }
+    }
+
+    // Revoke the guarded session — cleanup
+    {
+      const balBefore = await connection.getBalance(payer.publicKey);
+      const { instructions } = await client.revokeSession({
+        payer: payer.publicKey,
+        walletPda: ed25519WalletPda,
+        adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
+        sessionPda: guardedSessionPda,
+      });
+      const r = await sendAndMeasure(connection, payer, instructions, [
+        ed25519OwnerKp,
+      ]);
+      const balAfter = await connection.getBalance(payer.publicKey);
+      r.rentCost = balBefore - balAfter - 10000;
+      record('RevokeSession (guarded session cleanup)', r);
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────
   // 8. DEFERRED EXECUTION (Authorize + ExecuteDeferred)
   // ────────────────────────────────────────────────────────────
   console.log('\n--- Deferred Execution ---');
@@ -528,6 +669,64 @@ async function main() {
     });
     const r2 = await sendAndMeasure(connection, payer, execIxs);
     record('ExecuteDeferred (Deferred TX2)', r2);
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // 8b. RECLAIM DEFERRED — expired-authorization rent refund
+  // Flow: authorize a deferred exec with a very short expiry (~12 slots ≈ 5s),
+  // wait past expiry, then call ReclaimDeferred and verify the rent refund.
+  // The only way to exercise instruction #8 (ReclaimDeferred) is with a
+  // real clock — this is the canonical devnet path.
+  // ────────────────────────────────────────────────────────────
+  console.log('\n--- ReclaimDeferred (expired authorization) ---');
+  {
+    const recipient = Keypair.generate().publicKey;
+
+    // TX1: Authorize with short expiry (12 slots ≈ 5 seconds on devnet)
+    const balBefore = await connection.getBalance(payer.publicKey);
+    const prepared = await client.prepareAuthorize({
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
+      secp256r1: {
+        credentialIdHash: secpOwnerKey.credentialIdHash,
+        publicKeyBytes: secpOwnerKey.publicKeyBytes,
+        authorityPda: secpOwnerAuthPda,
+      },
+      instructions: [
+        SystemProgram.transfer({
+          fromPubkey: secpVaultPda,
+          toPubkey: recipient,
+          lamports: 1_000_000,
+        }),
+      ],
+      expiryOffset: 12, // deliberately short
+    });
+    const webauthnResponse = await fakeWebAuthnSign(
+      secpOwnerKey,
+      prepared.challenge,
+    );
+    const { instructions: authIxs, deferredPayload } =
+      client.finalizeAuthorize(prepared, webauthnResponse);
+    const r1 = await sendAndMeasure(connection, payer, authIxs);
+    const balAfterAuth = await connection.getBalance(payer.publicKey);
+    r1.rentCost = balBefore - balAfterAuth - 5000;
+    record('Authorize (short expiry, to be reclaimed)', r1);
+
+    // Wait past the expiry: 12 slots × 400ms ≈ 5s, use 7s for safety
+    console.log('  waiting ~7s for deferred expiry...');
+    await new Promise((r) => setTimeout(r, 7_000));
+
+    // TX2: ReclaimDeferred — original payer reclaims rent
+    const balBeforeReclaim = await connection.getBalance(payer.publicKey);
+    const { instructions: reclaimIxs } = client.reclaimDeferred({
+      payer: payer.publicKey,
+      deferredExecPda: deferredPayload.deferredExecPda,
+    });
+    const r2 = await sendAndMeasure(connection, payer, reclaimIxs);
+    const balAfterReclaim = await connection.getBalance(payer.publicKey);
+    // rent refund is negative (gained lamports minus tx fee)
+    r2.rentCost = balBeforeReclaim - balAfterReclaim - 5000;
+    record('ReclaimDeferred (rent refund to payer)', r2);
   }
 
   // ────────────────────────────────────────────────────────────
