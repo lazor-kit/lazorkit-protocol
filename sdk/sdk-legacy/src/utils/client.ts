@@ -348,10 +348,19 @@ export class LazorKitClient {
   private async resolveSecp256r1(walletPda: PublicKey, p: Secp256r1Params) {
     const authorityPda =
       p.authorityPda ?? this.findAuthority(walletPda, p.credentialIdHash)[0];
-    const publicKeyBytes =
-      p.publicKeyBytes ?? (await readAuthorityPubkey(this.connection, authorityPda));
-    const slot = p.slotOverride ?? BigInt(await this.connection.getSlot());
-    const counter = (await this.readCounter(authorityPda)) + 1;
+
+    // Fire independent RPC reads in parallel. Overrides short-circuit to
+    // `Promise.resolve` so callers that pre-fetch everything make zero network calls.
+    const [publicKeyBytes, slot, counter] = await Promise.all([
+      p.publicKeyBytes
+        ? Promise.resolve(p.publicKeyBytes)
+        : readAuthorityPubkey(this.connection, authorityPda),
+      p.slotOverride != null
+        ? Promise.resolve(p.slotOverride)
+        : this.connection.getSlot().then((s) => BigInt(s)),
+      this.readCounter(authorityPda).then((c) => c + 1),
+    ]);
+
     return { authorityPda, publicKeyBytes, slot, counter };
   }
 
@@ -364,11 +373,12 @@ export class LazorKitClient {
     instructions: TransactionInstruction[];
   }): Promise<PreparedExecute> {
     const [vaultPda] = this.findVault(params.walletPda);
-    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
-      params.walletPda,
-      params.secp256r1,
-    );
-    const protocolFee = await this.resolveProtocolFee(params.payer);
+    // resolveSecp256r1 and resolveProtocolFee are fully independent — run them in parallel.
+    const [resolved, protocolFee] = await Promise.all([
+      this.resolveSecp256r1(params.walletPda, params.secp256r1),
+      this.resolveProtocolFee(params.payer),
+    ]);
+    const { authorityPda, publicKeyBytes, slot, counter } = resolved;
 
     const fixedAccounts = [
       params.payer,
