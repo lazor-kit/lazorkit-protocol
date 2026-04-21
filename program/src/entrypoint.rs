@@ -9,11 +9,7 @@ use pinocchio::{
 };
 
 use crate::{
-    processor::{
-        authorize, create_session, create_wallet, execute, execute_deferred, initialize_protocol,
-        initialize_treasury_shard, manage_authority, reclaim_deferred, register_integrator,
-        revoke_session, transfer_ownership, update_protocol, withdraw_treasury,
-    },
+    processor::{authority, execute, session, wallet},
     state::{
         integrator_record::FeeRecord, protocol_config::ProtocolConfig,
         treasury_shard::TreasuryShard, AccountDiscriminator,
@@ -41,21 +37,21 @@ pub fn process_instruction(
     };
 
     match discriminator {
-        0 => create_wallet::process(program_id, processor_accounts, data),
-        1 => manage_authority::process_add_authority(program_id, processor_accounts, data),
-        2 => manage_authority::process_remove_authority(program_id, processor_accounts, data),
-        3 => transfer_ownership::process(program_id, processor_accounts, data),
-        4 => execute::process(program_id, processor_accounts, data),
-        5 => create_session::process(program_id, processor_accounts, data),
-        6 => authorize::process(program_id, processor_accounts, data),
-        7 => execute_deferred::process(program_id, processor_accounts, data),
-        8 => reclaim_deferred::process(program_id, processor_accounts, data),
-        9 => revoke_session::process(program_id, processor_accounts, data),
-        10 => initialize_protocol::process(program_id, accounts, data),
-        11 => update_protocol::process(program_id, accounts, data),
-        12 => register_integrator::process(program_id, accounts, data),
-        13 => withdraw_treasury::process(program_id, accounts, data),
-        14 => initialize_treasury_shard::process(program_id, accounts, data),
+        0 => wallet::create::process(program_id, processor_accounts, data),
+        1 => authority::manage::process_add_authority(program_id, processor_accounts, data),
+        2 => authority::manage::process_remove_authority(program_id, processor_accounts, data),
+        3 => authority::transfer_ownership::process(program_id, processor_accounts, data),
+        4 => execute::immediate::process(program_id, processor_accounts, data),
+        5 => session::create::process(program_id, processor_accounts, data),
+        6 => execute::authorize::process(program_id, processor_accounts, data),
+        7 => execute::deferred::process(program_id, processor_accounts, data),
+        8 => execute::reclaim::process(program_id, processor_accounts, data),
+        9 => session::revoke::process(program_id, processor_accounts, data),
+        10 => crate::processor::protocol::initialize_protocol::process(program_id, accounts, data),
+        11 => crate::processor::protocol::update_protocol::process(program_id, accounts, data),
+        12 => crate::processor::protocol::register_integrator::process(program_id, accounts, data),
+        13 => crate::processor::protocol::withdraw_treasury::process(program_id, accounts, data),
+        14 => crate::processor::protocol::initialize_treasury_shard::process(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -92,7 +88,7 @@ fn try_collect_fee<'a>(
         return Ok(accounts);
     }
 
-    // Check config
+    // Required: valid ProtocolConfig
     if maybe_config.owner() != program_id {
         return Ok(accounts);
     }
@@ -122,21 +118,7 @@ fn try_collect_fee<'a>(
         return Ok(&accounts[..n - 4]);
     }
 
-    // Check fee record
-    if maybe_record.owner() != program_id {
-        return Ok(accounts);
-    }
-    let record_data = maybe_record.try_borrow_data()?;
-    if record_data.is_empty()
-        || record_data[0] != AccountDiscriminator::FeeRecord as u8
-        || record_data.len() < core::mem::size_of::<FeeRecord>()
-    {
-        drop(record_data);
-        return Ok(accounts);
-    }
-    drop(record_data);
-
-    // Check treasury shard
+    // Required: valid TreasuryShard (fee destination)
     if maybe_shard.owner() != program_id {
         return Ok(accounts);
     }
@@ -149,6 +131,20 @@ fn try_collect_fee<'a>(
         return Ok(accounts);
     }
     drop(shard_data);
+
+    // Optional: FeeRecord. If it's a valid FeeRecord owned by this program, we'll
+    // bump counters after transfer. If not (unregistered dev), we still charge the
+    // fee; we just skip the counter update.
+    let record_present = if maybe_record.owner() != program_id {
+        false
+    } else {
+        let rec = maybe_record.try_borrow_data()?;
+        let ok = !rec.is_empty()
+            && rec[0] == AccountDiscriminator::FeeRecord as u8
+            && rec.len() >= core::mem::size_of::<FeeRecord>();
+        drop(rec);
+        ok
+    };
 
     // Transfer fee from payer (accounts[0]) to treasury shard via System Program
     let payer = &accounts[0];
@@ -181,31 +177,33 @@ fn try_collect_fee<'a>(
 
     invoke(&transfer_ix, &[payer, maybe_shard, maybe_system])?;
 
-    // Update fee record counters (no SOL, just tracking)
-    let mut record_data = maybe_record.try_borrow_mut_data()?;
-    let record = unsafe { &mut *(record_data.as_mut_ptr() as *mut FeeRecord) };
+    // Conditional: only bump counters if a valid FeeRecord was supplied
+    if record_present {
+        let mut record_data = maybe_record.try_borrow_mut_data()?;
+        let record = unsafe { &mut *(record_data.as_mut_ptr() as *mut FeeRecord) };
 
-    record.total_fees_paid = record
-        .total_fees_paid
-        .checked_add(fee)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
+        record.total_fees_paid = record
+            .total_fees_paid
+            .checked_add(fee)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    match discriminator {
-        0 => {
-            record.wallet_count = record
-                .wallet_count
-                .checked_add(1)
-                .ok_or(ProgramError::ArithmeticOverflow)?;
-        },
-        4 | 7 => {
-            record.tx_count = record
-                .tx_count
-                .checked_add(1)
-                .ok_or(ProgramError::ArithmeticOverflow)?;
-        },
-        _ => {},
+        match discriminator {
+            0 => {
+                record.wallet_count = record
+                    .wallet_count
+                    .checked_add(1)
+                    .ok_or(ProgramError::ArithmeticOverflow)?;
+            },
+            4 | 7 => {
+                record.tx_count = record
+                    .tx_count
+                    .checked_add(1)
+                    .ok_or(ProgramError::ArithmeticOverflow)?;
+            },
+            _ => {},
+        }
+        drop(record_data);
     }
-    drop(record_data);
 
     Ok(&accounts[..n - 4])
 }

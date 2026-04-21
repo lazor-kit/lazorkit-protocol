@@ -3,10 +3,11 @@ import {
   Keypair,
   PublicKey,
   LAMPORTS_PER_SOL,
+  SystemProgram,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import { setupTest, sendTx, getSlot, type TestContext } from './common';
-import { generateMockSecp256r1Key, createMockSigner } from './secp256r1Utils';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
   LazorKitClient,
   AUTH_TYPE_ED25519,
@@ -14,9 +15,8 @@ import {
   ROLE_ADMIN,
   ROLE_SPENDER,
   ed25519,
-  secp256r1,
-} from '../../sdk/solita-client/src';
-import { AuthorityAccount } from '../../sdk/solita-client/src/generated/accounts';
+} from '../../sdk/sdk-legacy/src';
+import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
 /**
  * E2E Company Workflow (realistic flow):
@@ -78,7 +78,9 @@ describe('E2E Company Workflow', () => {
 
   it('Step 2: CEO comes back — finds wallet by credentialIdHash only', async () => {
     // This is the real flow: user deleted cache, only has their passkey credential
-    const [found] = await client.findWalletsByAuthority(ceoKey.credentialIdHash);
+    const [found] = await client.findWalletsByAuthority(
+      ceoKey.credentialIdHash,
+    );
 
     expect(found).toBeDefined();
     expect(found.authorityType).toBe(AUTH_TYPE_SECP256R1);
@@ -89,27 +91,39 @@ describe('E2E Company Workflow', () => {
     vaultPda = found.vaultPda;
     ceoAuthPda = found.authorityPda;
 
-    const auth = await AuthorityAccount.fromAccountAddress(ctx.connection, ceoAuthPda);
+    const auth = await AuthorityAccount.fromAccountAddress(
+      ctx.connection,
+      ceoAuthPda,
+    );
     expect(auth.role).toBe(0);
     expect(auth.authorityType).toBe(AUTH_TYPE_SECP256R1);
   });
 
   it('Step 3: CEO adds Admin (Ed25519)', async () => {
-    const ceoSigner = createMockSigner(ceoKey);
-
-    const { instructions, newAuthorityPda } =
-      await client.addAuthority({
-        payer: ctx.payer.publicKey,
-        walletPda,
-        adminSigner: secp256r1(ceoSigner, { authorityPda: ceoAuthPda }),
-        newAuthority: { type: 'ed25519', publicKey: adminKp.publicKey },
-        role: ROLE_ADMIN,
-      });
+    const prepared = await client.prepareAddAuthority({
+      payer: ctx.payer.publicKey,
+      walletPda,
+      secp256r1: {
+        credentialIdHash: ceoKey.credentialIdHash,
+        publicKeyBytes: ceoKey.publicKeyBytes,
+        authorityPda: ceoAuthPda,
+      },
+      newAuthority: { type: 'ed25519', publicKey: adminKp.publicKey },
+      role: ROLE_ADMIN,
+    });
+    const response = await fakeWebAuthnSign(ceoKey, prepared.challenge);
+    const { instructions, newAuthorityPda } = client.finalizeAddAuthority(
+      prepared,
+      response,
+    );
     adminAuthPda = newAuthorityPda;
 
     await sendTx(ctx, instructions);
 
-    const auth = await AuthorityAccount.fromAccountAddress(ctx.connection, adminAuthPda);
+    const auth = await AuthorityAccount.fromAccountAddress(
+      ctx.connection,
+      adminAuthPda,
+    );
     expect(auth.role).toBe(ROLE_ADMIN);
     expect(auth.authorityType).toBe(AUTH_TYPE_ED25519);
   });
@@ -131,13 +145,18 @@ describe('E2E Company Workflow', () => {
 
     await sendTx(ctx, instructions, [adminKp]);
 
-    const auth = await AuthorityAccount.fromAccountAddress(ctx.connection, spenderAuthPda);
+    const auth = await AuthorityAccount.fromAccountAddress(
+      ctx.connection,
+      spenderAuthPda,
+    );
     expect(auth.role).toBe(ROLE_SPENDER);
     expect(auth.authorityType).toBe(AUTH_TYPE_SECP256R1);
   });
 
   it('Step 5: Spender comes back — finds their wallet by credentialIdHash', async () => {
-    const wallets = await client.findWalletsByAuthority(spenderKey.credentialIdHash);
+    const wallets = await client.findWalletsByAuthority(
+      spenderKey.credentialIdHash,
+    );
 
     expect(wallets).toHaveLength(1);
     expect(wallets[0].walletPda.equals(walletPda)).toBe(true);
@@ -149,15 +168,26 @@ describe('E2E Company Workflow', () => {
 
   it('Step 6: Spender executes SOL transfer', async () => {
     const recipient = Keypair.generate().publicKey;
-    const spenderSigner = createMockSigner(spenderKey);
+    const [vaultPdaForTransfer] = client.findVault(walletPda);
 
-    const { instructions } = await client.transferSol({
+    const transferIx = SystemProgram.transfer({
+      fromPubkey: vaultPdaForTransfer,
+      toPubkey: recipient,
+      lamports: 1_000_000,
+    });
+
+    const prepared = await client.prepareExecute({
       payer: ctx.payer.publicKey,
       walletPda,
-      signer: secp256r1(spenderSigner, { authorityPda: spenderAuthPda }),
-      recipient,
-      lamports: 1_000_000n,
+      secp256r1: {
+        credentialIdHash: spenderKey.credentialIdHash,
+        publicKeyBytes: spenderKey.publicKeyBytes,
+        authorityPda: spenderAuthPda,
+      },
+      instructions: [transferIx],
     });
+    const response = await fakeWebAuthnSign(spenderKey, prepared.challenge);
+    const { instructions } = client.finalizeExecute(prepared, response);
 
     const balanceBefore = await ctx.connection.getBalance(recipient);
     await sendTx(ctx, instructions);
@@ -197,35 +227,48 @@ describe('E2E Company Workflow', () => {
     expect(info).toBeNull();
 
     // findWalletsByAuthority should return empty now
-    const wallets = await client.findWalletsByAuthority(spenderKey.credentialIdHash);
+    const wallets = await client.findWalletsByAuthority(
+      spenderKey.credentialIdHash,
+    );
     expect(wallets).toHaveLength(0);
   });
 
   it('Step 9: CEO transfers ownership to new passkey', async () => {
     const newCeoKey = await generateMockSecp256r1Key('company.com');
-    const ceoSigner = createMockSigner(ceoKey);
 
-    const { instructions, newOwnerAuthorityPda } =
-      await client.transferOwnership({
-        payer: ctx.payer.publicKey,
-        walletPda,
-        ownerSigner: secp256r1(ceoSigner, { authorityPda: ceoAuthPda }),
-        newOwner: {
-          type: 'secp256r1',
-          credentialIdHash: newCeoKey.credentialIdHash,
-          compressedPubkey: newCeoKey.publicKeyBytes,
-          rpId: newCeoKey.rpId,
-        },
-      });
+    const prepared = await client.prepareTransferOwnership({
+      payer: ctx.payer.publicKey,
+      walletPda,
+      secp256r1: {
+        credentialIdHash: ceoKey.credentialIdHash,
+        publicKeyBytes: ceoKey.publicKeyBytes,
+        authorityPda: ceoAuthPda,
+      },
+      newOwner: {
+        type: 'secp256r1',
+        credentialIdHash: newCeoKey.credentialIdHash,
+        compressedPubkey: newCeoKey.publicKeyBytes,
+        rpId: newCeoKey.rpId,
+      },
+    });
+    const response = await fakeWebAuthnSign(ceoKey, prepared.challenge);
+    const { instructions } = client.finalizeTransferOwnership(
+      prepared,
+      response,
+    );
 
     await sendTx(ctx, instructions);
 
     // Old CEO credential should return empty
-    const oldWallets = await client.findWalletsByAuthority(ceoKey.credentialIdHash);
+    const oldWallets = await client.findWalletsByAuthority(
+      ceoKey.credentialIdHash,
+    );
     expect(oldWallets).toHaveLength(0);
 
     // New CEO should find the wallet
-    const [newCeoWallet] = await client.findWalletsByAuthority(newCeoKey.credentialIdHash);
+    const [newCeoWallet] = await client.findWalletsByAuthority(
+      newCeoKey.credentialIdHash,
+    );
     expect(newCeoWallet).toBeDefined();
     expect(newCeoWallet.walletPda.equals(walletPda)).toBe(true);
     expect(newCeoWallet.role).toBe(0); // Owner

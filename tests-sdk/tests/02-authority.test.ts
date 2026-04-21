@@ -7,7 +7,7 @@ import {
   sendTxExpectError,
   type TestContext,
 } from './common';
-import { generateMockSecp256r1Key, createMockSigner } from './secp256r1Utils';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
   LazorKitClient,
   AUTH_TYPE_ED25519,
@@ -15,9 +15,8 @@ import {
   ROLE_ADMIN,
   ROLE_SPENDER,
   ed25519,
-  secp256r1,
-} from '../../sdk/solita-client/src';
-import { AuthorityAccount } from '../../sdk/solita-client/src/generated/accounts';
+} from '../../sdk/sdk-legacy/src';
+import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
 describe('Authority Management', () => {
   let ctx: TestContext;
@@ -170,21 +169,33 @@ describe('Authority Management', () => {
 
     it('adds an Ed25519 admin via Secp256r1 owner', async () => {
       const adminKp = Keypair.generate();
-      const signer = createMockSigner(ownerKey);
 
-      const { instructions, newAuthorityPda } = await client.addAuthority({
+      const prepared = await client.prepareAddAuthority({
         payer: ctx.payer.publicKey,
         walletPda,
-        adminSigner: secp256r1(signer, { authorityPda: ownerAuthorityPda }),
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
         newAuthority: { type: 'ed25519', publicKey: adminKp.publicKey },
         role: ROLE_ADMIN,
       });
+
+      const webauthnResponse = await fakeWebAuthnSign(
+        ownerKey,
+        prepared.challenge,
+      );
+      const { instructions } = client.finalizeAddAuthority(
+        prepared,
+        webauthnResponse,
+      );
 
       await sendTx(ctx, instructions);
 
       const authority = await AuthorityAccount.fromAccountAddress(
         ctx.connection,
-        newAuthorityPda,
+        prepared.newAuthorityPda,
       );
       expect(authority.authorityType).toBe(AUTH_TYPE_ED25519);
       expect(authority.role).toBe(ROLE_ADMIN);

@@ -8,8 +8,8 @@ import {
   getSlot,
   type TestContext,
 } from './common';
-import { LazorKitClient, ed25519 } from '../../sdk/solita-client/src';
-import { SessionAccount } from '../../sdk/solita-client/src/generated/accounts';
+import { LazorKitClient, ed25519 } from '../../sdk/sdk-legacy/src';
+import { SessionAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
 describe('CreateSession', () => {
   let ctx: TestContext;

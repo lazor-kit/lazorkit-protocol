@@ -14,7 +14,12 @@ import {
   getSlot,
   type TestContext,
 } from './common';
-import { generateMockSecp256r1Key, signSecp256r1 } from './secp256r1Utils';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
+import {
+  prepareSecp256r1,
+  finalizeSecp256r1,
+  concatParts,
+} from '../../sdk/sdk-legacy/src/utils/signing';
 import {
   findWalletPda,
   findVaultPda,
@@ -25,7 +30,8 @@ import {
   computeAccountsHash,
   AUTH_TYPE_SECP256R1,
   DISC_EXECUTE,
-} from '../../sdk/solita-client/src';
+  PROGRAM_ID,
+} from '../../sdk/sdk-legacy/src';
 
 describe('Replay Prevention (Odometer)', () => {
   let ctx: TestContext;
@@ -71,15 +77,18 @@ describe('Replay Prevention (Odometer)', () => {
     const accountsHash = computeAccountsHash(allAccountMetas, compactIxDef);
     const signedPayload = Buffer.concat([packed, accountsHash]);
 
-    const { authPayload, precompileIx } = await signSecp256r1({
-      key: ownerKey,
+    const prepared = prepareSecp256r1({
       discriminator: new Uint8Array([DISC_EXECUTE]),
       signedPayload,
+      sysvarIxIndex: 4,
       slot,
       counter,
       payer: ctx.payer.publicKey,
-      sysvarIxIndex: 4,
+      programId: PROGRAM_ID,
+      publicKeyBytes: ownerKey.publicKeyBytes,
     });
+    const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+    const { authPayload, precompileIx } = finalizeSecp256r1(prepared, response);
 
     const ix = createExecuteIx({
       payer: ctx.payer.publicKey,

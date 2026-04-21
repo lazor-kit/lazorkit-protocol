@@ -8,7 +8,11 @@ import {
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import { setupTest, sendTx, getSlot, type TestContext } from './common';
-import { generateMockSecp256r1Key, signSecp256r1 } from './secp256r1Utils';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
+import {
+  prepareSecp256r1,
+  finalizeSecp256r1,
+} from '../../sdk/sdk-legacy/src/utils/signing';
 import {
   findWalletPda,
   findVaultPda,
@@ -24,8 +28,9 @@ import {
   ROLE_SPENDER,
   DISC_ADD_AUTHORITY,
   DISC_EXECUTE,
-} from '../../sdk/solita-client/src';
-import { AuthorityAccount } from '../../sdk/solita-client/src/generated/accounts';
+  PROGRAM_ID,
+} from '../../sdk/sdk-legacy/src';
+import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
 describe('Counter Edge Cases', () => {
   let ctx: TestContext;
@@ -87,15 +92,21 @@ describe('Counter Edge Cases', () => {
       ctx.payer.publicKey.toBuffer(),
     ]);
 
-    const { authPayload: ap1, precompileIx: pi1 } = await signSecp256r1({
-      key: ownerKey,
+    const prepared1 = prepareSecp256r1({
       discriminator: new Uint8Array([DISC_ADD_AUTHORITY]),
       signedPayload: signedPayload1,
+      sysvarIxIndex: 6,
       slot: slot1,
       counter: 1,
       payer: ctx.payer.publicKey,
-      sysvarIxIndex: 6,
+      programId: PROGRAM_ID,
+      publicKeyBytes: ownerKey.publicKeyBytes,
     });
+    const response1 = await fakeWebAuthnSign(ownerKey, prepared1.challenge);
+    const { authPayload: ap1, precompileIx: pi1 } = finalizeSecp256r1(
+      prepared1,
+      response1,
+    );
 
     await sendTx(ctx, [
       pi1,
@@ -147,15 +158,21 @@ describe('Counter Edge Cases', () => {
     const accountsHash = computeAccountsHash(allAccountMetas, compactIxs);
     const signedPayload2 = Buffer.concat([packed, accountsHash]);
 
-    const { authPayload: ap2, precompileIx: pi2 } = await signSecp256r1({
-      key: ownerKey,
+    const prepared2 = prepareSecp256r1({
       discriminator: new Uint8Array([DISC_EXECUTE]),
       signedPayload: signedPayload2,
+      sysvarIxIndex: 4,
       slot: slot2,
       counter: 2,
       payer: ctx.payer.publicKey,
-      sysvarIxIndex: 4,
+      programId: PROGRAM_ID,
+      publicKeyBytes: ownerKey.publicKeyBytes,
     });
+    const response2 = await fakeWebAuthnSign(ownerKey, prepared2.challenge);
+    const { authPayload: ap2, precompileIx: pi2 } = finalizeSecp256r1(
+      prepared2,
+      response2,
+    );
 
     await sendTx(ctx, [
       pi2,
@@ -232,15 +249,18 @@ describe('Counter Edge Cases', () => {
       ctx.payer.publicKey.toBuffer(),
     ]);
 
-    const { authPayload, precompileIx } = await signSecp256r1({
-      key: key1,
+    const prepared = prepareSecp256r1({
       discriminator: new Uint8Array([DISC_ADD_AUTHORITY]),
       signedPayload: signedPayloadAdd,
+      sysvarIxIndex: 6,
       slot,
       counter: 1,
       payer: ctx.payer.publicKey,
-      sysvarIxIndex: 6,
+      programId: PROGRAM_ID,
+      publicKeyBytes: key1.publicKeyBytes,
     });
+    const response = await fakeWebAuthnSign(key1, prepared.challenge);
+    const { authPayload, precompileIx } = finalizeSecp256r1(prepared, response);
 
     await sendTx(ctx, [
       precompileIx,

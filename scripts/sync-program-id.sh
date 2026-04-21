@@ -1,46 +1,47 @@
 #!/bin/bash
 
-# Check if new Program ID is provided
-if [ -z "$1" ]; then
-    echo "Usage: $0 <new_program_id>"
-    exit 1
-fi
+# Sync Program ID across Rust and SDK from the deploy keypair.
+#
+# Usage:
+#   ./scripts/sync-program-id.sh              # Read ID from target/deploy keypair
+#   ./scripts/sync-program-id.sh <program_id> # Use explicit ID
 
-NEW_ID=$1
+set -e
+
+if [ -n "$1" ]; then
+    NEW_ID="$1"
+else
+    KEYPAIR="target/deploy/lazorkit_program-keypair.json"
+    if [ ! -f "$KEYPAIR" ]; then
+        echo "No keypair at $KEYPAIR. Run 'cargo build-sbf' first or pass ID explicitly."
+        exit 1
+    fi
+    NEW_ID=$(solana-keygen pubkey "$KEYPAIR")
+fi
 
 # Detect OLD_ID from assertions/src/lib.rs
 OLD_ID=$(grep -oE "declare_id\!\(\"[A-Za-z0-9]+\"\)" assertions/src/lib.rs | sed -E 's/declare_id\!\(\"([A-Za-z0-9]+)\"\)/\1/')
 
 if [ -z "$OLD_ID" ]; then
-    echo "❌ Error: Could not detect current Program ID from assertions/src/lib.rs"
+    echo "Could not detect current Program ID from assertions/src/lib.rs"
     exit 1
 fi
 
 if [ "$OLD_ID" == "$NEW_ID" ]; then
-    echo "Program ID is already $NEW_ID. Skipping sync."
+    echo "Program ID already $NEW_ID. Nothing to do."
     exit 0
 fi
 
-echo "Syncing Program ID: $OLD_ID -> $NEW_ID"
+echo "Syncing: $OLD_ID -> $NEW_ID"
 
-# 1. Update Rust assertions
+# 1. Rust (source of truth)
 sed -i '' "s/$OLD_ID/$NEW_ID/g" assertions/src/lib.rs
+echo "  assertions/src/lib.rs"
 
-# 2. Update SDK generation script
-sed -i '' "s/$OLD_ID/$NEW_ID/g" sdk/solita-client/generate.mjs
+# 2. SDK constants (TypeScript source of truth — tests import from here)
+sed -i '' "s/$OLD_ID/$NEW_ID/g" sdk/sdk-legacy/src/constants.ts
+echo "  sdk/sdk-legacy/src/constants.ts"
 
-# 3. Update SDK tests common configuration
-sed -i '' "s/$OLD_ID/$NEW_ID/g" tests-sdk/tests/common.ts
-
-# 4. Update validator start script in tests
-sed -i '' "s/$OLD_ID/$NEW_ID/g" tests-sdk/package.json
-
-# 5. Run SDK generation to update the TypeScript client
-echo "Regenerating SDK..."
-cd sdk/solita-client
-node generate.mjs
-cd ../..
-
-echo "✓ Program ID synced across: Rust code, SDK, and Tests."
-echo "✓ SDK regenerated with new address."
-echo "Pro tip: Now run 'cargo build-sbf' to rebuild the program with the correct ID."
+echo ""
+echo "Done. Tests and validator script read from these automatically."
+echo "Now run: cargo build-sbf"

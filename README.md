@@ -1,239 +1,207 @@
 # LazorKit Protocol
 
-A revenue-enabled fork of [LazorKit Smart Wallet](https://github.com/nicola-onspeedhp/wallet-management-contract) with protocol fees, integrator reward tracking, and sharded treasury. Built for B2B — integrators earn token rewards proportional to the fees their users generate.
+A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r1)** authentication for end-user flows and **Ed25519** authentication for bots / backends / programmatic signing — mixed freely on the same wallet. Built with [pinocchio](https://github.com/febo/pinocchio) for zero-copy serialization.
 
-> **Base**: LazorKit V2 (audited by Accretion, Solana Foundation funded, 17/17 issues resolved)
-> **This fork adds**: Protocol fee system, sharded treasury, payer tracking, wallet lookup by credential
+- **Two auth types, one wallet** — passkeys (Apple Touch ID / Face ID, Windows Hello, Android biometrics, security keys) and Ed25519 (regular Solana keypairs). Any mix is supported: a passkey owner with an Ed25519 admin bot, or vice versa.
+- **RBAC** — Owner / Admin / Spender with strict role hierarchy.
+- **Session keys with policies** — ephemeral signers restricted by per-tx / per-window / lifetime SOL + token caps, and program whitelists.
+- **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps).
+- **Wallet lookup** — find wallets by credential hash or public key; no need to store `walletPda` locally.
+- **Parallel execution** — different authorities on the same wallet never block each other.
 
----
-
-## What's Different from Open-Source LazorKit
-
-| | Open-Source LazorKit | LazorKit Protocol (this repo) |
-|---|---|---|
-| Program ID | `FLb7...7ao` | Deployed by LazorKit team |
-| Protocol fees | None | Optional, per-instruction |
-| Integrator rewards | None | FeeRecord per payer, token distribution ready |
-| Treasury | None | Sharded (16-32 PDAs), zero contention |
-| Wallet lookup | Requires stored `walletPda` | `findWalletsByAuthority(credentialIdHash)` |
-| Instructions | 10 | 15 (+5 protocol management) |
-| Account types | 4 | 7 (+ProtocolConfig, FeeRecord, TreasuryShard) |
-
-**All original security properties are preserved.** The 10 original instruction processors are untouched — fee collection happens at the entrypoint level before dispatch.
-
----
-
-## Protocol Fee System
-
-### How It Works
-
-1. **Admin** initializes protocol config + treasury shards (one-time setup)
-2. **Admin** registers integrator payer keys (`RegisterPayer`)
-3. **Integrators** use the SDK normally — fee detection is automatic
-4. On fee-eligible instructions (CreateWallet, Execute, ExecuteDeferred):
-   - SDK checks if payer has a FeeRecord (cached, 1 RPC call)
-   - If yes: appends protocol accounts, fee goes to random treasury shard
-   - If no: works exactly like open-source LazorKit (zero overhead)
-5. **Admin** withdraws from shards to treasury whenever needed
-
-### Sharded Treasury
-
-Fees distribute across N treasury shard PDAs (e.g. 16), selected randomly by the SDK. Different transactions hit different shards — **zero write contention**, preserving LazorKit's parallel execution advantage.
-
-### Integrator Token Rewards
-
-FeeRecord tracks cumulative `total_fees_paid` per payer. To distribute token rewards:
-1. Snapshot all FeeRecord accounts (`getProgramAccounts` with discriminator filter)
-2. Calculate proportional share per integrator
-3. Distribute via merkle airdrop
-
----
-
-## Architecture
-
-### Account Types
-
-| Account | Seeds | Disc | Size | Description |
-|---|---|---|---|---|
-| Wallet PDA | `["wallet", user_seed]` | 1 | 8 | Identity anchor |
-| Authority PDA | `["authority", wallet, id_hash]` | 2 | 48+ | Per-key auth with role + counter |
-| Session PDA | `["session", wallet, session_key]` | 3 | 80 | Ephemeral sub-key with expiry |
-| DeferredExec PDA | `["deferred", wallet, authority, counter]` | 4 | 176 | Temporary pre-authorized execution |
-| ProtocolConfig PDA | `["protocol_config"]` | 5 | 88 | Fee config, admin, treasury, num_shards |
-| FeeRecord PDA | `["fee_record", payer_pubkey]` | 6 | 32 | Per-payer fee tracking |
-| TreasuryShard PDA | `["treasury_shard", shard_id]` | 7 | 8 | Fee accumulation shard |
-
-### Instructions
-
-| Disc | Instruction | Description |
-|------|-----------|-------------|
-| 0 | CreateWallet | Create wallet + vault + authority (fee-eligible) |
-| 1 | AddAuthority | Add Ed25519/Secp256r1 authority |
-| 2 | RemoveAuthority | Remove authority, refund rent |
-| 3 | TransferOwnership | Atomic owner swap |
-| 4 | Execute | Execute instructions via CPI (fee-eligible) |
-| 5 | CreateSession | Create ephemeral session key |
-| 6 | Authorize | Deferred execution TX1 |
-| 7 | ExecuteDeferred | Deferred execution TX2 (fee-eligible) |
-| 8 | ReclaimDeferred | Reclaim expired deferred auth |
-| 9 | RevokeSession | Early session revocation |
-| **10** | **InitializeProtocol** | One-time protocol config setup |
-| **11** | **UpdateProtocol** | Update fees/treasury/enabled |
-| **12** | **RegisterPayer** | Register payer for fee tracking |
-| **13** | **WithdrawTreasury** | Sweep fees from shard to treasury |
-| **14** | **InitializeTreasuryShard** | Create a treasury shard PDA |
-
-See [docs/ProtocolFee.md](docs/ProtocolFee.md) for detailed protocol fee architecture.
-See [docs/Architecture.md](docs/Architecture.md) for full wallet architecture reference.
-
----
-
-## Quick Start
-
-### Protocol Setup (LazorKit Admin — One-Time)
-
-```typescript
-import { LazorKitClient } from '@lazorkit/solita-client';
-
-const client = new LazorKitClient(connection);
-
-// 1. Initialize protocol
-const { instructions } = client.initializeProtocol({
-  payer, admin, treasury,
-  creationFee: 5000n,   // lamports per CreateWallet
-  executionFee: 2000n,  // lamports per Execute
-  numShards: 16,
-});
-
-// 2. Initialize treasury shards
-for (let i = 0; i < 16; i++) {
-  const { instructions } = client.initializeTreasuryShard({ payer, admin, shardId: i });
-}
-
-// 3. Register integrator payer keys
-const { instructions } = client.registerPayer({ payer, admin, targetPayer: integratorPayerKey });
-```
-
-### Integrator Usage (Zero Config)
-
-Integrators use the LazorKit Protocol program directly — no deployment needed. Once LazorKit admin registers your payer key, fees are auto-collected and your FeeRecord tracks rewards.
-
-```typescript
-import { LazorKitClient, secp256r1 } from '@lazorkit/solita-client';
-
-const client = new LazorKitClient(connection);
-
-// Create wallet — fee auto-detected if your payer is registered
-const { instructions, walletPda } = await client.createWallet({
-  payer: payer.publicKey,
-  userSeed: crypto.randomBytes(32),
-  owner: { type: 'secp256r1', credentialIdHash, compressedPubkey, rpId: 'app.com' },
-});
-
-// User comes back later — find wallet by credential only
-const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
-// Returns: { walletPda, authorityPda, vaultPda, role, authorityType }
-
-// Execute — fee auto-detected, shard randomly selected
-const { instructions } = await client.execute({
-  payer: payer.publicKey,
-  walletPda: wallet.walletPda,
-  signer: secp256r1(mySigner),
-  instructions: [SystemProgram.transfer({ fromPubkey: vault, toPubkey: recipient, lamports: 1_000_000 })],
-});
-```
-
-### Revenue Collection (Admin)
-
-```typescript
-for (let i = 0; i < 16; i++) {
-  const { instructions } = client.withdrawTreasury({ admin, shardId: i, treasury });
-}
-```
-
----
-
-## Cost Overview
-
-### Base Wallet Costs (Same as Open-Source)
-
-| Auth Type | Wallet Creation | Execute (per tx) |
-|---|---|---|
-| Ed25519 | 0.002399 SOL | 0.000005 SOL |
-| Secp256r1 (Passkey) | 0.002713 SOL | 0.000005 SOL |
-| Session Key | -- | 0.000005 SOL |
-
-### Protocol Fee Overhead (When Opted In)
-
-| Item | Cost |
-|---|---|
-| Protocol fee (CreateWallet) | Configurable (e.g. 5,000 lamports) |
-| Protocol fee (Execute) | Configurable (e.g. 2,000 lamports) |
-| Extra accounts per TX | +4 (config, fee_record, shard, system_program) |
-| Extra CU per TX | ~3,000 |
-| FeeRecord rent (one-time per payer) | ~0.0009 SOL |
-| TreasuryShard rent (one-time per shard) | ~0.0009 SOL |
-| ProtocolConfig rent (one-time) | ~0.0016 SOL |
-
----
-
-## Project Structure
-
-```
-program/src/              Rust smart contract (pinocchio, zero-copy)
-  auth/                   Ed25519 + Secp256r1/WebAuthn authentication
-  processor/              14 instruction handlers (9 original + 5 protocol)
-  state/                  7 account data structures (4 original + 3 protocol)
-sdk/solita-client/        TypeScript SDK
-  src/generated/          Auto-generated (Solita) instructions, accounts, errors
-  src/utils/              Instruction builders, PDA helpers, signing, wallet lookup
-tests-sdk/                Integration tests (vitest, 70 tests)
-docs/                     Architecture, cost analysis, protocol fee docs
-```
-
----
-
-## Testing
+## Install
 
 ```bash
-# Start local validator
-cd tests-sdk && npm run validator:start
-
-# Run all 70 tests
-npm test
+npm install @lazorkit/sdk-legacy
 ```
 
-12 test suites covering: wallet lifecycle, authority management, execute, deferred execution, sessions, replay protection, counter edge cases, E2E workflows, permission boundaries, session execution, security vectors, and protocol fees.
+Program ID: `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` (devnet).
 
----
+## Quick start
+
+```typescript
+import { Connection, Keypair, SystemProgram } from '@solana/web3.js';
+import { LazorKitClient, ed25519 } from '@lazorkit/sdk-legacy';
+import * as crypto from 'crypto';
+
+const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
+const client = new LazorKitClient(connection);
+```
+
+### Create a wallet
+
+**Passkey owner** (end-user wallet, signs with WebAuthn):
+
+```typescript
+const { instructions, walletPda, vaultPda, authorityPda } = await client.createWallet({
+  payer: payer.publicKey,
+  userSeed: crypto.randomBytes(32),
+  owner: {
+    type: 'secp256r1',
+    credentialIdHash,   // SHA-256 of WebAuthn credential ID
+    compressedPubkey,   // 33-byte compressed public key
+    rpId: 'your-app.com',
+  },
+});
+// Returning user: find the wallet again from just the credential hash
+const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
+```
+
+**Ed25519 owner** (bot / backend / programmatic signing):
+
+```typescript
+const ownerKp = Keypair.generate();
+const { instructions, walletPda, vaultPda, authorityPda } = await client.createWallet({
+  payer: payer.publicKey,
+  userSeed: crypto.randomBytes(32),
+  owner: {
+    type: 'ed25519',
+    publicKey: ownerKp.publicKey,
+  },
+});
+// Lookup works for Ed25519 too
+const [wallet] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+```
+
+### Add another authority to the same wallet
+
+Wallets can hold any mix of auth types. Common setups:
+
+- A passkey owner + an Ed25519 admin (a bot that manages sessions on behalf of the user).
+- An Ed25519 owner + a Secp256r1 spender (the backend creates the wallet, the user's passkey does day-to-day spends).
+
+```typescript
+import { ROLE_ADMIN } from '@lazorkit/sdk-legacy';
+
+const adminKp = Keypair.generate();
+const { instructions, newAuthorityPda } = await client.addAuthority({
+  payer: payer.publicKey,
+  walletPda,
+  adminSigner: ed25519(ownerKp.publicKey),          // Ed25519 owner signs
+  newAuthority: { type: 'ed25519', publicKey: adminKp.publicKey },
+  role: ROLE_ADMIN,
+});
+await sendTx(instructions, [payer, ownerKp]);
+```
+
+### Sign a transaction
+
+**Ed25519 authority** — signs at the regular Solana transaction level, no prepare/finalize needed:
+
+```typescript
+const { instructions } = await client.transferSol({
+  payer: payer.publicKey,
+  walletPda,
+  signer: ed25519(ownerKp.publicKey),
+  recipient,
+  lamports: 1_000_000n,
+});
+await sendTx(instructions, [payer, ownerKp]);
+```
+
+**Passkey authority** — two-phase flow because WebAuthn is async:
+
+```typescript
+// Phase 1 — SDK computes the challenge
+const prepared = await client.prepareExecute({
+  payer: payer.publicKey,
+  walletPda,
+  secp256r1: { credentialIdHash, authorityPda },
+  instructions: [SystemProgram.transfer({
+    fromPubkey: vaultPda,
+    toPubkey: recipient,
+    lamports: 1_000_000,
+  })],
+});
+
+// Phase 2 — browser authenticator signs
+const response = await navigator.credentials.get({
+  publicKey: { challenge: prepared.challenge, rpId: 'your-app.com', allowCredentials: [...] },
+});
+
+// Phase 3 — SDK builds the transaction
+const { instructions } = client.finalizeExecute(prepared, toWebAuthnResponse(response));
+```
+
+Full SDK reference: [`sdk/sdk-legacy/README.md`](sdk/sdk-legacy/README.md).
+
+## Session keys
+
+Ephemeral signers with an expiry and optional spending policies. Ideal for frequent transactions (gaming, DeFi) that would otherwise require passkey re-auth every time.
+
+```typescript
+import { Actions } from '@lazorkit/sdk-legacy';
+
+const { instructions, sessionPda } = await client.createSession({
+  payer: payer.publicKey,
+  walletPda,
+  adminSigner: ed25519(ownerKp.publicKey),
+  sessionKey: sessionKp.publicKey,
+  expiresAt: currentSlot + 216_000n,  // ~1 day
+  actions: [
+    Actions.programWhitelist(SystemProgram.programId),
+    Actions.solMaxPerTx(1_000_000_000n),       // 1 SOL per tx
+    Actions.solLimit(10_000_000_000n),         // 10 SOL lifetime
+  ],
+});
+```
+
+**Action types**: `SolLimit`, `SolRecurringLimit`, `SolMaxPerTx`, `TokenLimit`, `TokenRecurringLimit`, `TokenMaxPerTx`, `ProgramWhitelist`, `ProgramBlacklist`.
+
+**Important scoping notes**:
+- Token limits apply **per-mint**. A session with `TokenLimit(USDC)` has unrestricted access to other token mints the vault holds. Enumerate every mint you want bounded, or use `ProgramWhitelist` to restrict which programs the session can call.
+- `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit automatically enforces vault metadata + per-listed-mint token authority invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, etc.).
+- Expired spending limits = **fully exhausted** (deny). Expired whitelists = **hard deny**. Expired blacklists = silently dropped.
+- Omitting `actions` creates an unrestricted session — it can do anything the wallet can until it expires.
+
+## Cost
+
+Measured on devnet (November 2025):
+
+| Operation | Compute Units | Transaction fee |
+|---|---|---|
+| Execute via session key | ~4,100 | 0.000005 SOL |
+| Execute with Ed25519 authority | ~5,900 | 0.000005 SOL |
+| Execute with passkey (Secp256r1) | ~9,440 | 0.000005 SOL |
+| CreateWallet | ~15,000–20,000 | 0.000005 SOL + rent |
+
+All paths fit comfortably within Solana's 200,000 CU default budget. The ~2,300 CU precompile verification is the largest fixed cost on the passkey path.
+
+**One-time rent** (fully refundable when accounts close):
+
+| Account | Size | Rent |
+|---|---|---|
+| Wallet PDA | 8 bytes | 0.000947 SOL |
+| Authority (Ed25519) | 80 bytes | 0.001448 SOL |
+| Authority (Secp256r1) | 145 bytes | 0.001900 SOL |
+| Session | 80 bytes + actions (0–2048) | 0.001448+ SOL |
+
+**Total wallet creation cost**: ~0.0024 SOL (Ed25519) or ~0.0028 SOL (Secp256r1) — roughly $0.40 USD at $150/SOL.
+
+## Parallel execution
+
+Each authority has its own PDA, so different authorities on the same wallet execute **concurrently** on Solana's scheduler. An admin managing permissions doesn't block a session key sending payments. Only the same authority running two txs has a counter-conflict lock.
 
 ## Security
 
-Based on LazorKit V2, audited by **Accretion** (Solana Foundation funded). 17/17 issues resolved.
-
-Protocol fee additions preserve all original security:
-- **Zero changes** to existing processors, auth, or signing logic
-- Fee collection at entrypoint level — atomic with processor execution
-- Checked arithmetic on all counter updates
-- Admin-gated: only protocol admin can register payers, withdraw, update config
-- Sharded treasury eliminates single write-lock contention
+- Odometer counter replay protection (monotonic u32 per authority; works with synced passkeys).
+- Clock-based slot freshness (150-slot window).
+- CPI reentrancy prevention (`stack_height` check on every authenticated path).
+- Expired session limits treated as fully exhausted (never "unlocked").
+- `SolMaxPerTx` uses per-CPI gross-outflow tracking — DeFi round-trips can't bypass the per-tx cap by returning most lamports.
+- Vault + per-listed-mint token account invariants enforced during session execute (blocks `System::Assign`, `SetAuthority`, `Approve` escapes).
+- Token balance sums across all accounts (prevents dummy-account bypass).
 
 Report vulnerabilities via [SECURITY.md](SECURITY.md).
 
----
+## Further reading
 
-## Documentation
-
-| Document | Description |
+| | |
 |---|---|
-| [Protocol Fee](docs/ProtocolFee.md) | Protocol fee architecture, sharding, reward distribution |
-| [Architecture](docs/Architecture.md) | Wallet account structures, security mechanisms |
-| [Costs](docs/Costs.md) | CU benchmarks, rent costs, transaction sizes |
-| [SDK API](sdk/solita-client/README.md) | TypeScript SDK reference |
-| [Development](DEVELOPMENT.md) | Build, test, deploy workflow |
-| [Changelog](CHANGELOG.md) | Version history |
-
----
+| [SDK API reference](sdk/sdk-legacy/README.md) | TypeScript client + instruction builders |
+| [Architecture](docs/Architecture.md) | Account layouts, security mechanisms, instruction reference |
+| [Development](DEVELOPMENT.md) | Local build + test workflow |
+| [Contributing](CONTRIBUTING.md) | PR guidelines |
 
 ## License
 

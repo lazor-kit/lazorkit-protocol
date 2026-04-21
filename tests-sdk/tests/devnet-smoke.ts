@@ -20,12 +20,11 @@ import * as path from 'path';
 import {
   LazorKitClient,
   ed25519,
-  secp256r1,
   session,
   ROLE_ADMIN,
   ROLE_SPENDER,
-} from '../../sdk/solita-client/src';
-import { generateMockSecp256r1Key, createMockSigner } from './secp256r1Utils';
+} from '../../sdk/sdk-legacy/src';
+import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 
 const RPC_URL = process.env.RPC_URL || 'https://api.devnet.solana.com';
 
@@ -39,7 +38,10 @@ interface TxResult {
 }
 
 async function loadPayer(): Promise<Keypair> {
-  const keypairPath = path.resolve(process.env.HOME || '~', '.config/solana/id.json');
+  const keypairPath = path.resolve(
+    process.env.HOME || '~',
+    '.config/solana/id.json',
+  );
   const raw = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
   return Keypair.fromSecretKey(new Uint8Array(raw));
 }
@@ -60,7 +62,9 @@ async function sendAndMeasure(
   tx.sign(...allSigners);
   const txSize = tx.serialize().length;
 
-  const sig = await sendAndConfirmTransaction(connection, tx, allSigners, { commitment: 'confirmed' });
+  const sig = await sendAndConfirmTransaction(connection, tx, allSigners, {
+    commitment: 'confirmed',
+  });
 
   const txInfo = await connection.getTransaction(sig, {
     commitment: 'confirmed',
@@ -74,9 +78,10 @@ async function sendAndMeasure(
 function printRow(label: string, result: TxResult, extra = '') {
   const cuStr = result.cu.toLocaleString().padStart(8);
   const sizeStr = `${result.txSize}`.padStart(5);
-  const rentStr = result.rentCost !== undefined
-    ? `${(result.rentCost / LAMPORTS_PER_SOL).toFixed(6)} SOL`
-    : '-';
+  const rentStr =
+    result.rentCost !== undefined
+      ? `${(result.rentCost / LAMPORTS_PER_SOL).toFixed(6)} SOL`
+      : '-';
   console.log(
     `  ${label.padEnd(52)} ${cuStr} CU  ${sizeStr} bytes  rent: ${rentStr}  ${extra}`,
   );
@@ -101,9 +106,9 @@ async function main() {
   console.log(`Balance: ${(payerBalance / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
   console.log(`RPC:     ${RPC_URL}\n`);
 
-  console.log('=' .repeat(100));
+  console.log('='.repeat(100));
   console.log('  OPERATION'.padEnd(54) + '      CU   SIZE  RENT');
-  console.log('=' .repeat(100));
+  console.log('='.repeat(100));
 
   // ────────────────────────────────────────────────────────────
   // 1. BASELINE: Normal SOL transfer
@@ -111,7 +116,11 @@ async function main() {
   console.log('\n--- Baseline ---');
   {
     const recipient = Keypair.generate().publicKey;
-    const ix = SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: recipient, lamports: 1_000_000 });
+    const ix = SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: recipient,
+      lamports: 1_000_000,
+    });
     const r = await sendAndMeasure(connection, payer, [ix]);
     record('Normal SOL Transfer (baseline)', r);
   }
@@ -125,11 +134,14 @@ async function main() {
   {
     ed25519OwnerKp = Keypair.generate();
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions, walletPda, vaultPda, authorityPda } = client.createWallet({
-      payer: payer.publicKey,
-      userSeed: crypto.randomBytes(32),
-      owner: { type: 'ed25519', publicKey: ed25519OwnerKp.publicKey },
-    });
+
+    const { instructions, walletPda, vaultPda, authorityPda } =
+      await client.createWallet({
+        payer: payer.publicKey,
+        userSeed: crypto.randomBytes(32),
+        owner: { type: 'ed25519', publicKey: ed25519OwnerKp.publicKey },
+      });
+
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000; // subtract tx fee
@@ -144,16 +156,17 @@ async function main() {
   {
     secpOwnerKey = await generateMockSecp256r1Key('lazorkit.app');
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions, walletPda, vaultPda, authorityPda } = client.createWallet({
-      payer: payer.publicKey,
-      userSeed: crypto.randomBytes(32),
-      owner: {
-        type: 'secp256r1',
-        credentialIdHash: secpOwnerKey.credentialIdHash,
-        compressedPubkey: secpOwnerKey.publicKeyBytes,
-        rpId: secpOwnerKey.rpId,
-      },
-    });
+    const { instructions, walletPda, vaultPda, authorityPda } =
+      await client.createWallet({
+        payer: payer.publicKey,
+        userSeed: crypto.randomBytes(32),
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: secpOwnerKey.credentialIdHash,
+          compressedPubkey: secpOwnerKey.publicKeyBytes,
+          rpId: secpOwnerKey.rpId,
+        },
+      });
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
@@ -166,8 +179,16 @@ async function main() {
   // Fund both vaults
   console.log('\n--- Fund Vaults ---');
   {
-    const ix1 = SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: ed25519VaultPda, lamports: 0.05 * LAMPORTS_PER_SOL });
-    const ix2 = SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: secpVaultPda, lamports: 0.05 * LAMPORTS_PER_SOL });
+    const ix1 = SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: ed25519VaultPda,
+      lamports: 0.05 * LAMPORTS_PER_SOL,
+    });
+    const ix2 = SystemProgram.transfer({
+      fromPubkey: payer.publicKey,
+      toPubkey: secpVaultPda,
+      lamports: 0.05 * LAMPORTS_PER_SOL,
+    });
     const r = await sendAndMeasure(connection, payer, [ix1, ix2]);
     record('Fund 2 vaults (0.05 SOL each)', r);
   }
@@ -190,7 +211,9 @@ async function main() {
       newAuthority: { type: 'ed25519', publicKey: ed25519AdminKp.publicKey },
       role: ROLE_ADMIN,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519OwnerKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519OwnerKp,
+    ]);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
     ed25519AdminAuthPda = newAuthorityPda;
@@ -210,7 +233,9 @@ async function main() {
       newAuthority: { type: 'ed25519', publicKey: ed25519SpenderKp.publicKey },
       role: ROLE_SPENDER,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519AdminKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519AdminKp,
+    ]);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
     ed25519SpenderAuthPda = newAuthorityPda;
@@ -222,15 +247,16 @@ async function main() {
   let secpAdminAuthPda: any;
   {
     secpAdminKp = Keypair.generate();
-    const ownerSigner = createMockSigner(secpOwnerKey);
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions, newAuthorityPda } = await client.addAuthority({
+    const prepared = await client.prepareAddAuthority({
       payer: payer.publicKey,
       walletPda: secpWalletPda,
-      adminSigner: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
+      secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       newAuthority: { type: 'ed25519', publicKey: secpAdminKp.publicKey },
       role: ROLE_ADMIN,
     });
+    const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+    const { instructions, newAuthorityPda } = client.finalizeAddAuthority(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
@@ -243,12 +269,11 @@ async function main() {
   let secpSpenderAuthPda: any;
   {
     secpSpenderKey = await generateMockSecp256r1Key('lazorkit.app');
-    const ownerSigner = createMockSigner(secpOwnerKey);
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions, newAuthorityPda } = await client.addAuthority({
+    const prepared = await client.prepareAddAuthority({
       payer: payer.publicKey,
       walletPda: secpWalletPda,
-      adminSigner: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
+      secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       newAuthority: {
         type: 'secp256r1',
         credentialIdHash: secpSpenderKey.credentialIdHash,
@@ -257,6 +282,8 @@ async function main() {
       },
       role: ROLE_SPENDER,
     });
+    const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+    const { instructions, newAuthorityPda } = client.finalizeAddAuthority(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
@@ -273,11 +300,15 @@ async function main() {
   {
     const recipient = Keypair.generate().publicKey;
     const { instructions } = await client.transferSol({
-      payer: payer.publicKey, walletPda: ed25519WalletPda,
+      payer: payer.publicKey,
+      walletPda: ed25519WalletPda,
       signer: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
-      recipient, lamports: 1_000_000,
+      recipient,
+      lamports: 1_000_000,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519OwnerKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519OwnerKp,
+    ]);
     record('Execute SOL transfer (Ed25519 owner)', r);
   }
 
@@ -285,23 +316,34 @@ async function main() {
   {
     const recipient = Keypair.generate().publicKey;
     const { instructions } = await client.transferSol({
-      payer: payer.publicKey, walletPda: ed25519WalletPda,
+      payer: payer.publicKey,
+      walletPda: ed25519WalletPda,
       signer: ed25519(ed25519SpenderKp.publicKey, ed25519SpenderAuthPda),
-      recipient, lamports: 1_000_000,
+      recipient,
+      lamports: 1_000_000,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519SpenderKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519SpenderKp,
+    ]);
     record('Execute SOL transfer (Ed25519 spender)', r);
   }
 
   // Secp256r1 owner execute
   {
     const recipient = Keypair.generate().publicKey;
-    const ownerSigner = createMockSigner(secpOwnerKey);
-    const { instructions } = await client.transferSol({
-      payer: payer.publicKey, walletPda: secpWalletPda,
-      signer: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
-      recipient, lamports: 1_000_000,
+    const transferIx = SystemProgram.transfer({
+      fromPubkey: secpVaultPda,
+      toPubkey: recipient,
+      lamports: 1_000_000,
     });
+    const prepared = await client.prepareExecute({
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
+      secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
+      instructions: [transferIx],
+    });
+    const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+    const { instructions } = client.finalizeExecute(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     record('Execute SOL transfer (Secp256r1 owner)', r);
   }
@@ -309,12 +351,19 @@ async function main() {
   // Secp256r1 spender execute
   {
     const recipient = Keypair.generate().publicKey;
-    const spenderSigner = createMockSigner(secpSpenderKey);
-    const { instructions } = await client.transferSol({
-      payer: payer.publicKey, walletPda: secpWalletPda,
-      signer: secp256r1(spenderSigner, { authorityPda: secpSpenderAuthPda }),
-      recipient, lamports: 1_000_000,
+    const transferIx = SystemProgram.transfer({
+      fromPubkey: secpVaultPda,
+      toPubkey: recipient,
+      lamports: 1_000_000,
     });
+    const prepared = await client.prepareExecute({
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
+      secp256r1: { credentialIdHash: secpSpenderKey.credentialIdHash, publicKeyBytes: secpSpenderKey.publicKeyBytes, authorityPda: secpSpenderAuthPda },
+      instructions: [transferIx],
+    });
+    const webauthnResponse = await fakeWebAuthnSign(secpSpenderKey, prepared.challenge);
+    const { instructions } = client.finalizeExecute(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     record('Execute SOL transfer (Secp256r1 spender)', r);
   }
@@ -331,12 +380,15 @@ async function main() {
     const currentSlot = BigInt(await connection.getSlot());
     const balBefore = await connection.getBalance(payer.publicKey);
     const { instructions, sessionPda } = await client.createSession({
-      payer: payer.publicKey, walletPda: ed25519WalletPda,
+      payer: payer.publicKey,
+      walletPda: ed25519WalletPda,
       adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
       sessionKey: ed25519SessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519OwnerKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519OwnerKp,
+    ]);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
     ed25519SessionPda = sessionPda;
@@ -348,14 +400,16 @@ async function main() {
   {
     secpSessionKp = Keypair.generate();
     const currentSlot = BigInt(await connection.getSlot());
-    const ownerSigner = createMockSigner(secpOwnerKey);
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions, sessionPda } = await client.createSession({
-      payer: payer.publicKey, walletPda: secpWalletPda,
-      adminSigner: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
+    const prepared = await client.prepareCreateSession({
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
+      secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       sessionKey: secpSessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
     });
+    const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+    const { instructions, sessionPda } = client.finalizeCreateSession(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
@@ -371,22 +425,30 @@ async function main() {
   {
     const recipient = Keypair.generate().publicKey;
     const { instructions } = await client.transferSol({
-      payer: payer.publicKey, walletPda: ed25519WalletPda,
+      payer: payer.publicKey,
+      walletPda: ed25519WalletPda,
       signer: session(ed25519SessionPda, ed25519SessionKp.publicKey),
-      recipient, lamports: 1_000_000,
+      recipient,
+      lamports: 1_000_000,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519SessionKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519SessionKp,
+    ]);
     record('Execute SOL transfer (Session key, Ed25519 wallet)', r);
   }
 
   {
     const recipient = Keypair.generate().publicKey;
     const { instructions } = await client.transferSol({
-      payer: payer.publicKey, walletPda: secpWalletPda,
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
       signer: session(secpSessionPda, secpSessionKp.publicKey),
-      recipient, lamports: 1_000_000,
+      recipient,
+      lamports: 1_000_000,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [secpSessionKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      secpSessionKp,
+    ]);
     record('Execute SOL transfer (Session key, Secp256r1 wallet)', r);
   }
 
@@ -399,11 +461,14 @@ async function main() {
   {
     const balBefore = await connection.getBalance(payer.publicKey);
     const { instructions } = await client.revokeSession({
-      payer: payer.publicKey, walletPda: ed25519WalletPda,
+      payer: payer.publicKey,
+      walletPda: ed25519WalletPda,
       adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
       sessionPda: ed25519SessionPda,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519OwnerKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519OwnerKp,
+    ]);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 10000; // 2 signers = 10000 fee
     record('RevokeSession (Ed25519 owner, Ed25519 wallet)', r);
@@ -411,13 +476,15 @@ async function main() {
 
   // Secp256r1 owner revokes Secp256r1 session
   {
-    const ownerSigner = createMockSigner(secpOwnerKey);
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions } = await client.revokeSession({
-      payer: payer.publicKey, walletPda: secpWalletPda,
-      adminSigner: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
+    const prepared = await client.prepareRevokeSession({
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
+      secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       sessionPda: secpSessionPda,
     });
+    const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+    const { instructions } = client.finalizeRevokeSession(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
@@ -431,25 +498,31 @@ async function main() {
 
   {
     const recipient = Keypair.generate().publicKey;
-    const ownerSigner = createMockSigner(secpOwnerKey);
 
     // TX1: Authorize
     const balBefore1 = await connection.getBalance(payer.publicKey);
-    const { instructions: authIxs, deferredPayload } = await client.authorize({
-      payer: payer.publicKey, walletPda: secpWalletPda,
-      signer: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
+    const prepared = await client.prepareAuthorize({
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
+      secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       instructions: [
-        SystemProgram.transfer({ fromPubkey: secpVaultPda, toPubkey: recipient, lamports: 1_000_000 }),
+        SystemProgram.transfer({
+          fromPubkey: secpVaultPda,
+          toPubkey: recipient,
+          lamports: 1_000_000,
+        }),
       ],
       expiryOffset: 300,
     });
+    const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+    const { instructions: authIxs, deferredPayload } = client.finalizeAuthorize(prepared, webauthnResponse);
     const r1 = await sendAndMeasure(connection, payer, authIxs);
     const balAfter1 = await connection.getBalance(payer.publicKey);
     r1.rentCost = balBefore1 - balAfter1 - 5000;
     record('Authorize (Deferred TX1, Secp256r1)', r1);
 
     // TX2: ExecuteDeferred
-    const { instructions: execIxs } = client.executeDeferredFromPayload({
+    const { instructions: execIxs } = await client.executeDeferredFromPayload({
       payer: payer.publicKey,
       deferredPayload,
     });
@@ -466,11 +539,14 @@ async function main() {
   {
     const balBefore = await connection.getBalance(payer.publicKey);
     const { instructions } = await client.removeAuthority({
-      payer: payer.publicKey, walletPda: ed25519WalletPda,
+      payer: payer.publicKey,
+      walletPda: ed25519WalletPda,
       adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
       targetAuthorityPda: ed25519SpenderAuthPda,
     });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519OwnerKp]);
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519OwnerKp,
+    ]);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000; // negative = rent refund
     record('RemoveAuthority (Ed25519 owner -> Ed25519 spender)', r);
@@ -478,13 +554,15 @@ async function main() {
 
   // Secp256r1 owner removes Secp256r1 spender
   {
-    const ownerSigner = createMockSigner(secpOwnerKey);
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions } = await client.removeAuthority({
-      payer: payer.publicKey, walletPda: secpWalletPda,
-      adminSigner: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
+    const prepared = await client.prepareRemoveAuthority({
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
+      secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       targetAuthorityPda: secpSpenderAuthPda,
     });
+    const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+    const { instructions } = client.finalizeRemoveAuthority(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
@@ -500,12 +578,16 @@ async function main() {
   {
     const newOwnerKp = Keypair.generate();
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions, newOwnerAuthorityPda } = await client.transferOwnership({
-      payer: payer.publicKey, walletPda: ed25519WalletPda,
-      ownerSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
-      newOwner: { type: 'ed25519', publicKey: newOwnerKp.publicKey },
-    });
-    const r = await sendAndMeasure(connection, payer, instructions, [ed25519OwnerKp]);
+    const { instructions, newOwnerAuthorityPda } =
+      await client.transferOwnership({
+        payer: payer.publicKey,
+        walletPda: ed25519WalletPda,
+        ownerSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
+        newOwner: { type: 'ed25519', publicKey: newOwnerKp.publicKey },
+      });
+    const r = await sendAndMeasure(connection, payer, instructions, [
+      ed25519OwnerKp,
+    ]);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
     record('TransferOwnership (Ed25519 -> Ed25519)', r);
@@ -517,11 +599,11 @@ async function main() {
   // Secp256r1 owner -> new Secp256r1 owner
   {
     const newOwnerKey = await generateMockSecp256r1Key('lazorkit.app');
-    const ownerSigner = createMockSigner(secpOwnerKey);
     const balBefore = await connection.getBalance(payer.publicKey);
-    const { instructions, newOwnerAuthorityPda } = await client.transferOwnership({
-      payer: payer.publicKey, walletPda: secpWalletPda,
-      ownerSigner: secp256r1(ownerSigner, { authorityPda: secpOwnerAuthPda }),
+    const prepared = await client.prepareTransferOwnership({
+      payer: payer.publicKey,
+      walletPda: secpWalletPda,
+      secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       newOwner: {
         type: 'secp256r1',
         credentialIdHash: newOwnerKey.credentialIdHash,
@@ -529,6 +611,8 @@ async function main() {
         rpId: newOwnerKey.rpId,
       },
     });
+    const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
+    const { instructions, newOwnerAuthorityPda } = client.finalizeTransferOwnership(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
@@ -538,36 +622,43 @@ async function main() {
   // ────────────────────────────────────────────────────────────
   // SUMMARY TABLE
   // ────────────────────────────────────────────────────────────
-  console.log('\n\n' + '=' .repeat(100));
+  console.log('\n\n' + '='.repeat(100));
   console.log('  SUMMARY');
-  console.log('=' .repeat(100));
+  console.log('='.repeat(100));
   console.log(
-    '  ' + 'Operation'.padEnd(54) +
-    'CU'.padStart(8) +
-    'TX Size'.padStart(10) +
-    'Rent Cost'.padStart(16),
+    '  ' +
+      'Operation'.padEnd(54) +
+      'CU'.padStart(8) +
+      'TX Size'.padStart(10) +
+      'Rent Cost'.padStart(16),
   );
   console.log('-'.repeat(100));
 
   for (const { label, result } of results) {
-    const rentStr = result.rentCost !== undefined
-      ? (result.rentCost >= 0
-        ? `${(result.rentCost / LAMPORTS_PER_SOL).toFixed(6)}`
-        : `${(result.rentCost / LAMPORTS_PER_SOL).toFixed(6)} (refund)`)
-      : '-';
+    const rentStr =
+      result.rentCost !== undefined
+        ? result.rentCost >= 0
+          ? `${(result.rentCost / LAMPORTS_PER_SOL).toFixed(6)}`
+          : `${(result.rentCost / LAMPORTS_PER_SOL).toFixed(6)} (refund)`
+        : '-';
     console.log(
-      '  ' + label.padEnd(54) +
-      result.cu.toLocaleString().padStart(8) +
-      `${result.txSize} B`.padStart(10) +
-      `${rentStr} SOL`.padStart(16),
+      '  ' +
+        label.padEnd(54) +
+        result.cu.toLocaleString().padStart(8) +
+        `${result.txSize} B`.padStart(10) +
+        `${rentStr} SOL`.padStart(16),
     );
   }
 
-  console.log('=' .repeat(100));
+  console.log('='.repeat(100));
   const finalBalance = await connection.getBalance(payer.publicKey);
   const totalSpent = payerBalance - finalBalance;
-  console.log(`\nTotal spent: ${(totalSpent / LAMPORTS_PER_SOL).toFixed(6)} SOL`);
-  console.log(`Final balance: ${(finalBalance / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
+  console.log(
+    `\nTotal spent: ${(totalSpent / LAMPORTS_PER_SOL).toFixed(6)} SOL`,
+  );
+  console.log(
+    `Final balance: ${(finalBalance / LAMPORTS_PER_SOL).toFixed(4)} SOL`,
+  );
 
   console.log('\nAll operations completed successfully!');
 }
