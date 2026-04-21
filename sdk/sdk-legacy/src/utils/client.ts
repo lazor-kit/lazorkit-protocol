@@ -438,6 +438,31 @@ export class LazorKitClient {
   }
 
   /**
+   * Flatten a Secp256r1SignerConfig into the raw Secp256r1Params that the
+   * prepare* methods take. Strips the Signer callback — prepare* doesn't
+   * sign, it only derives the challenge.
+   */
+  private extractSecp256r1Params(s: Secp256r1SignerConfig): Secp256r1Params {
+    return {
+      credentialIdHash: s.signer.credentialIdHash,
+      publicKeyBytes: s.signer.publicKeyBytes,
+      authorityPda: s.authorityPda,
+      slotOverride: s.slotOverride,
+    };
+  }
+
+  /**
+   * Derive the Ed25519 admin's authority PDA, honoring the pre-computed
+   * override if the caller supplied one (otherwise a fresh findAuthority).
+   */
+  private resolveEd25519AuthorityPda(
+    s: { publicKey: PublicKey; authorityPda?: PublicKey },
+    walletPda: PublicKey,
+  ): PublicKey {
+    return s.authorityPda ?? this.findAuthority(walletPda, s.publicKey.toBytes())[0];
+  }
+
+  /**
    * Thin wrapper around `prepareSecp256r1` that injects this client's
    * programId — every prepare method passes the same `payer` + `programId`
    * + (1-byte) discriminator, so threading those through a helper keeps
@@ -1265,9 +1290,7 @@ export class LazorKitClient {
       const ix = createAddAuthorityIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        adminAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         newAuthorityPda,
         newType,
         newRole: params.role,
@@ -1284,22 +1307,12 @@ export class LazorKitClient {
     const prepared = await this.prepareAddAuthority({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       newAuthority: params.newAuthority,
       role: params.role,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeAddAuthority(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson,
-    });
+    return this.finalizeAddAuthority(prepared, response);
   }
 
   // ─── RemoveAuthority (unified) ──────────────────────────────────
@@ -1318,9 +1331,7 @@ export class LazorKitClient {
       const ix = createRemoveAuthorityIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        adminAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         targetAuthorityPda: params.targetAuthorityPda,
         refundDestination: refundDest,
         authorizerSigner: s.publicKey,
@@ -1333,22 +1344,12 @@ export class LazorKitClient {
     const prepared = await this.prepareRemoveAuthority({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       targetAuthorityPda: params.targetAuthorityPda,
       refundDestination: params.refundDestination,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeRemoveAuthority(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson,
-    });
+    return this.finalizeRemoveAuthority(prepared, response);
   }
 
   // ─── TransferOwnership (unified) ────────────────────────────────
@@ -1394,9 +1395,7 @@ export class LazorKitClient {
       const ix = createTransferOwnershipIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        currentOwnerAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        currentOwnerAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         newOwnerAuthorityPda,
         refundDestination: refundDest,
         newType,
@@ -1413,22 +1412,12 @@ export class LazorKitClient {
     const prepared = await this.prepareTransferOwnership({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       newOwner: params.newOwner,
       refundDestination: params.refundDestination,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeTransferOwnership(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson,
-    });
+    return this.finalizeTransferOwnership(prepared, response);
   }
 
   // ─── CreateSession (unified) ────────────────────────────────────
@@ -1471,9 +1460,7 @@ export class LazorKitClient {
       const ix = createCreateSessionIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        adminAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         sessionPda,
         sessionKey: sessionKeyBytes,
         expiresAt: params.expiresAt,
@@ -1488,23 +1475,13 @@ export class LazorKitClient {
     const prepared = await this.prepareCreateSession({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       sessionKey: params.sessionKey,
       expiresAt: params.expiresAt,
       actions: params.actions,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeCreateSession(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson,
-    });
+    return this.finalizeCreateSession(prepared, response);
   }
 
   // ─── Execute (unified, accepts standard TransactionInstructions) ─
@@ -1542,9 +1519,7 @@ export class LazorKitClient {
 
     switch (s.type) {
       case 'ed25519': {
-        const authorityPda =
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0];
+        const authorityPda = this.resolveEd25519AuthorityPda(s, params.walletPda);
         // Ed25519: signer at index 4 (program expects it there)
         const fixedAccounts = [
           params.payer,
@@ -1577,21 +1552,11 @@ export class LazorKitClient {
         const prepared = await this.prepareExecute({
           payer: params.payer,
           walletPda: params.walletPda,
-          secp256r1: {
-            credentialIdHash: s.signer.credentialIdHash,
-            publicKeyBytes: s.signer.publicKeyBytes,
-            authorityPda: s.authorityPda,
-            slotOverride: s.slotOverride,
-          },
+          secp256r1: this.extractSecp256r1Params(s),
           instructions: params.instructions,
         });
         const response = await s.signer.sign(prepared.challenge);
-        return this.finalizeExecute(prepared, {
-          signature: response.signature,
-          authenticatorData: response.authenticatorData,
-          clientDataJsonHash: response.clientDataJsonHash,
-          clientDataJson: response.clientDataJson,
-        });
+        return this.finalizeExecute(prepared, response);
       }
 
       case 'session': {
@@ -1797,9 +1762,7 @@ export class LazorKitClient {
       const ix = createRevokeSessionIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        adminAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         sessionPda: params.sessionPda,
         refundDestination: refundDest,
         authorizerSigner: s.publicKey,
@@ -1812,22 +1775,12 @@ export class LazorKitClient {
     const prepared = await this.prepareRevokeSession({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       sessionPda: params.sessionPda,
       refundDestination: params.refundDestination,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeRevokeSession(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson,
-    });
+    return this.finalizeRevokeSession(prepared, response);
   }
 
   // ─── Protocol Fee Management ──────────────────────────────────────
