@@ -6,6 +6,7 @@ import {
   type Secp256r1Signer,
 } from './secp256r1';
 import { AUTH_TYPE_SECP256R1 } from './instructions';
+import { concatBytes } from './bytes';
 
 // ─── Two-phase Secp256r1 signing flow ───────────────────────────────
 //
@@ -109,7 +110,7 @@ export function finalizeSecp256r1(
     clientDataJson: response.clientDataJson,
   });
 
-  const precompileMessage = concatParts([
+  const precompileMessage = concatBytes([
     response.authenticatorData,
     response.clientDataJsonHash,
   ]);
@@ -184,7 +185,7 @@ export function buildDataPayloadForAdd(
       parts.push(new Uint8Array(rpIdBytes));
     }
   }
-  return concatParts(parts);
+  return concatBytes(parts);
 }
 
 /**
@@ -208,7 +209,7 @@ export function buildDataPayloadForTransfer(
       parts.push(new Uint8Array(rpIdBytes));
     }
   }
-  return concatParts(parts);
+  return concatBytes(parts);
 }
 
 /**
@@ -235,16 +236,8 @@ export function buildDataPayloadForSession(
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
-export function concatParts(parts: Uint8Array[]): Uint8Array {
-  const totalLen = parts.reduce((s, a) => s + a.length, 0);
-  const out = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const a of parts) {
-    out.set(a, offset);
-    offset += a.length;
-  }
-  return out;
-}
+/** @deprecated Use `concatBytes` from `./bytes` instead. Kept as alias for back-compat. */
+export const concatParts = concatBytes;
 
 /**
  * Builds the Secp256r1 precompile verify instruction.

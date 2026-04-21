@@ -5,6 +5,7 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   TransactionInstruction,
 } from '@solana/web3.js';
+import { randomFillSync } from 'crypto';
 import { PROGRAM_ID } from '../constants';
 import {
   findWalletPda,
@@ -55,10 +56,10 @@ import {
   buildDataPayloadForAdd,
   buildDataPayloadForTransfer,
   buildDataPayloadForSession,
-  concatParts,
   type WebAuthnResponse,
   type PreparedSecp256r1,
 } from './signing';
+import { concatBytes } from './bytes';
 import { buildCompactLayout } from './compact';
 import { serializeActions, type SessionAction } from './actions';
 import type {
@@ -325,7 +326,13 @@ export class LazorKitClient {
 
     const [protocolConfigPda] = this.findProtocolConfig();
     const [feeRecordPda] = this.findFeeRecord(payer);
-    const shardId = Math.floor(Math.random() * config.numShards);
+    // CSPRNG to avoid predictable shard selection. Not a direct exploit vector
+    // (fees still land in a valid shard), but violates "no Math.random in
+    // crypto-adjacent code" hygiene.
+    const randBuf = new Uint8Array(4);
+    randomFillSync(randBuf);
+    const randU32 = (randBuf[0] | (randBuf[1] << 8) | (randBuf[2] << 16) | (randBuf[3] << 24)) >>> 0;
+    const shardId = randU32 % config.numShards;
     const [treasuryShardPda] = this.findTreasuryShard(shardId);
     return { protocolConfigPda, feeRecordPda, treasuryShardPda };
   }
@@ -346,13 +353,6 @@ export class LazorKitClient {
     const slot = p.slotOverride ?? BigInt(await this.connection.getSlot());
     const counter = (await this.readCounter(authorityPda)) + 1;
     return { authorityPda, publicKeyBytes, slot, counter };
-  }
-
-  private buildSecp256r1Auth(
-    signing: PreparedSecp256r1,
-    response: WebAuthnResponse,
-  ) {
-    return finalizeSecp256r1(signing, response);
   }
 
   // ── prepareExecute / finalizeExecute ──
@@ -399,7 +399,7 @@ export class LazorKitClient {
       allAccountMetas,
       compactInstructions,
     );
-    const signedPayload = concatParts([packed, accountsHash]);
+    const signedPayload = concatBytes([packed, accountsHash]);
 
     const signing = prepareSecp256r1({
       discriminator: new Uint8Array([DISC_EXECUTE]),
@@ -433,7 +433,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -453,6 +453,15 @@ export class LazorKitClient {
 
   // ── prepareAddAuthority / finalizeAddAuthority ──
 
+  /**
+   * Phase 1 of adding a new authority under a passkey admin. Computes the
+   * WebAuthn challenge that must be passed to `navigator.credentials.get()`.
+   * After the authenticator signs, call `finalizeAddAuthority()` to build
+   * the transaction instructions.
+   *
+   * Returns `{ challenge, _internal }`. Treat `_internal` as opaque state —
+   * it carries the signing context through to the finalize step.
+   */
   async prepareAddAuthority(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -482,7 +491,7 @@ export class LazorKitClient {
       secp256r1Pubkey,
       rpId,
     );
-    const signedPayload = concatParts([dataPayload, params.payer.toBytes()]);
+    const signedPayload = concatBytes([dataPayload, params.payer.toBytes()]);
 
     const signing = prepareSecp256r1({
       discriminator: new Uint8Array([DISC_ADD_AUTHORITY]),
@@ -519,7 +528,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[]; newAuthorityPda: PublicKey } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -544,6 +553,12 @@ export class LazorKitClient {
 
   // ── prepareRemoveAuthority / finalizeRemoveAuthority ──
 
+  /**
+   * Phase 1 of removing an authority under a passkey admin. Computes the
+   * WebAuthn challenge; finalize with the authenticator response to produce
+   * the transaction instructions. The target authority's PDA is closed and
+   * its rent refunded to `refundDestination` on finalize+send.
+   */
   async prepareRemoveAuthority(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -557,7 +572,7 @@ export class LazorKitClient {
       params.secp256r1,
     );
 
-    const signedPayload = concatParts([
+    const signedPayload = concatBytes([
       params.targetAuthorityPda.toBytes(),
       refundDest.toBytes(),
     ]);
@@ -592,7 +607,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -639,7 +654,7 @@ export class LazorKitClient {
       secp256r1Pubkey,
       rpId,
     );
-    const signedPayload = concatParts([
+    const signedPayload = concatBytes([
       dataPayload,
       params.payer.toBytes(),
       refundDest.toBytes(),
@@ -683,7 +698,7 @@ export class LazorKitClient {
     newOwnerAuthorityPda: PublicKey;
   } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -708,6 +723,12 @@ export class LazorKitClient {
 
   // ── prepareCreateSession / finalizeCreateSession ──
 
+  /**
+   * Phase 1 of creating a session under a passkey admin. Computes the
+   * WebAuthn challenge; after the authenticator signs, call
+   * `finalizeCreateSession()` to build the transaction. The session PDA
+   * is created and funded by `payer` on finalize+send.
+   */
   async prepareCreateSession(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -732,7 +753,7 @@ export class LazorKitClient {
       params.expiresAt,
       actionsBuffer,
     );
-    const signedPayload = concatParts([dataPayload, params.payer.toBytes()]);
+    const signedPayload = concatBytes([dataPayload, params.payer.toBytes()]);
 
     const signing = prepareSecp256r1({
       discriminator: new Uint8Array([DISC_CREATE_SESSION]),
@@ -767,7 +788,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[]; sessionPda: PublicKey } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -787,6 +808,12 @@ export class LazorKitClient {
 
   // ── prepareRevokeSession / finalizeRevokeSession ──
 
+  /**
+   * Phase 1 of revoking a session under a passkey admin. Computes the
+   * WebAuthn challenge; finalize with the authenticator response. The
+   * session PDA is closed and rent refunded to `refundDestination` on
+   * finalize+send.
+   */
   async prepareRevokeSession(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -800,7 +827,7 @@ export class LazorKitClient {
       params.secp256r1,
     );
 
-    const signedPayload = concatParts([
+    const signedPayload = concatBytes([
       params.sessionPda.toBytes(),
       refundDest.toBytes(),
     ]);
@@ -835,7 +862,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -900,7 +927,7 @@ export class LazorKitClient {
     const expiryOffsetBuf = new Uint8Array(2);
     expiryOffsetBuf[0] = expiryOffset & 0xff;
     expiryOffsetBuf[1] = (expiryOffset >> 8) & 0xff;
-    const signedPayload = concatParts([
+    const signedPayload = concatBytes([
       instructionsHash,
       accountsHash,
       expiryOffsetBuf,
@@ -947,7 +974,7 @@ export class LazorKitClient {
     deferredPayload: DeferredPayload;
   } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
