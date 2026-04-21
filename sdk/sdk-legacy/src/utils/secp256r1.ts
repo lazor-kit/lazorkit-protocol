@@ -113,6 +113,14 @@ export function buildAuthPayload(params: {
 }): Uint8Array {
   const authDataLen = params.authenticatorData.length;
   const cdjLen = params.clientDataJson.length;
+  // Length fields are u16 LE — guard the upper bound so a pathological
+  // authenticator response can't silently wrap and produce a malformed payload.
+  if (authDataLen > 0xffff) {
+    throw new Error(`authenticatorData length must fit in u16 (got ${authDataLen})`);
+  }
+  if (cdjLen > 0xffff) {
+    throw new Error(`clientDataJson length must fit in u16 (got ${cdjLen})`);
+  }
   const totalLen = 8 + 4 + 1 + 1 + 2 + authDataLen + 2 + cdjLen;
   const buf = Buffer.alloc(totalLen);
   let offset = 0;

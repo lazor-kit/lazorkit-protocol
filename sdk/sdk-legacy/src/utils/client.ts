@@ -80,6 +80,7 @@ interface PreparedBase {
 }
 
 export interface PreparedExecute extends PreparedBase {
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -99,6 +100,7 @@ export interface PreparedExecute extends PreparedBase {
 
 export interface PreparedAddAuthority extends PreparedBase {
   newAuthorityPda: PublicKey;
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -115,6 +117,7 @@ export interface PreparedAddAuthority extends PreparedBase {
 }
 
 export interface PreparedRemoveAuthority extends PreparedBase {
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -128,6 +131,7 @@ export interface PreparedRemoveAuthority extends PreparedBase {
 
 export interface PreparedTransferOwnership extends PreparedBase {
   newOwnerAuthorityPda: PublicKey;
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -145,6 +149,7 @@ export interface PreparedTransferOwnership extends PreparedBase {
 
 export interface PreparedCreateSession extends PreparedBase {
   sessionPda: PublicKey;
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -159,6 +164,7 @@ export interface PreparedCreateSession extends PreparedBase {
 }
 
 export interface PreparedRevokeSession extends PreparedBase {
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -173,6 +179,7 @@ export interface PreparedRevokeSession extends PreparedBase {
 export interface PreparedAuthorize extends PreparedBase {
   deferredExecPda: PublicKey;
   counter: number;
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -200,6 +207,19 @@ const SYSVAR_IX_INDEX_REVOKE_SESSION = 5;
 
 // ─── Internal helpers ─────────────────────────────────────────────────
 
+/** Throws if a Uint8Array isn't exactly the expected length. */
+function assertByteLength(
+  value: Uint8Array,
+  expected: number,
+  name: string,
+): void {
+  if (value.length !== expected) {
+    throw new Error(
+      `${name} must be exactly ${expected} bytes, got ${value.length}`,
+    );
+  }
+}
+
 /** Resolves a CreateWalletOwner to the low-level fields needed by IX builders */
 function resolveOwnerFields(owner: CreateWalletOwner): {
   authType: number;
@@ -213,6 +233,8 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
       credentialOrPubkey: owner.publicKey.toBytes(),
     };
   }
+  assertByteLength(owner.credentialIdHash, 32, 'credentialIdHash');
+  assertByteLength(owner.compressedPubkey, 33, 'compressedPubkey');
   return {
     authType: AUTH_TYPE_SECP256R1,
     credentialOrPubkey: owner.credentialIdHash,
@@ -346,6 +368,10 @@ export class LazorKitClient {
   // ─── Secp256r1 prepare/finalize helpers ─────────────────────────────
 
   private async resolveSecp256r1(walletPda: PublicKey, p: Secp256r1Params) {
+    assertByteLength(p.credentialIdHash, 32, 'credentialIdHash');
+    if (p.publicKeyBytes) {
+      assertByteLength(p.publicKeyBytes, 33, 'publicKeyBytes');
+    }
     const authorityPda =
       p.authorityPda ?? this.findAuthority(walletPda, p.credentialIdHash)[0];
 
@@ -1043,9 +1069,7 @@ export class LazorKitClient {
       authorityType: number;
     }>
   > {
-    if (credential.length !== 32) {
-      throw new Error('credential must be 32 bytes');
-    }
+    assertByteLength(credential, 32, 'credential');
 
     const typeValue =
       authorityType === 'ed25519' ? AUTH_TYPE_ED25519 : AUTH_TYPE_SECP256R1;
@@ -1128,6 +1152,7 @@ export class LazorKitClient {
     vaultPda: PublicKey;
     authorityPda: PublicKey;
   }> {
+    assertByteLength(params.userSeed, 32, 'userSeed');
     const [walletPda] = this.findWallet(params.userSeed);
     const [vaultPda] = this.findVault(walletPda);
     const { authType, credentialOrPubkey, secp256r1Pubkey, rpId } =
@@ -1242,7 +1267,7 @@ export class LazorKitClient {
       signature: response.signature,
       authenticatorData: response.authenticatorData,
       clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
+      clientDataJson: response.clientDataJson,
     });
   }
 
@@ -1291,7 +1316,7 @@ export class LazorKitClient {
       signature: response.signature,
       authenticatorData: response.authenticatorData,
       clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
+      clientDataJson: response.clientDataJson,
     });
   }
 
@@ -1371,7 +1396,7 @@ export class LazorKitClient {
       signature: response.signature,
       authenticatorData: response.authenticatorData,
       clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
+      clientDataJson: response.clientDataJson,
     });
   }
 
@@ -1447,7 +1472,7 @@ export class LazorKitClient {
       signature: response.signature,
       authenticatorData: response.authenticatorData,
       clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
+      clientDataJson: response.clientDataJson,
     });
   }
 
@@ -1534,7 +1559,7 @@ export class LazorKitClient {
           signature: response.signature,
           authenticatorData: response.authenticatorData,
           clientDataJsonHash: response.clientDataJsonHash,
-          clientDataJson: response.clientDataJson!,
+          clientDataJson: response.clientDataJson,
         });
       }
 
@@ -1661,7 +1686,7 @@ export class LazorKitClient {
       signature: response.signature,
       authenticatorData: response.authenticatorData,
       clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
+      clientDataJson: response.clientDataJson,
     });
   }
 
@@ -1770,7 +1795,7 @@ export class LazorKitClient {
       signature: response.signature,
       authenticatorData: response.authenticatorData,
       clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
+      clientDataJson: response.clientDataJson,
     });
   }
 

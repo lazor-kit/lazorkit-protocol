@@ -248,6 +248,24 @@ export function buildSecp256r1PrecompileIx(
   message: Uint8Array,
   signature: Uint8Array,
 ): TransactionInstruction {
+  // Validate sizes before constructing the precompile header — the layout below
+  // is fixed-offset and silent bad-size bugs are hard to diagnose on-chain.
+  if (signature.length !== 64) {
+    throw new Error(
+      `Secp256r1 signature must be 64 bytes (raw r||s), got ${signature.length}`,
+    );
+  }
+  if (publicKey.length !== 33) {
+    throw new Error(
+      `Secp256r1 public key must be 33 bytes (compressed), got ${publicKey.length}`,
+    );
+  }
+  if (message.length > 0xffff) {
+    throw new Error(
+      `Precompile message length must fit in u16 (got ${message.length})`,
+    );
+  }
+
   const SECP256R1_PROGRAM_ID = new PublicKey('Secp256r1SigVerify1111111111111111111111111');
 
   const HEADER_SIZE = 16;
