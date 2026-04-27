@@ -10,47 +10,32 @@ use pinocchio::{
 
 use crate::{
     error::ProtocolError,
-    state::{
-        integrator_record::FeeRecord, protocol_config::ProtocolConfig, AccountDiscriminator,
-        CURRENT_ACCOUNT_VERSION,
-    },
+    state::{integrator_record::FeeRecord, AccountDiscriminator, CURRENT_ACCOUNT_VERSION},
     utils::initialize_pda_account,
 };
 
 /// Processes the `RegisterPayer` instruction.
 ///
-/// Creates a FeeRecord PDA keyed by the payer's pubkey.
-/// Requires protocol admin signature.
+/// Creates a FeeRecord PDA keyed by the payer's pubkey. Permissionless:
+/// any payer registers themselves, paying their own rent. There is no
+/// admin gate — fee collection works regardless of whether a FeeRecord
+/// exists, so this only enables stats tracking for that payer.
 ///
 /// # Accounts:
-/// 1. `[signer, writable]` Payer (funds rent)
-/// 2. `[]` ProtocolConfig PDA
-/// 3. `[signer]` Admin (must match config.admin)
-/// 4. `[writable]` FeeRecord PDA (derived from `["fee_record", target_payer]`)
-/// 5. `[]` System Program
-/// 6. `[]` Rent Sysvar
+/// 1. `[signer, writable]` Payer (funds rent; must equal target_payer)
+/// 2. `[writable]` FeeRecord PDA (derived from `["fee_record", payer]`)
+/// 3. `[]` System Program
+/// 4. `[]` Rent Sysvar
 ///
 /// # Instruction Data:
-/// `[target_payer(32)]` = 32 bytes (the payer pubkey to register)
+/// (none) — the payer signer is the registration target
 pub fn process(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    instruction_data: &[u8],
+    _instruction_data: &[u8],
 ) -> ProgramResult {
-    if instruction_data.len() < 32 {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    let target_payer: &[u8; 32] = instruction_data[0..32].try_into().unwrap();
-
     let account_info_iter = &mut accounts.iter();
     let payer = account_info_iter
-        .next()
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let config_pda = account_info_iter
-        .next()
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let admin = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
     let record_pda = account_info_iter
@@ -63,31 +48,13 @@ pub fn process(
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
 
-    // Verify admin is signer
-    if !admin.is_signer() {
+    if !payer.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Verify config_pda is owned by this program before reading admin
-    // from its data for authorization. Defense-in-depth.
-    if config_pda.owner() != program_id {
-        return Err(ProgramError::IllegalOwner);
-    }
+    let target_payer: &[u8; 32] = payer.key();
 
-    // Read config and verify admin
-    let config_data = config_pda.try_borrow_data()?;
-    if config_data.len() < core::mem::size_of::<ProtocolConfig>()
-        || config_data[0] != AccountDiscriminator::ProtocolConfig as u8
-    {
-        return Err(ProtocolError::InvalidProtocolAdmin.into());
-    }
-    let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
-    if admin.key() != &config.admin {
-        return Err(ProtocolError::InvalidProtocolAdmin.into());
-    }
-    drop(config_data);
-
-    // Verify PDA: ["fee_record", target_payer]
+    // Verify PDA: ["fee_record", payer]
     let (record_key, record_bump) =
         find_program_address(&[b"fee_record", target_payer], program_id);
     if record_pda.key() != &record_key {
