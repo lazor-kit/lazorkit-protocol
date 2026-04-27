@@ -94,6 +94,8 @@ export interface PreparedExecute extends PreparedBase {
       feeRecordPda: PublicKey;
       treasuryShardPda: PublicKey;
     };
+    /** Auto-prepended payer-self-registration ix (first fee-paying tx only) */
+    registerIx?: TransactionInstruction;
     programId: PublicKey;
   };
 }
@@ -399,6 +401,55 @@ export class LazorKitClient {
     return { protocolConfigPda, feeRecordPda, treasuryShardPda };
   }
 
+  /**
+   * Like {@link resolveProtocolFee} but additionally returns a `registerIx`
+   * to prepend when the payer's FeeRecord PDA does not yet exist on-chain.
+   * Fee-eligible tx builders use this so apps don't need to manually call
+   * `registerPayer()` before their first fee-paying transaction.
+   *
+   * One extra `getAccountInfo` per first-time tx; subsequent txs short-circuit
+   * via an in-memory cache of payers we've already seen registered.
+   */
+  private _registeredPayers = new Set<string>();
+
+  async resolveProtocolFeeWithRegister(payer: PublicKey): Promise<
+    | {
+        accounts: {
+          protocolConfigPda: PublicKey;
+          feeRecordPda: PublicKey;
+          treasuryShardPda: PublicKey;
+        };
+        registerIx?: TransactionInstruction;
+      }
+    | undefined
+  > {
+    const accounts = await this.resolveProtocolFee(payer);
+    if (!accounts) return undefined;
+
+    const key = payer.toBase58();
+    if (this._registeredPayers.has(key)) {
+      return { accounts };
+    }
+
+    const info = await this.connection.getAccountInfo(accounts.feeRecordPda);
+    const exists =
+      !!info && info.data.length > 0 && info.data[0] === 6; // FeeRecord discriminator
+    if (exists) {
+      this._registeredPayers.add(key);
+      return { accounts };
+    }
+
+    const registerIx = createRegisterPayerIx({
+      payer,
+      feeRecordPda: accounts.feeRecordPda,
+      programId: this.programId,
+    });
+    // Mark optimistically — the same tx will create it. If it fails we'll
+    // re-detect on the next call (set is in-memory only).
+    this._registeredPayers.add(key);
+    return { accounts, registerIx };
+  }
+
   // ─── Account readers ─────────────────────────────────────────────
 
   async readCounter(authorityPda: PublicKey): Promise<number> {
@@ -491,12 +542,14 @@ export class LazorKitClient {
     instructions: TransactionInstruction[];
   }): Promise<PreparedExecute> {
     const [vaultPda] = this.findVault(params.walletPda);
-    // resolveSecp256r1 and resolveProtocolFee are fully independent — run them in parallel.
-    const [resolved, protocolFee] = await Promise.all([
+    // resolveSecp256r1 and protocol-fee resolution are fully independent — run them in parallel.
+    const [resolved, fee] = await Promise.all([
       this.resolveSecp256r1(params.walletPda, params.secp256r1),
-      this.resolveProtocolFee(params.payer),
+      this.resolveProtocolFeeWithRegister(params.payer),
     ]);
     const { authorityPda, publicKeyBytes, slot, counter } = resolved;
+    const protocolFee = fee?.accounts;
+    const registerIx = fee?.registerIx;
 
     const { compactInstructions, remainingAccounts, accountsHash } =
       buildCompactLayoutAndHash(
@@ -533,6 +586,7 @@ export class LazorKitClient {
         packed,
         remainingAccounts,
         protocolFee,
+        registerIx,
         programId: this.programId,
       },
     };
@@ -558,7 +612,8 @@ export class LazorKitClient {
       protocolFee: i.protocolFee,
       programId: i.programId,
     });
-    return { instructions: [precompileIx, ix] };
+    const head = i.registerIx ? [i.registerIx, precompileIx] : [precompileIx];
+    return { instructions: [...head, ix] };
   }
 
   // ── prepareAddAuthority / finalizeAddAuthority ──
@@ -1211,7 +1266,7 @@ export class LazorKitClient {
       credentialOrPubkey,
     );
 
-    const protocolFee = await this.resolveProtocolFee(params.payer);
+    const fee = await this.resolveProtocolFeeWithRegister(params.payer);
 
     const ix = createCreateWalletIx({
       payer: params.payer,
@@ -1224,10 +1279,11 @@ export class LazorKitClient {
       credentialOrPubkey,
       secp256r1Pubkey,
       rpId,
-      protocolFee,
+      protocolFee: fee?.accounts,
       programId: this.programId,
     });
-    return { instructions: [ix], walletPda, vaultPda, authorityPda };
+    const instructions = fee?.registerIx ? [fee.registerIx, ix] : [ix];
+    return { instructions, walletPda, vaultPda, authorityPda };
   }
 
   // ─── AddAuthority (unified) ─────────────────────────────────────
@@ -1508,7 +1564,9 @@ export class LazorKitClient {
   }): Promise<{ instructions: TransactionInstruction[] }> {
     const [vaultPda] = this.findVault(params.walletPda);
     const s = params.signer;
-    const protocolFee = await this.resolveProtocolFee(params.payer);
+    const fee = await this.resolveProtocolFeeWithRegister(params.payer);
+    const protocolFee = fee?.accounts;
+    const head: TransactionInstruction[] = fee?.registerIx ? [fee.registerIx] : [];
 
     switch (s.type) {
       case 'ed25519': {
@@ -1537,11 +1595,11 @@ export class LazorKitClient {
           protocolFee,
           programId: this.programId,
         });
-        return { instructions: [ix] };
+        return { instructions: [...head, ix] };
       }
 
       case 'secp256r1': {
-        // Delegate to prepare/finalize
+        // Delegate to prepare/finalize (which handles its own auto-register)
         const prepared = await this.prepareExecute({
           payer: params.payer,
           walletPda: params.walletPda,
@@ -1585,7 +1643,7 @@ export class LazorKitClient {
           protocolFee,
           programId: this.programId,
         });
-        return { instructions: [ix] };
+        return { instructions: [...head, ix] };
       }
     }
   }
@@ -1694,7 +1752,7 @@ export class LazorKitClient {
     const packed = packCompactInstructions(
       params.deferredPayload.compactInstructions,
     );
-    const protocolFee = await this.resolveProtocolFee(params.payer);
+    const fee = await this.resolveProtocolFeeWithRegister(params.payer);
     const ix = createExecuteDeferredIx({
       payer: params.payer,
       walletPda: params.deferredPayload.walletPda,
@@ -1703,10 +1761,10 @@ export class LazorKitClient {
       refundDestination: refundDest,
       packedInstructions: packed,
       remainingAccounts: params.deferredPayload.remainingAccounts,
-      protocolFee,
+      protocolFee: fee?.accounts,
       programId: this.programId,
     });
-    return { instructions: [ix] };
+    return { instructions: fee?.registerIx ? [fee.registerIx, ix] : [ix] };
   }
 
   // ─── ReclaimDeferred ────────────────────────────────────────────
@@ -1841,20 +1899,19 @@ export class LazorKitClient {
     return { instructions: [ix], treasuryShardPda };
   }
 
-  /** Register a payer for fee tracking (admin-gated) */
+  /**
+   * Register a payer for fee-stats tracking. Permissionless: the payer
+   * registers themselves (no admin signature required). Idempotent at the
+   * SDK level — the fee-eligible builders auto-prepend this only when the
+   * FeeRecord doesn't yet exist, so most apps never need to call it directly.
+   */
   registerPayer(params: {
     payer: PublicKey;
-    admin: PublicKey;
-    targetPayer: PublicKey;
   }): { instructions: TransactionInstruction[]; feeRecordPda: PublicKey } {
-    const [protocolConfigPda] = this.findProtocolConfig();
-    const [feeRecordPda] = this.findFeeRecord(params.targetPayer);
+    const [feeRecordPda] = this.findFeeRecord(params.payer);
     const ix = createRegisterPayerIx({
       payer: params.payer,
-      protocolConfigPda,
-      admin: params.admin,
       feeRecordPda,
-      targetPayer: params.targetPayer,
       programId: this.programId,
     });
     return { instructions: [ix], feeRecordPda };

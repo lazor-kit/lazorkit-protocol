@@ -126,13 +126,11 @@ describe('Protocol Fees', () => {
     await sendTxExpectError(ctx, instructions, [fakeAdmin], 4002);
   });
 
-  it('registers a payer', async () => {
+  it('registers a payer (permissionless self-registration)', async () => {
     const { instructions, feeRecordPda } = client.registerPayer({
       payer: ctx.payer.publicKey,
-      admin: adminKp.publicKey,
-      targetPayer: ctx.payer.publicKey,
     });
-    await sendTx(ctx, instructions, [adminKp]);
+    await sendTx(ctx, instructions);
 
     const info = await ctx.connection.getAccountInfo(feeRecordPda);
     expect(info).not.toBeNull();
@@ -142,10 +140,8 @@ describe('Protocol Fees', () => {
   it('rejects duplicate payer registration', async () => {
     const { instructions } = client.registerPayer({
       payer: ctx.payer.publicKey,
-      admin: adminKp.publicKey,
-      targetPayer: ctx.payer.publicKey,
     });
-    await sendTxExpectError(ctx, instructions, [adminKp], 4006);
+    await sendTxExpectError(ctx, instructions, [], 4006);
   });
 
   it('auto-detects payer and collects fee on CreateWallet', async () => {
