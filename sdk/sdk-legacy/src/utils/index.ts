@@ -9,3 +9,4 @@ export * from './types';
 export * from './signing';
 export * from './compact';
 export * from './client';
+export * from './transactions';
