@@ -217,6 +217,39 @@ client.removeAuthority({ payer, walletPda, adminSigner, targetAuthorityPda });
 client.transferOwnership({ payer, walletPda, ownerSigner, newOwner });
 ```
 
+### Protocol fees & auto-registration
+
+When the protocol is initialized and enabled (admin-only operation), the SDK transparently appends the four fee accounts (`protocol_config`, `fee_record`, `treasury_shard`, `system_program`) to every fee-eligible instruction (`createWallet`, `execute`, `executeDeferred`). The on-chain entrypoint transfers the fee from the payer to a randomly-chosen treasury shard, then strips the accounts before dispatching to the processor.
+
+```typescript
+// Nothing extra to do — fee handling is automatic
+await client.createWallet({ payer, userSeed, owner });   // 5000 lamport protocol fee
+await client.execute({ payer, walletPda, signer, instructions });  // 5000 lamport protocol fee
+```
+
+**Auto-registration**: a `FeeRecord` PDA tracks per-payer cumulative fees. The SDK auto-prepends a one-time `RegisterPayer` instruction on the payer's first fee-paying tx (~0.00112 SOL of FeeRecord rent, paid by the payer). An in-memory cache short-circuits the existence check on subsequent calls. Fee collection works regardless — registration only enables stats tracking.
+
+If you want to register explicitly (e.g. to front-load the cost during onboarding):
+
+```typescript
+const { instructions, feeRecordPda } = client.registerPayer({ payer: payer.publicKey });
+await sendAndConfirmTransaction(connection, new Transaction().add(...instructions), [payer]);
+```
+
+The `registerPayer` instruction is **permissionless** — any payer registers themselves, no admin signature needed.
+
+For advanced flows (custom tx assembly, gasless relayer pre-sim), the resolver methods are exposed:
+
+```typescript
+// Returns { protocolConfigPda, feeRecordPda, treasuryShardPda } | undefined
+const fee = await client.resolveProtocolFee(payer);
+
+// Same plus an optional `registerIx` to prepend if the FeeRecord doesn't exist yet
+const { accounts, registerIx } = await client.resolveProtocolFeeWithRegister(payer) ?? {};
+```
+
+If the protocol isn't initialized or is disabled, both resolvers return `undefined` and the SDK skips fee accounts entirely.
+
 ### Sessions
 
 ```typescript
@@ -321,6 +354,78 @@ import {
 
 const authority = await AuthorityAccount.fromAccountAddress(connection, authorityPda);
 ```
+
+## Transactions (legacy + v0)
+
+Every `client.*` method returns raw `TransactionInstruction[]` — composable so you can append your own ix (priority fees, custom CPIs) before sending. For when you want to skip the boilerplate, the SDK ships three small helpers:
+
+```typescript
+import {
+  buildLegacyTx,
+  buildV0Tx,
+  createAndExtendLut,
+} from '@lazorkit/sdk-legacy';
+```
+
+### Legacy
+
+```typescript
+const { blockhash } = await connection.getLatestBlockhash('confirmed');
+
+const tx = buildLegacyTx({
+  payer: payer.publicKey,
+  instructions,
+  blockhash,
+  signers: [payer],
+});
+
+await connection.sendRawTransaction(tx.serialize());
+```
+
+### Versioned (v0) with Address Lookup Tables
+
+A LazorKit-tuned ALT containing the system program, sysvars, `protocol_config`, and all `treasury_shard` PDAs saves **~88 B per Secp256r1 Execute** — useful headroom when chaining multiple inner instructions or calling Jupiter/bridges.
+
+```typescript
+import {
+  SystemProgram,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  SYSVAR_RENT_PUBKEY,
+} from '@solana/web3.js';
+
+// One-time setup — bootstrap the LUT
+const [protocolConfigPda] = client.findProtocolConfig();
+const treasuryShards = Array.from({ length: numShards }, (_, i) =>
+  client.findTreasuryShard(i)[0],
+);
+
+const lut = await createAndExtendLut({
+  connection,
+  authority: relayerKeypair,   // also pays rent + becomes the LUT authority
+  addresses: [
+    SystemProgram.programId,
+    SYSVAR_INSTRUCTIONS_PUBKEY,
+    SYSVAR_RENT_PUBKEY,
+    protocolConfigPda,
+    ...treasuryShards,
+  ],
+});
+
+// Per-tx — wrap any client.* result
+const v0Tx = buildV0Tx({
+  payer: payer.publicKey,
+  instructions,
+  blockhash,
+  signers: [payer],
+  lookupTables: [lut],
+});
+
+await connection.sendRawTransaction(v0Tx.serialize());
+```
+
+`createAndExtendLut` handles the slot-finalization quirk (the AddressLookupTable program rejects `recentSlot` from `confirmed` as too new), chunks extends in groups of 30, and waits one slot before returning so the table is usable in the same session.
+
+**When to use which**: prefer v0+LUT for `execute` (especially Secp256r1) and `executeDeferred`. For tiny instructions (`removeAuthority`, `revokeSession`, `reclaimDeferred`) the v0 wrapper actually adds 2 B because the LUT reference itself costs more than was saved — keep using legacy for those. Full size deltas per instruction are in [`tests-sdk/tests/benchmark-fees.ts`](../../tests-sdk/tests/benchmark-fees.ts).
 
 ## Low-level builders
 
