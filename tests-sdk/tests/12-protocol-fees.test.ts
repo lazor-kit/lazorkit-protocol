@@ -9,6 +9,7 @@ import {
 } from './common';
 import {
   LazorKitClient,
+  PROGRAM_ID_DEVNET,
   createWithdrawTreasuryIx,
   createUpdateProtocolIx,
 } from '../../sdk/sdk-legacy/src';
@@ -332,6 +333,8 @@ describe('Protocol Fees', () => {
       protocolConfigPda: fakeConfig,
       treasuryShardPda: shard0,
       treasury: treasuryKp.publicKey,
+      programId: PROGRAM_ID_DEVNET,
+
     });
     await sendTxExpectError(ctx, [ix], [adminKp]);
   });
@@ -345,6 +348,8 @@ describe('Protocol Fees', () => {
       protocolConfigPda,
       treasuryShardPda: fakeShard,
       treasury: treasuryKp.publicKey,
+      programId: PROGRAM_ID_DEVNET,
+
     });
     await sendTxExpectError(ctx, [ix], [adminKp]);
   });
@@ -359,6 +364,8 @@ describe('Protocol Fees', () => {
       executionFee: 9999n,
       enabled: true,
       newTreasury: treasuryKp.publicKey,
+      programId: PROGRAM_ID_DEVNET,
+
     });
     await sendTxExpectError(ctx, [ix], [adminKp]);
   });

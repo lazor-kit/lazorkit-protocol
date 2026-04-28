@@ -28,7 +28,7 @@ import {
   ROLE_SPENDER,
   DISC_ADD_AUTHORITY,
   DISC_EXECUTE,
-  PROGRAM_ID,
+  PROGRAM_ID_DEVNET,
 } from '../../sdk/sdk-legacy/src';
 import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
@@ -44,12 +44,9 @@ describe('Counter Edge Cases', () => {
     const ownerKey = await generateMockSecp256r1Key();
     const userSeed = crypto.randomBytes(32);
 
-    const [walletPda] = findWalletPda(userSeed);
-    const [vaultPda] = findVaultPda(walletPda);
-    const [ownerAuthPda, authBump] = findAuthorityPda(
-      walletPda,
-      ownerKey.credentialIdHash,
-    );
+    const [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
+    const [vaultPda] = findVaultPda(walletPda, PROGRAM_ID_DEVNET);
+    const [ownerAuthPda, authBump] = findAuthorityPda(walletPda, ownerKey.credentialIdHash, PROGRAM_ID_DEVNET);
 
     await sendTx(ctx, [
       createCreateWalletIx({
@@ -63,6 +60,8 @@ describe('Counter Edge Cases', () => {
         credentialOrPubkey: ownerKey.credentialIdHash,
         secp256r1Pubkey: ownerKey.publicKeyBytes,
         rpId: ownerKey.rpId,
+        programId: PROGRAM_ID_DEVNET,
+
       }),
     ]);
 
@@ -78,7 +77,7 @@ describe('Counter Edge Cases', () => {
     // 1. AddAuthority (counter becomes 1)
     const adminKp = Keypair.generate();
     const adminPubkey = adminKp.publicKey.toBytes();
-    const [adminAuthPda] = findAuthorityPda(walletPda, adminPubkey);
+    const [adminAuthPda] = findAuthorityPda(walletPda, adminPubkey, PROGRAM_ID_DEVNET);
 
     const slot1 = await getSlot(ctx);
     const dataPayload = Buffer.concat([
@@ -99,7 +98,7 @@ describe('Counter Edge Cases', () => {
       slot: slot1,
       counter: 1,
       payer: ctx.payer.publicKey,
-      programId: PROGRAM_ID,
+      programId: PROGRAM_ID_DEVNET,
       publicKeyBytes: ownerKey.publicKeyBytes,
     });
     const response1 = await fakeWebAuthnSign(ownerKey, prepared1.challenge);
@@ -119,6 +118,8 @@ describe('Counter Edge Cases', () => {
         newRole: ROLE_ADMIN,
         credentialOrPubkey: adminPubkey,
         authPayload: ap1,
+        programId: PROGRAM_ID_DEVNET,
+
       }),
     ]);
 
@@ -165,7 +166,7 @@ describe('Counter Edge Cases', () => {
       slot: slot2,
       counter: 2,
       payer: ctx.payer.publicKey,
-      programId: PROGRAM_ID,
+      programId: PROGRAM_ID_DEVNET,
       publicKeyBytes: ownerKey.publicKeyBytes,
     });
     const response2 = await fakeWebAuthnSign(ownerKey, prepared2.challenge);
@@ -191,6 +192,8 @@ describe('Counter Edge Cases', () => {
           },
           { pubkey: execRecipient, isSigner: false, isWritable: true },
         ],
+        programId: PROGRAM_ID_DEVNET,
+
       }),
     ]);
 
@@ -207,12 +210,9 @@ describe('Counter Edge Cases', () => {
     const key2 = await generateMockSecp256r1Key();
     const userSeed = crypto.randomBytes(32);
 
-    const [walletPda] = findWalletPda(userSeed);
-    const [vaultPda] = findVaultPda(walletPda);
-    const [auth1Pda, auth1Bump] = findAuthorityPda(
-      walletPda,
-      key1.credentialIdHash,
-    );
+    const [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
+    const [vaultPda] = findVaultPda(walletPda, PROGRAM_ID_DEVNET);
+    const [auth1Pda, auth1Bump] = findAuthorityPda(walletPda, key1.credentialIdHash, PROGRAM_ID_DEVNET);
 
     // Create wallet with key1 as owner
     await sendTx(ctx, [
@@ -227,11 +227,13 @@ describe('Counter Edge Cases', () => {
         credentialOrPubkey: key1.credentialIdHash,
         secp256r1Pubkey: key1.publicKeyBytes,
         rpId: key1.rpId,
+        programId: PROGRAM_ID_DEVNET,
+
       }),
     ]);
 
     // Add key2 as spender via key1 (counter1 goes to 1)
-    const [auth2Pda] = findAuthorityPda(walletPda, key2.credentialIdHash);
+    const [auth2Pda] = findAuthorityPda(walletPda, key2.credentialIdHash, PROGRAM_ID_DEVNET);
     const slot = await getSlot(ctx);
 
     const rpIdBytes = Buffer.from(key2.rpId, 'utf-8');
@@ -256,7 +258,7 @@ describe('Counter Edge Cases', () => {
       slot,
       counter: 1,
       payer: ctx.payer.publicKey,
-      programId: PROGRAM_ID,
+      programId: PROGRAM_ID_DEVNET,
       publicKeyBytes: key1.publicKeyBytes,
     });
     const response = await fakeWebAuthnSign(key1, prepared.challenge);
@@ -275,6 +277,8 @@ describe('Counter Edge Cases', () => {
         secp256r1Pubkey: key2.publicKeyBytes,
         rpId: key2.rpId,
         authPayload,
+        programId: PROGRAM_ID_DEVNET,
+
       }),
     ]);
 
