@@ -304,20 +304,20 @@ pub enum ProgramIx {
         new_treasury: [u8; 32],
     },
 
-    /// Register a payer for fee tracking
+    /// Register a payer for fee-stats tracking. Permissionless: the payer
+    /// signer is the registration target. Fee collection works regardless
+    /// of whether a FeeRecord exists; this only enables stats tracking.
     #[account(
         0,
         signer,
         writable,
         name = "payer",
-        desc = "Payer and rent contributor"
+        desc = "Payer and rent contributor; the FeeRecord is keyed by this pubkey"
     )]
-    #[account(1, name = "protocol_config", desc = "ProtocolConfig PDA")]
-    #[account(2, signer, name = "admin", desc = "Protocol admin")]
-    #[account(3, writable, name = "fee_record", desc = "FeeRecord PDA")]
-    #[account(4, name = "system_program", desc = "System Program")]
-    #[account(5, name = "rent_sysvar", desc = "Rent Sysvar")]
-    RegisterPayer { target_payer: [u8; 32] },
+    #[account(1, writable, name = "fee_record", desc = "FeeRecord PDA derived from [\"fee_record\", payer]")]
+    #[account(2, name = "system_program", desc = "System Program")]
+    #[account(3, name = "rent_sysvar", desc = "Rent Sysvar")]
+    RegisterPayer,
 
     /// Withdraw accumulated fees from a treasury shard
     #[account(0, signer, name = "admin", desc = "Protocol admin")]
