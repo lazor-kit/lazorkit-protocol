@@ -11,6 +11,7 @@ import {
   SYSVAR_RENT_PUBKEY,
 } from '@solana/web3.js';
 import { PROGRAM_ID } from '../constants';
+import { concatBytes } from './bytes';
 
 // ─── Discriminators ──────────────────────────────────────────────────
 export const DISC_CREATE_WALLET = 0;
@@ -653,35 +654,28 @@ export function createUpdateProtocolIx(params: {
 
 // ─── RegisterPayer ──────────────────────────────────────────────────
 /**
- * Instruction data layout (after discriminator):
- *   [target_payer(32)]
+ * Permissionless self-registration. The payer signer registers itself —
+ * the FeeRecord PDA is derived from the payer's pubkey. No admin gate;
+ * fee collection works regardless, this only enables stats tracking.
+ *
+ * Instruction data: discriminator only.
  */
 export function createRegisterPayerIx(params: {
   payer: PublicKey;
-  protocolConfigPda: PublicKey;
-  admin: PublicKey;
   feeRecordPda: PublicKey;
-  targetPayer: PublicKey;
   programId?: PublicKey;
 }): TransactionInstruction {
   const pid = params.programId ?? PROGRAM_ID;
-
-  const parts: Uint8Array[] = [
-    new Uint8Array([DISC_REGISTER_PAYER]),
-    params.targetPayer.toBytes(),
-  ];
 
   return new TransactionInstruction({
     programId: pid,
     keys: [
       { pubkey: params.payer, isSigner: true, isWritable: true },
-      { pubkey: params.protocolConfigPda, isSigner: false, isWritable: false },
-      { pubkey: params.admin, isSigner: true, isWritable: false },
       { pubkey: params.feeRecordPda, isSigner: false, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
     ],
-    data: Buffer.from(concatBytes(parts)),
+    data: Buffer.from([DISC_REGISTER_PAYER]),
   });
 }
 
@@ -757,14 +751,3 @@ export function appendProtocolFeeAccounts(
   );
 }
 
-// ─── Helper ──────────────────────────────────────────────────────────
-function concatBytes(arrays: Uint8Array[]): Uint8Array {
-  const totalLen = arrays.reduce((s, a) => s + a.length, 0);
-  const out = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const a of arrays) {
-    out.set(a, offset);
-    offset += a.length;
-  }
-  return out;
-}

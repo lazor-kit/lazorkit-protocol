@@ -5,6 +5,7 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   TransactionInstruction,
 } from '@solana/web3.js';
+import { randomFillSync } from 'crypto';
 import { PROGRAM_ID } from '../constants';
 import {
   findWalletPda,
@@ -55,10 +56,10 @@ import {
   buildDataPayloadForAdd,
   buildDataPayloadForTransfer,
   buildDataPayloadForSession,
-  concatParts,
   type WebAuthnResponse,
   type PreparedSecp256r1,
 } from './signing';
+import { concatBytes } from './bytes';
 import { buildCompactLayout } from './compact';
 import { serializeActions, type SessionAction } from './actions';
 import type {
@@ -79,6 +80,7 @@ interface PreparedBase {
 }
 
 export interface PreparedExecute extends PreparedBase {
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -92,12 +94,15 @@ export interface PreparedExecute extends PreparedBase {
       feeRecordPda: PublicKey;
       treasuryShardPda: PublicKey;
     };
+    /** Auto-prepended payer-self-registration ix (first fee-paying tx only) */
+    registerIx?: TransactionInstruction;
     programId: PublicKey;
   };
 }
 
 export interface PreparedAddAuthority extends PreparedBase {
   newAuthorityPda: PublicKey;
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -114,6 +119,7 @@ export interface PreparedAddAuthority extends PreparedBase {
 }
 
 export interface PreparedRemoveAuthority extends PreparedBase {
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -127,6 +133,7 @@ export interface PreparedRemoveAuthority extends PreparedBase {
 
 export interface PreparedTransferOwnership extends PreparedBase {
   newOwnerAuthorityPda: PublicKey;
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -144,6 +151,7 @@ export interface PreparedTransferOwnership extends PreparedBase {
 
 export interface PreparedCreateSession extends PreparedBase {
   sessionPda: PublicKey;
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -158,6 +166,7 @@ export interface PreparedCreateSession extends PreparedBase {
 }
 
 export interface PreparedRevokeSession extends PreparedBase {
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -169,9 +178,21 @@ export interface PreparedRevokeSession extends PreparedBase {
   };
 }
 
+/** One hit from `findWalletsByAuthority` — enough to bootstrap all downstream calls. */
+export interface WalletAuthorityRecord {
+  walletPda: PublicKey;
+  authorityPda: PublicKey;
+  vaultPda: PublicKey;
+  /** Role enum: 0=Owner, 1=Admin, 2=Spender */
+  role: number;
+  /** Authority type enum: 0=Ed25519, 1=Secp256r1 */
+  authorityType: number;
+}
+
 export interface PreparedAuthorize extends PreparedBase {
   deferredExecPda: PublicKey;
   counter: number;
+  /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
     payer: PublicKey;
@@ -199,6 +220,19 @@ const SYSVAR_IX_INDEX_REVOKE_SESSION = 5;
 
 // ─── Internal helpers ─────────────────────────────────────────────────
 
+/** Throws if a Uint8Array isn't exactly the expected length. */
+function assertByteLength(
+  value: Uint8Array,
+  expected: number,
+  name: string,
+): void {
+  if (value.length !== expected) {
+    throw new Error(
+      `${name} must be exactly ${expected} bytes, got ${value.length}`,
+    );
+  }
+}
+
 /** Resolves a CreateWalletOwner to the low-level fields needed by IX builders */
 function resolveOwnerFields(owner: CreateWalletOwner): {
   authType: number;
@@ -212,6 +246,8 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
       credentialOrPubkey: owner.publicKey.toBytes(),
     };
   }
+  assertByteLength(owner.credentialIdHash, 32, 'credentialIdHash');
+  assertByteLength(owner.compressedPubkey, 33, 'compressedPubkey');
   return {
     authType: AUTH_TYPE_SECP256R1,
     credentialOrPubkey: owner.credentialIdHash,
@@ -220,11 +256,40 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
   };
 }
 
-/** Gets the credential bytes (PDA seed) from a CreateWalletOwner */
-function ownerCredentialBytes(owner: CreateWalletOwner): Uint8Array {
-  return owner.type === 'ed25519'
-    ? owner.publicKey.toBytes()
-    : owner.credentialIdHash;
+/**
+ * Shared pipeline for prepareExecute + prepareAuthorize:
+ *  1. runs buildCompactLayout over fixed keys + user instructions
+ *  2. assembles the full AccountMeta[] with per-fixed-account flags
+ *  3. computes the accounts hash that gets folded into the signed payload
+ *
+ * Call sites just need to declare the fixed accounts (with their signer/
+ * writable flags) and pass the user instructions.
+ */
+function buildCompactLayoutAndHash(
+  fixedAccounts: AccountMeta[],
+  userInstructions: TransactionInstruction[],
+): {
+  compactInstructions: CompactInstruction[];
+  remainingAccounts: AccountMeta[];
+  allAccountMetas: AccountMeta[];
+  accountsHash: Uint8Array;
+} {
+  const fixedKeys = fixedAccounts.map((a) => a.pubkey);
+  const { compactInstructions, remainingAccounts } = buildCompactLayout(
+    fixedKeys,
+    userInstructions,
+  );
+  const allAccountMetas: AccountMeta[] = [
+    ...fixedAccounts,
+    ...remainingAccounts,
+  ];
+  const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
+  return {
+    compactInstructions,
+    remainingAccounts,
+    allAccountMetas,
+    accountsHash,
+  };
 }
 
 export class LazorKitClient {
@@ -325,9 +390,64 @@ export class LazorKitClient {
 
     const [protocolConfigPda] = this.findProtocolConfig();
     const [feeRecordPda] = this.findFeeRecord(payer);
-    const shardId = Math.floor(Math.random() * config.numShards);
+    // CSPRNG to avoid predictable shard selection. Not a direct exploit vector
+    // (fees still land in a valid shard), but violates "no Math.random in
+    // crypto-adjacent code" hygiene.
+    const randBuf = new Uint8Array(4);
+    randomFillSync(randBuf);
+    const randU32 = (randBuf[0] | (randBuf[1] << 8) | (randBuf[2] << 16) | (randBuf[3] << 24)) >>> 0;
+    const shardId = randU32 % config.numShards;
     const [treasuryShardPda] = this.findTreasuryShard(shardId);
     return { protocolConfigPda, feeRecordPda, treasuryShardPda };
+  }
+
+  /**
+   * Like {@link resolveProtocolFee} but additionally returns a `registerIx`
+   * to prepend when the payer's FeeRecord PDA does not yet exist on-chain.
+   * Fee-eligible tx builders use this so apps don't need to manually call
+   * `registerPayer()` before their first fee-paying transaction.
+   *
+   * One extra `getAccountInfo` per first-time tx; subsequent txs short-circuit
+   * via an in-memory cache of payers we've already seen registered.
+   */
+  private _registeredPayers = new Set<string>();
+
+  async resolveProtocolFeeWithRegister(payer: PublicKey): Promise<
+    | {
+        accounts: {
+          protocolConfigPda: PublicKey;
+          feeRecordPda: PublicKey;
+          treasuryShardPda: PublicKey;
+        };
+        registerIx?: TransactionInstruction;
+      }
+    | undefined
+  > {
+    const accounts = await this.resolveProtocolFee(payer);
+    if (!accounts) return undefined;
+
+    const key = payer.toBase58();
+    if (this._registeredPayers.has(key)) {
+      return { accounts };
+    }
+
+    const info = await this.connection.getAccountInfo(accounts.feeRecordPda);
+    const exists =
+      !!info && info.data.length > 0 && info.data[0] === 6; // FeeRecord discriminator
+    if (exists) {
+      this._registeredPayers.add(key);
+      return { accounts };
+    }
+
+    const registerIx = createRegisterPayerIx({
+      payer,
+      feeRecordPda: accounts.feeRecordPda,
+      programId: this.programId,
+    });
+    // Mark optimistically — the same tx will create it. If it fails we'll
+    // re-detect on the next call (set is in-memory only).
+    this._registeredPayers.add(key);
+    return { accounts, registerIx };
   }
 
   // ─── Account readers ─────────────────────────────────────────────
@@ -339,20 +459,78 @@ export class LazorKitClient {
   // ─── Secp256r1 prepare/finalize helpers ─────────────────────────────
 
   private async resolveSecp256r1(walletPda: PublicKey, p: Secp256r1Params) {
+    assertByteLength(p.credentialIdHash, 32, 'credentialIdHash');
+    if (p.publicKeyBytes) {
+      assertByteLength(p.publicKeyBytes, 33, 'publicKeyBytes');
+    }
     const authorityPda =
       p.authorityPda ?? this.findAuthority(walletPda, p.credentialIdHash)[0];
-    const publicKeyBytes =
-      p.publicKeyBytes ?? (await readAuthorityPubkey(this.connection, authorityPda));
-    const slot = p.slotOverride ?? BigInt(await this.connection.getSlot());
-    const counter = (await this.readCounter(authorityPda)) + 1;
+
+    // Fire independent RPC reads in parallel. Overrides short-circuit to
+    // `Promise.resolve` so callers that pre-fetch everything make zero network calls.
+    const [publicKeyBytes, slot, counter] = await Promise.all([
+      p.publicKeyBytes
+        ? Promise.resolve(p.publicKeyBytes)
+        : readAuthorityPubkey(this.connection, authorityPda),
+      p.slotOverride != null
+        ? Promise.resolve(p.slotOverride)
+        : this.connection.getSlot().then((s) => BigInt(s)),
+      this.readCounter(authorityPda).then((c) => c + 1),
+    ]);
+
     return { authorityPda, publicKeyBytes, slot, counter };
   }
 
-  private buildSecp256r1Auth(
-    signing: PreparedSecp256r1,
-    response: WebAuthnResponse,
-  ) {
-    return finalizeSecp256r1(signing, response);
+  /**
+   * Flatten a Secp256r1SignerConfig into the raw Secp256r1Params that the
+   * prepare* methods take. Strips the Signer callback — prepare* doesn't
+   * sign, it only derives the challenge.
+   */
+  private extractSecp256r1Params(s: Secp256r1SignerConfig): Secp256r1Params {
+    return {
+      credentialIdHash: s.signer.credentialIdHash,
+      publicKeyBytes: s.signer.publicKeyBytes,
+      authorityPda: s.authorityPda,
+      slotOverride: s.slotOverride,
+    };
+  }
+
+  /**
+   * Derive the Ed25519 admin's authority PDA, honoring the pre-computed
+   * override if the caller supplied one (otherwise a fresh findAuthority).
+   */
+  private resolveEd25519AuthorityPda(
+    s: { publicKey: PublicKey; authorityPda?: PublicKey },
+    walletPda: PublicKey,
+  ): PublicKey {
+    return s.authorityPda ?? this.findAuthority(walletPda, s.publicKey.toBytes())[0];
+  }
+
+  /**
+   * Thin wrapper around `prepareSecp256r1` that injects this client's
+   * programId — every prepare method passes the same `payer` + `programId`
+   * + (1-byte) discriminator, so threading those through a helper keeps
+   * the per-op site focused on the signedPayload.
+   */
+  private buildPasskeySigning(args: {
+    discriminator: number;
+    sysvarIxIndex: number;
+    signedPayload: Uint8Array;
+    slot: bigint;
+    counter: number;
+    payer: PublicKey;
+    publicKeyBytes: Uint8Array;
+  }): PreparedSecp256r1 {
+    return prepareSecp256r1({
+      discriminator: new Uint8Array([args.discriminator]),
+      signedPayload: args.signedPayload,
+      sysvarIxIndex: args.sysvarIxIndex,
+      slot: args.slot,
+      counter: args.counter,
+      payer: args.payer,
+      programId: this.programId,
+      publicKeyBytes: args.publicKeyBytes,
+    });
   }
 
   // ── prepareExecute / finalizeExecute ──
@@ -364,51 +542,36 @@ export class LazorKitClient {
     instructions: TransactionInstruction[];
   }): Promise<PreparedExecute> {
     const [vaultPda] = this.findVault(params.walletPda);
-    const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
-      params.walletPda,
-      params.secp256r1,
-    );
-    const protocolFee = await this.resolveProtocolFee(params.payer);
+    // resolveSecp256r1 and protocol-fee resolution are fully independent — run them in parallel.
+    const [resolved, fee] = await Promise.all([
+      this.resolveSecp256r1(params.walletPda, params.secp256r1),
+      this.resolveProtocolFeeWithRegister(params.payer),
+    ]);
+    const { authorityPda, publicKeyBytes, slot, counter } = resolved;
+    const protocolFee = fee?.accounts;
+    const registerIx = fee?.registerIx;
 
-    const fixedAccounts = [
-      params.payer,
-      params.walletPda,
-      authorityPda,
-      vaultPda,
-      SYSVAR_INSTRUCTIONS_PUBKEY,
-    ];
-    const { compactInstructions, remainingAccounts } = buildCompactLayout(
-      fixedAccounts,
-      params.instructions,
-    );
+    const { compactInstructions, remainingAccounts, accountsHash } =
+      buildCompactLayoutAndHash(
+        [
+          { pubkey: params.payer, isSigner: true, isWritable: false },
+          { pubkey: params.walletPda, isSigner: false, isWritable: false },
+          { pubkey: authorityPda, isSigner: false, isWritable: true },
+          { pubkey: vaultPda, isSigner: false, isWritable: true },
+          { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+        ],
+        params.instructions,
+      );
     const packed = packCompactInstructions(compactInstructions);
+    const signedPayload = concatBytes([packed, accountsHash]);
 
-    const allAccountMetas: AccountMeta[] = [
-      { pubkey: params.payer, isSigner: true, isWritable: false },
-      { pubkey: params.walletPda, isSigner: false, isWritable: false },
-      { pubkey: authorityPda, isSigner: false, isWritable: true },
-      { pubkey: vaultPda, isSigner: false, isWritable: true },
-      {
-        pubkey: SYSVAR_INSTRUCTIONS_PUBKEY,
-        isSigner: false,
-        isWritable: false,
-      },
-      ...remainingAccounts,
-    ];
-    const accountsHash = computeAccountsHash(
-      allAccountMetas,
-      compactInstructions,
-    );
-    const signedPayload = concatParts([packed, accountsHash]);
-
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_EXECUTE]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_EXECUTE,
       sysvarIxIndex: SYSVAR_IX_INDEX_EXECUTE,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -423,6 +586,7 @@ export class LazorKitClient {
         packed,
         remainingAccounts,
         protocolFee,
+        registerIx,
         programId: this.programId,
       },
     };
@@ -433,7 +597,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -448,11 +612,21 @@ export class LazorKitClient {
       protocolFee: i.protocolFee,
       programId: i.programId,
     });
-    return { instructions: [precompileIx, ix] };
+    const head = i.registerIx ? [i.registerIx, precompileIx] : [precompileIx];
+    return { instructions: [...head, ix] };
   }
 
   // ── prepareAddAuthority / finalizeAddAuthority ──
 
+  /**
+   * Phase 1 of adding a new authority under a passkey admin. Computes the
+   * WebAuthn challenge that must be passed to `navigator.credentials.get()`.
+   * After the authenticator signs, call `finalizeAddAuthority()` to build
+   * the transaction instructions.
+   *
+   * Returns `{ challenge, _internal }`. Treat `_internal` as opaque state —
+   * it carries the signing context through to the finalize step.
+   */
   async prepareAddAuthority(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -482,16 +656,15 @@ export class LazorKitClient {
       secp256r1Pubkey,
       rpId,
     );
-    const signedPayload = concatParts([dataPayload, params.payer.toBytes()]);
+    const signedPayload = concatBytes([dataPayload, params.payer.toBytes()]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_ADD_AUTHORITY]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_ADD_AUTHORITY,
       sysvarIxIndex: SYSVAR_IX_INDEX_ADD_AUTHORITY,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -519,7 +692,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[]; newAuthorityPda: PublicKey } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -544,6 +717,12 @@ export class LazorKitClient {
 
   // ── prepareRemoveAuthority / finalizeRemoveAuthority ──
 
+  /**
+   * Phase 1 of removing an authority under a passkey admin. Computes the
+   * WebAuthn challenge; finalize with the authenticator response to produce
+   * the transaction instructions. The target authority's PDA is closed and
+   * its rent refunded to `refundDestination` on finalize+send.
+   */
   async prepareRemoveAuthority(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -557,19 +736,18 @@ export class LazorKitClient {
       params.secp256r1,
     );
 
-    const signedPayload = concatParts([
+    const signedPayload = concatBytes([
       params.targetAuthorityPda.toBytes(),
       refundDest.toBytes(),
     ]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_REMOVE_AUTHORITY]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_REMOVE_AUTHORITY,
       sysvarIxIndex: SYSVAR_IX_INDEX_REMOVE_AUTHORITY,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -592,7 +770,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -639,20 +817,19 @@ export class LazorKitClient {
       secp256r1Pubkey,
       rpId,
     );
-    const signedPayload = concatParts([
+    const signedPayload = concatBytes([
       dataPayload,
       params.payer.toBytes(),
       refundDest.toBytes(),
     ]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_TRANSFER_OWNERSHIP]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_TRANSFER_OWNERSHIP,
       sysvarIxIndex: SYSVAR_IX_INDEX_TRANSFER_OWNERSHIP,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -683,7 +860,7 @@ export class LazorKitClient {
     newOwnerAuthorityPda: PublicKey;
   } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -708,6 +885,12 @@ export class LazorKitClient {
 
   // ── prepareCreateSession / finalizeCreateSession ──
 
+  /**
+   * Phase 1 of creating a session under a passkey admin. Computes the
+   * WebAuthn challenge; after the authenticator signs, call
+   * `finalizeCreateSession()` to build the transaction. The session PDA
+   * is created and funded by `payer` on finalize+send.
+   */
   async prepareCreateSession(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -732,16 +915,15 @@ export class LazorKitClient {
       params.expiresAt,
       actionsBuffer,
     );
-    const signedPayload = concatParts([dataPayload, params.payer.toBytes()]);
+    const signedPayload = concatBytes([dataPayload, params.payer.toBytes()]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_CREATE_SESSION]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_CREATE_SESSION,
       sysvarIxIndex: SYSVAR_IX_INDEX_CREATE_SESSION,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -767,7 +949,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[]; sessionPda: PublicKey } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -787,6 +969,12 @@ export class LazorKitClient {
 
   // ── prepareRevokeSession / finalizeRevokeSession ──
 
+  /**
+   * Phase 1 of revoking a session under a passkey admin. Computes the
+   * WebAuthn challenge; finalize with the authenticator response. The
+   * session PDA is closed and rent refunded to `refundDestination` on
+   * finalize+send.
+   */
   async prepareRevokeSession(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -800,19 +988,18 @@ export class LazorKitClient {
       params.secp256r1,
     );
 
-    const signedPayload = concatParts([
+    const signedPayload = concatBytes([
       params.sessionPda.toBytes(),
       refundDest.toBytes(),
     ]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_REVOKE_SESSION]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_REVOKE_SESSION,
       sysvarIxIndex: SYSVAR_IX_INDEX_REVOKE_SESSION,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -835,7 +1022,7 @@ export class LazorKitClient {
     response: WebAuthnResponse,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -872,48 +1059,36 @@ export class LazorKitClient {
       counter,
     );
 
-    const tx2FixedAccounts = [
-      params.payer,
-      params.walletPda,
-      vaultPda,
-      deferredExecPda,
-      params.payer,
-    ];
-    const { compactInstructions, remainingAccounts } = buildCompactLayout(
-      tx2FixedAccounts,
-      params.instructions,
-    );
-
+    // The compact layout reflects TX2 (ExecuteDeferred) account order, because
+    // that's the set of accounts the on-chain verifier will hash when replaying.
+    const { compactInstructions, remainingAccounts, accountsHash } =
+      buildCompactLayoutAndHash(
+        [
+          { pubkey: params.payer, isSigner: true, isWritable: true },
+          { pubkey: params.walletPda, isSigner: false, isWritable: true },
+          { pubkey: vaultPda, isSigner: false, isWritable: true },
+          { pubkey: deferredExecPda, isSigner: false, isWritable: true },
+          { pubkey: params.payer, isSigner: false, isWritable: true },
+        ],
+        params.instructions,
+      );
     const instructionsHash = computeInstructionsHash(compactInstructions);
-    const tx2AccountMetas: AccountMeta[] = [
-      { pubkey: params.payer, isSigner: true, isWritable: true },
-      { pubkey: params.walletPda, isSigner: false, isWritable: true },
-      { pubkey: vaultPda, isSigner: false, isWritable: true },
-      { pubkey: deferredExecPda, isSigner: false, isWritable: true },
-      { pubkey: params.payer, isSigner: false, isWritable: true },
-      ...remainingAccounts,
-    ];
-    const accountsHash = computeAccountsHash(
-      tx2AccountMetas,
-      compactInstructions,
-    );
     const expiryOffsetBuf = new Uint8Array(2);
     expiryOffsetBuf[0] = expiryOffset & 0xff;
     expiryOffsetBuf[1] = (expiryOffset >> 8) & 0xff;
-    const signedPayload = concatParts([
+    const signedPayload = concatBytes([
       instructionsHash,
       accountsHash,
       expiryOffsetBuf,
     ]);
 
-    const signing = prepareSecp256r1({
-      discriminator: new Uint8Array([DISC_AUTHORIZE]),
-      signedPayload,
+    const signing = this.buildPasskeySigning({
+      discriminator: DISC_AUTHORIZE,
       sysvarIxIndex: SYSVAR_IX_INDEX_AUTHORIZE,
+      signedPayload,
       slot,
       counter,
       payer: params.payer,
-      programId: this.programId,
       publicKeyBytes,
     });
 
@@ -947,7 +1122,7 @@ export class LazorKitClient {
     deferredPayload: DeferredPayload;
   } {
     const i = prepared._internal;
-    const { authPayload, precompileIx } = this.buildSecp256r1Auth(
+    const { authPayload, precompileIx } = finalizeSecp256r1(
       i.signing,
       response,
     );
@@ -997,18 +1172,8 @@ export class LazorKitClient {
   async findWalletsByAuthority(
     credential: Uint8Array,
     authorityType: 'ed25519' | 'secp256r1' = 'secp256r1',
-  ): Promise<
-    Array<{
-      walletPda: PublicKey;
-      authorityPda: PublicKey;
-      vaultPda: PublicKey;
-      role: number;
-      authorityType: number;
-    }>
-  > {
-    if (credential.length !== 32) {
-      throw new Error('credential must be 32 bytes');
-    }
+  ): Promise<WalletAuthorityRecord[]> {
+    assertByteLength(credential, 32, 'credential');
 
     const typeValue =
       authorityType === 'ed25519' ? AUTH_TYPE_ED25519 : AUTH_TYPE_SECP256R1;
@@ -1091,6 +1256,7 @@ export class LazorKitClient {
     vaultPda: PublicKey;
     authorityPda: PublicKey;
   }> {
+    assertByteLength(params.userSeed, 32, 'userSeed');
     const [walletPda] = this.findWallet(params.userSeed);
     const [vaultPda] = this.findVault(walletPda);
     const { authType, credentialOrPubkey, secp256r1Pubkey, rpId } =
@@ -1100,7 +1266,7 @@ export class LazorKitClient {
       credentialOrPubkey,
     );
 
-    const protocolFee = await this.resolveProtocolFee(params.payer);
+    const fee = await this.resolveProtocolFeeWithRegister(params.payer);
 
     const ix = createCreateWalletIx({
       payer: params.payer,
@@ -1113,10 +1279,11 @@ export class LazorKitClient {
       credentialOrPubkey,
       secp256r1Pubkey,
       rpId,
-      protocolFee,
+      protocolFee: fee?.accounts,
       programId: this.programId,
     });
-    return { instructions: [ix], walletPda, vaultPda, authorityPda };
+    const instructions = fee?.registerIx ? [fee.registerIx, ix] : [ix];
+    return { instructions, walletPda, vaultPda, authorityPda };
   }
 
   // ─── AddAuthority (unified) ─────────────────────────────────────
@@ -1172,9 +1339,7 @@ export class LazorKitClient {
       const ix = createAddAuthorityIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        adminAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         newAuthorityPda,
         newType,
         newRole: params.role,
@@ -1191,22 +1356,12 @@ export class LazorKitClient {
     const prepared = await this.prepareAddAuthority({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       newAuthority: params.newAuthority,
       role: params.role,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeAddAuthority(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
-    });
+    return this.finalizeAddAuthority(prepared, response);
   }
 
   // ─── RemoveAuthority (unified) ──────────────────────────────────
@@ -1225,9 +1380,7 @@ export class LazorKitClient {
       const ix = createRemoveAuthorityIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        adminAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         targetAuthorityPda: params.targetAuthorityPda,
         refundDestination: refundDest,
         authorizerSigner: s.publicKey,
@@ -1240,22 +1393,12 @@ export class LazorKitClient {
     const prepared = await this.prepareRemoveAuthority({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       targetAuthorityPda: params.targetAuthorityPda,
       refundDestination: params.refundDestination,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeRemoveAuthority(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
-    });
+    return this.finalizeRemoveAuthority(prepared, response);
   }
 
   // ─── TransferOwnership (unified) ────────────────────────────────
@@ -1301,9 +1444,7 @@ export class LazorKitClient {
       const ix = createTransferOwnershipIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        currentOwnerAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        currentOwnerAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         newOwnerAuthorityPda,
         refundDestination: refundDest,
         newType,
@@ -1320,22 +1461,12 @@ export class LazorKitClient {
     const prepared = await this.prepareTransferOwnership({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       newOwner: params.newOwner,
       refundDestination: params.refundDestination,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeTransferOwnership(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
-    });
+    return this.finalizeTransferOwnership(prepared, response);
   }
 
   // ─── CreateSession (unified) ────────────────────────────────────
@@ -1378,9 +1509,7 @@ export class LazorKitClient {
       const ix = createCreateSessionIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        adminAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         sessionPda,
         sessionKey: sessionKeyBytes,
         expiresAt: params.expiresAt,
@@ -1395,23 +1524,13 @@ export class LazorKitClient {
     const prepared = await this.prepareCreateSession({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       sessionKey: params.sessionKey,
       expiresAt: params.expiresAt,
       actions: params.actions,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeCreateSession(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
-    });
+    return this.finalizeCreateSession(prepared, response);
   }
 
   // ─── Execute (unified, accepts standard TransactionInstructions) ─
@@ -1445,13 +1564,13 @@ export class LazorKitClient {
   }): Promise<{ instructions: TransactionInstruction[] }> {
     const [vaultPda] = this.findVault(params.walletPda);
     const s = params.signer;
-    const protocolFee = await this.resolveProtocolFee(params.payer);
+    const fee = await this.resolveProtocolFeeWithRegister(params.payer);
+    const protocolFee = fee?.accounts;
+    const head: TransactionInstruction[] = fee?.registerIx ? [fee.registerIx] : [];
 
     switch (s.type) {
       case 'ed25519': {
-        const authorityPda =
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0];
+        const authorityPda = this.resolveEd25519AuthorityPda(s, params.walletPda);
         // Ed25519: signer at index 4 (program expects it there)
         const fixedAccounts = [
           params.payer,
@@ -1476,29 +1595,19 @@ export class LazorKitClient {
           protocolFee,
           programId: this.programId,
         });
-        return { instructions: [ix] };
+        return { instructions: [...head, ix] };
       }
 
       case 'secp256r1': {
-        // Delegate to prepare/finalize
+        // Delegate to prepare/finalize (which handles its own auto-register)
         const prepared = await this.prepareExecute({
           payer: params.payer,
           walletPda: params.walletPda,
-          secp256r1: {
-            credentialIdHash: s.signer.credentialIdHash,
-            publicKeyBytes: s.signer.publicKeyBytes,
-            authorityPda: s.authorityPda,
-            slotOverride: s.slotOverride,
-          },
+          secp256r1: this.extractSecp256r1Params(s),
           instructions: params.instructions,
         });
         const response = await s.signer.sign(prepared.challenge);
-        return this.finalizeExecute(prepared, {
-          signature: response.signature,
-          authenticatorData: response.authenticatorData,
-          clientDataJsonHash: response.clientDataJsonHash,
-          clientDataJson: response.clientDataJson!,
-        });
+        return this.finalizeExecute(prepared, response);
       }
 
       case 'session': {
@@ -1534,7 +1643,7 @@ export class LazorKitClient {
           protocolFee,
           programId: this.programId,
         });
-        return { instructions: [ix] };
+        return { instructions: [...head, ix] };
       }
     }
   }
@@ -1624,7 +1733,7 @@ export class LazorKitClient {
       signature: response.signature,
       authenticatorData: response.authenticatorData,
       clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
+      clientDataJson: response.clientDataJson,
     });
   }
 
@@ -1643,7 +1752,7 @@ export class LazorKitClient {
     const packed = packCompactInstructions(
       params.deferredPayload.compactInstructions,
     );
-    const protocolFee = await this.resolveProtocolFee(params.payer);
+    const fee = await this.resolveProtocolFeeWithRegister(params.payer);
     const ix = createExecuteDeferredIx({
       payer: params.payer,
       walletPda: params.deferredPayload.walletPda,
@@ -1652,10 +1761,10 @@ export class LazorKitClient {
       refundDestination: refundDest,
       packedInstructions: packed,
       remainingAccounts: params.deferredPayload.remainingAccounts,
-      protocolFee,
+      protocolFee: fee?.accounts,
       programId: this.programId,
     });
-    return { instructions: [ix] };
+    return { instructions: fee?.registerIx ? [fee.registerIx, ix] : [ix] };
   }
 
   // ─── ReclaimDeferred ────────────────────────────────────────────
@@ -1704,9 +1813,7 @@ export class LazorKitClient {
       const ix = createRevokeSessionIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        adminAuthorityPda:
-          s.authorityPda ??
-          this.findAuthority(params.walletPda, s.publicKey.toBytes())[0],
+        adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
         sessionPda: params.sessionPda,
         refundDestination: refundDest,
         authorizerSigner: s.publicKey,
@@ -1719,22 +1826,12 @@ export class LazorKitClient {
     const prepared = await this.prepareRevokeSession({
       payer: params.payer,
       walletPda: params.walletPda,
-      secp256r1: {
-        credentialIdHash: s.signer.credentialIdHash,
-        publicKeyBytes: s.signer.publicKeyBytes,
-        authorityPda: s.authorityPda,
-        slotOverride: s.slotOverride,
-      },
+      secp256r1: this.extractSecp256r1Params(s),
       sessionPda: params.sessionPda,
       refundDestination: params.refundDestination,
     });
     const response = await s.signer.sign(prepared.challenge);
-    return this.finalizeRevokeSession(prepared, {
-      signature: response.signature,
-      authenticatorData: response.authenticatorData,
-      clientDataJsonHash: response.clientDataJsonHash,
-      clientDataJson: response.clientDataJson!,
-    });
+    return this.finalizeRevokeSession(prepared, response);
   }
 
   // ─── Protocol Fee Management ──────────────────────────────────────
@@ -1802,20 +1899,19 @@ export class LazorKitClient {
     return { instructions: [ix], treasuryShardPda };
   }
 
-  /** Register a payer for fee tracking (admin-gated) */
+  /**
+   * Register a payer for fee-stats tracking. Permissionless: the payer
+   * registers themselves (no admin signature required). Idempotent at the
+   * SDK level — the fee-eligible builders auto-prepend this only when the
+   * FeeRecord doesn't yet exist, so most apps never need to call it directly.
+   */
   registerPayer(params: {
     payer: PublicKey;
-    admin: PublicKey;
-    targetPayer: PublicKey;
   }): { instructions: TransactionInstruction[]; feeRecordPda: PublicKey } {
-    const [protocolConfigPda] = this.findProtocolConfig();
-    const [feeRecordPda] = this.findFeeRecord(params.targetPayer);
+    const [feeRecordPda] = this.findFeeRecord(params.payer);
     const ix = createRegisterPayerIx({
       payer: params.payer,
-      protocolConfigPda,
-      admin: params.admin,
       feeRecordPda,
-      targetPayer: params.targetPayer,
       programId: this.programId,
     });
     return { instructions: [ix], feeRecordPda };

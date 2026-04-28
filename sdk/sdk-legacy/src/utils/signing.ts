@@ -6,6 +6,7 @@ import {
   type Secp256r1Signer,
 } from './secp256r1';
 import { AUTH_TYPE_SECP256R1 } from './instructions';
+import { concatBytes } from './bytes';
 
 // ─── Two-phase Secp256r1 signing flow ───────────────────────────────
 //
@@ -109,7 +110,7 @@ export function finalizeSecp256r1(
     clientDataJson: response.clientDataJson,
   });
 
-  const precompileMessage = concatParts([
+  const precompileMessage = concatBytes([
     response.authenticatorData,
     response.clientDataJsonHash,
   ]);
@@ -184,7 +185,7 @@ export function buildDataPayloadForAdd(
       parts.push(new Uint8Array(rpIdBytes));
     }
   }
-  return concatParts(parts);
+  return concatBytes(parts);
 }
 
 /**
@@ -208,7 +209,7 @@ export function buildDataPayloadForTransfer(
       parts.push(new Uint8Array(rpIdBytes));
     }
   }
-  return concatParts(parts);
+  return concatBytes(parts);
 }
 
 /**
@@ -235,16 +236,8 @@ export function buildDataPayloadForSession(
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
-export function concatParts(parts: Uint8Array[]): Uint8Array {
-  const totalLen = parts.reduce((s, a) => s + a.length, 0);
-  const out = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const a of parts) {
-    out.set(a, offset);
-    offset += a.length;
-  }
-  return out;
-}
+/** @deprecated Use `concatBytes` from `./bytes` instead. Kept as alias for back-compat. */
+export const concatParts = concatBytes;
 
 /**
  * Builds the Secp256r1 precompile verify instruction.
@@ -255,6 +248,24 @@ export function buildSecp256r1PrecompileIx(
   message: Uint8Array,
   signature: Uint8Array,
 ): TransactionInstruction {
+  // Validate sizes before constructing the precompile header — the layout below
+  // is fixed-offset and silent bad-size bugs are hard to diagnose on-chain.
+  if (signature.length !== 64) {
+    throw new Error(
+      `Secp256r1 signature must be 64 bytes (raw r||s), got ${signature.length}`,
+    );
+  }
+  if (publicKey.length !== 33) {
+    throw new Error(
+      `Secp256r1 public key must be 33 bytes (compressed), got ${publicKey.length}`,
+    );
+  }
+  if (message.length > 0xffff) {
+    throw new Error(
+      `Precompile message length must fit in u16 (got ${message.length})`,
+    );
+  }
+
   const SECP256R1_PROGRAM_ID = new PublicKey('Secp256r1SigVerify1111111111111111111111111');
 
   const HEADER_SIZE = 16;

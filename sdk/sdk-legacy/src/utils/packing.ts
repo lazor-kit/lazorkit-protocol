@@ -1,5 +1,6 @@
 import { type AccountMeta } from '@solana/web3.js';
 import { createHash } from 'crypto';
+import { concatBytes } from './bytes';
 
 export interface CompactInstruction {
   programIdIndex: number;
@@ -65,13 +66,3 @@ export function computeInstructionsHash(
   return new Uint8Array(createHash('sha256').update(packed).digest());
 }
 
-function concatBytes(arrays: Uint8Array[]): Uint8Array {
-  const totalLen = arrays.reduce((s, a) => s + a.length, 0);
-  const out = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const a of arrays) {
-    out.set(a, offset);
-    offset += a.length;
-  }
-  return out;
-}
