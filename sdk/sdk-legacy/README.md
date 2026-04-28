@@ -23,9 +23,36 @@ import { Connection, Keypair, Transaction, sendAndConfirmTransaction, SystemProg
 import { LazorKitClient, ed25519 } from '@lazorkit/sdk-legacy';
 import * as crypto from 'crypto';
 
+// Cluster is inferred from the RPC endpoint:
+//   - URLs containing "mainnet" → mainnet program ID
+//   - URLs containing "devnet"  → devnet program ID
+//   - localhost / 127.0.0.1     → devnet program ID (local-validator convention)
+//   - anything else              → throws; pass an explicit programId
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
 const client = new LazorKitClient(connection);
+
+// Custom RPC providers without a recognisable hostname, forks, or local
+// deployments using a different keypair → pass the program ID explicitly:
+//
+// import { PROGRAM_ID_MAINNET, PROGRAM_ID_DEVNET } from '@lazorkit/sdk-legacy';
+// const client = new LazorKitClient(connection, PROGRAM_ID_MAINNET);
 ```
+
+### Cluster + program IDs
+
+LazorKit is deployed at two distinct, cluster-specific program IDs (the SBF
+binary embeds the ID via `declare_id!`, so a binary built for one cluster
+cannot serve the other):
+
+| Cluster | Program ID |
+|---|---|
+| mainnet-beta | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` |
+| devnet | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` |
+
+Both are exported as `PROGRAM_ADDRESS_MAINNET` / `PROGRAM_ID_MAINNET` and
+`PROGRAM_ADDRESS_DEVNET` / `PROGRAM_ID_DEVNET`. The `LazorKitClient`
+constructor auto-selects the right one based on the connection's RPC
+endpoint; pass an explicit `programId` argument to override.
 
 ### Create a wallet
 

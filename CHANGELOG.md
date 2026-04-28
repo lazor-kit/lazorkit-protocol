@@ -6,6 +6,88 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — dual-cluster program ID support (SDK 0.2.0)
+
+- **Program — Pattern D feature flags.** The on-chain SBF binary now
+  requires exactly one cluster feature at build time:
+  - `cargo build-sbf --features mainnet` → binary embeds the mainnet vanity ID
+    `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi`
+  - `cargo build-sbf --features devnet` → binary embeds the devnet ID
+    `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS`
+  - Building with neither, or both, produces a clear `compile_error!`. Prevents
+    accidental cross-cluster deploys (a binary built for one ID malfunctions if
+    deployed to the other slot — internal `crate::ID` checks fail). Implemented
+    via `#[cfg(...)]` on the `declare_id!` call in `assertions/src/lib.rs`.
+
+- **SDK — `LazorKitClient` auto-infers program ID from RPC.** The constructor
+  now accepts an optional `programId` argument and infers the right one from
+  the connection's RPC endpoint when omitted:
+  - `mainnet` in URL → `PROGRAM_ID_MAINNET`
+  - `devnet` in URL → `PROGRAM_ID_DEVNET`
+  - `localhost` / `127.0.0.1` → `PROGRAM_ID_DEVNET` (local-validator convention)
+  - anything else → throws with a clear error pointing at the explicit-override path
+- **SDK — both cluster constants exported.** `PROGRAM_ADDRESS_MAINNET`,
+  `PROGRAM_ADDRESS_DEVNET`, `PROGRAM_ID_MAINNET`, `PROGRAM_ID_DEVNET`.
+
+### Breaking — SDK 0.2.0
+
+- **`PROGRAM_ADDRESS` / `PROGRAM_ID` removed from public exports.** They were
+  cluster-ambiguous and would defeat Pattern D's "pick a cluster" intent.
+  Use `PROGRAM_ADDRESS_MAINNET` / `_DEVNET` and `PROGRAM_ID_MAINNET` / `_DEVNET`
+  instead. Partners on `^0.1.0` are unaffected — npm semver does not auto-pull
+  `0.2.0`.
+- **Low-level builders now require `programId` explicitly.** All instruction
+  builders (`createCreateWalletIx`, `createExecuteIx`, etc.), all PDA helpers
+  (`findWalletPda`, `findVaultPda`, etc.) and `buildSecp256r1Challenge` now
+  take `programId` as a required argument. This was previously a defaulted
+  parameter pointing at the devnet ID — defaults are unsafe in a multi-cluster
+  world. The high-level `LazorKitClient` continues to handle this implicitly
+  via `this.programId`; only direct callers of the low-level helpers need to
+  pass it.
+
+### Migration from SDK 0.1.x
+
+Most apps need no changes:
+
+```diff
+- import { Connection } from '@solana/web3.js';
+- import { LazorKitClient } from '@lazorkit/sdk-legacy';
+- const client = new LazorKitClient(new Connection('https://api.devnet.solana.com'));
++ // Same call — cluster is now auto-inferred from the RPC endpoint
++ const client = new LazorKitClient(new Connection('https://api.devnet.solana.com'));
+```
+
+If you were importing `PROGRAM_ID` directly:
+
+```diff
+- import { PROGRAM_ID } from '@lazorkit/sdk-legacy';
++ import { PROGRAM_ID_DEVNET } from '@lazorkit/sdk-legacy';   // or PROGRAM_ID_MAINNET
+```
+
+If you were calling low-level builders or PDA helpers, add the explicit
+`programId` argument:
+
+```diff
+- const [walletPda] = findWalletPda(userSeed);
++ const [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
+
+- createCreateWalletIx({ payer, walletPda, vaultPda, authorityPda, ... });
++ createCreateWalletIx({ payer, walletPda, vaultPda, authorityPda, ..., programId: PROGRAM_ID_DEVNET });
+```
+
+Partners not ready to migrate can stay on `^0.1.0` — devnet behaviour is
+preserved unchanged.
+
+### Operational
+
+- `program/Cargo.toml` now propagates `mainnet` / `devnet` features through
+  to `assertions`. The validator-start helper in `tests-sdk/package.json`
+  runs `cargo build-sbf --features devnet` automatically before launching.
+
+---
+
+## [0.1.0] — pre-mainnet hardening
+
 This section captures everything on `refactor/sdk-cleanup` that is not yet
 in `main` but is staged for the upcoming pre-mainnet release on
 `fix/audit-hardening`.
