@@ -35,7 +35,7 @@ import { SessionActionType, type SessionAction } from '../../sdk/sdk-legacy/src/
 const RPC_URL = process.env.RPC_URL || 'https://api.devnet.solana.com';
 const NUM_SHARDS = 16;
 const CREATION_FEE = 5000n; // lamports
-const EXECUTION_FEE = 2000n; // lamports
+const EXECUTION_FEE = 5000n; // lamports
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -125,18 +125,7 @@ async function main() {
     }
   }
 
-  step('3. Register Payer for Fee Tracking');
-  try {
-    const { instructions, feeRecordPda } = client.registerPayer({
-      payer: payer.publicKey,
-      admin: payer.publicKey,
-      targetPayer: payer.publicKey,
-    });
-    await send(connection, payer, instructions);
-    ok(`FeeRecord: ${feeRecordPda.toBase58()}`);
-  } catch (e: any) {
-    skipIfExists(e, 'FeeRecord');
-  }
+  step('3. (skipped) FeeRecord — SDK auto-prepends self-registration on first fee-paying tx');
 
   // ════════════════════════════════════════════════════════════════
   // PHASE 2: Smoke Test — Wallet Operations

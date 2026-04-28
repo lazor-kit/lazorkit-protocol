@@ -841,23 +841,7 @@
           "isMut": true,
           "isSigner": true,
           "docs": [
-            "Payer and rent contributor"
-          ]
-        },
-        {
-          "name": "protocolConfig",
-          "isMut": false,
-          "isSigner": false,
-          "docs": [
-            "ProtocolConfig PDA"
-          ]
-        },
-        {
-          "name": "admin",
-          "isMut": false,
-          "isSigner": true,
-          "docs": [
-            "Protocol admin"
+            "Payer and rent contributor; the FeeRecord is keyed by this pubkey"
           ]
         },
         {
@@ -865,7 +849,7 @@
           "isMut": true,
           "isSigner": false,
           "docs": [
-            "FeeRecord PDA"
+            "FeeRecord PDA derived from [\"fee_record\", payer]"
           ]
         },
         {
@@ -885,17 +869,7 @@
           ]
         }
       ],
-      "args": [
-        {
-          "name": "targetPayer",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          }
-        }
-      ],
+      "args": [],
       "discriminant": {
         "type": "u8",
         "value": 12
