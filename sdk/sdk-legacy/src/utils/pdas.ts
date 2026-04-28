@@ -1,9 +1,13 @@
 import { PublicKey } from '@solana/web3.js';
-import { PROGRAM_ID } from '../constants';
+
+// PDA derivation helpers. Every function takes the program ID explicitly —
+// there is no ambient default. Use the cluster-specific constants from
+// `../constants` (`PROGRAM_ID_MAINNET` / `PROGRAM_ID_DEVNET`), or pass
+// `LazorKitClient.programId` from a client instance.
 
 export function findWalletPda(
   userSeed: Uint8Array,
-  programId: PublicKey = PROGRAM_ID,
+  programId: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from('wallet'), userSeed],
@@ -13,7 +17,7 @@ export function findWalletPda(
 
 export function findVaultPda(
   walletPda: PublicKey,
-  programId: PublicKey = PROGRAM_ID,
+  programId: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from('vault'), walletPda.toBuffer()],
@@ -24,7 +28,7 @@ export function findVaultPda(
 export function findAuthorityPda(
   walletPda: PublicKey,
   credentialIdHash: Uint8Array,
-  programId: PublicKey = PROGRAM_ID,
+  programId: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from('authority'), walletPda.toBuffer(), credentialIdHash],
@@ -35,7 +39,7 @@ export function findAuthorityPda(
 export function findSessionPda(
   walletPda: PublicKey,
   sessionKey: Uint8Array,
-  programId: PublicKey = PROGRAM_ID,
+  programId: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from('session'), walletPda.toBuffer(), sessionKey],
@@ -44,7 +48,7 @@ export function findSessionPda(
 }
 
 export function findProtocolConfigPda(
-  programId: PublicKey = PROGRAM_ID,
+  programId: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from('protocol_config')],
@@ -54,7 +58,7 @@ export function findProtocolConfigPda(
 
 export function findFeeRecordPda(
   payerPubkey: PublicKey,
-  programId: PublicKey = PROGRAM_ID,
+  programId: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from('fee_record'), payerPubkey.toBuffer()],
@@ -64,7 +68,7 @@ export function findFeeRecordPda(
 
 export function findTreasuryShardPda(
   shardId: number,
-  programId: PublicKey = PROGRAM_ID,
+  programId: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from('treasury_shard'), Buffer.from([shardId])],
@@ -76,7 +80,7 @@ export function findDeferredExecPda(
   walletPda: PublicKey,
   authorityPda: PublicKey,
   counter: number,
-  programId: PublicKey = PROGRAM_ID,
+  programId: PublicKey,
 ): [PublicKey, number] {
   const counterBuf = Buffer.alloc(4);
   counterBuf.writeUInt32LE(counter);
