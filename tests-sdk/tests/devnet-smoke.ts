@@ -290,7 +290,6 @@ async function main() {
 
   // Secp256r1 owner adds Ed25519 admin
   let secpAdminKp: Keypair;
-  let secpAdminAuthPda: any;
   {
     secpAdminKp = Keypair.generate();
     const balBefore = await connection.getBalance(payer.publicKey);
@@ -302,11 +301,10 @@ async function main() {
       role: ROLE_ADMIN,
     });
     const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
-    const { instructions, newAuthorityPda } = client.finalizeAddAuthority(prepared, webauthnResponse);
+    const { instructions } = client.finalizeAddAuthority(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;
-    secpAdminAuthPda = newAuthorityPda;
     record('AddAuthority (Secp256r1 owner -> Ed25519 admin)', r);
   }
 
@@ -811,7 +809,7 @@ async function main() {
       },
     });
     const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
-    const { instructions, newOwnerAuthorityPda } = client.finalizeTransferOwnership(prepared, webauthnResponse);
+    const { instructions } = client.finalizeTransferOwnership(prepared, webauthnResponse);
     const r = await sendAndMeasure(connection, payer, instructions);
     const balAfter = await connection.getBalance(payer.publicKey);
     r.rentCost = balBefore - balAfter - 5000;

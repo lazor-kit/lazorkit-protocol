@@ -9,7 +9,6 @@ import {
 } from './common';
 import {
   LazorKitClient,
-  PROGRAM_ID,
   createWithdrawTreasuryIx,
   createUpdateProtocolIx,
 } from '../../sdk/sdk-legacy/src';

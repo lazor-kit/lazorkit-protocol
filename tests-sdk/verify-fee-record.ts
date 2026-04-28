@@ -6,7 +6,6 @@
 import {
   Connection,
   Keypair,
-  LAMPORTS_PER_SOL,
   Transaction,
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
