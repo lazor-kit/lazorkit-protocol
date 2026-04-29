@@ -10,7 +10,6 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   SYSVAR_RENT_PUBKEY,
 } from '@solana/web3.js';
-import { PROGRAM_ID } from '../constants';
 import { concatBytes } from './bytes';
 
 // ─── Discriminators ──────────────────────────────────────────────────
@@ -62,9 +61,9 @@ export function createCreateWalletIx(params: {
   rpId?: string;
   /** Optional protocol fee accounts (integrator opt-in) */
   protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const parts: Uint8Array[] = [
     new Uint8Array([DISC_CREATE_WALLET]),
     params.userSeed,
@@ -124,9 +123,9 @@ export function createAddAuthorityIx(params: {
   authPayload?: Uint8Array;
   /** For Ed25519 admin: the signer pubkey */
   authorizerSigner?: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const parts: Uint8Array[] = [
     new Uint8Array([DISC_ADD_AUTHORITY]),
     new Uint8Array([params.newType, params.newRole]),
@@ -182,9 +181,9 @@ export function createRemoveAuthorityIx(params: {
   refundDestination: PublicKey;
   authPayload?: Uint8Array;
   authorizerSigner?: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const parts: Uint8Array[] = [new Uint8Array([DISC_REMOVE_AUTHORITY])];
   if (params.authPayload) {
     parts.push(params.authPayload);
@@ -244,9 +243,9 @@ export function createTransferOwnershipIx(params: {
   rpId?: string;
   authPayload?: Uint8Array;
   authorizerSigner?: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const parts: Uint8Array[] = [
     new Uint8Array([DISC_TRANSFER_OWNERSHIP]),
     new Uint8Array([params.newType]),
@@ -306,9 +305,9 @@ export function createExecuteIx(params: {
   remainingAccounts?: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
   /** Optional protocol fee accounts (integrator opt-in) */
   protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const parts: Uint8Array[] = [
     new Uint8Array([DISC_EXECUTE]),
     params.packedInstructions,
@@ -365,9 +364,9 @@ export function createCreateSessionIx(params: {
   actionsBuffer?: Uint8Array;
   authPayload?: Uint8Array;
   authorizerSigner?: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const expiresAtBuf = Buffer.alloc(8);
   expiresAtBuf.writeBigInt64LE(params.expiresAt);
 
@@ -427,9 +426,9 @@ export function createAuthorizeIx(params: {
   accountsHash: Uint8Array;
   expiryOffset: number;
   authPayload: Uint8Array;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const expiryBuf = Buffer.alloc(2);
   expiryBuf.writeUInt16LE(params.expiryOffset);
 
@@ -472,9 +471,9 @@ export function createExecuteDeferredIx(params: {
   remainingAccounts?: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
   /** Optional protocol fee accounts (integrator opt-in) */
   protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const parts: Uint8Array[] = [
     new Uint8Array([DISC_EXECUTE_DEFERRED]),
     params.packedInstructions,
@@ -513,9 +512,9 @@ export function createReclaimDeferredIx(params: {
   payer: PublicKey;
   deferredExecPda: PublicKey;
   refundDestination: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
 
   return new TransactionInstruction({
     programId: pid,
@@ -542,9 +541,9 @@ export function createRevokeSessionIx(params: {
   refundDestination: PublicKey;
   authPayload?: Uint8Array;
   authorizerSigner?: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const parts: Uint8Array[] = [new Uint8Array([DISC_REVOKE_SESSION])];
   if (params.authPayload) {
     parts.push(params.authPayload);
@@ -584,9 +583,9 @@ export function createInitializeProtocolIx(params: {
   creationFee: bigint;
   executionFee: bigint;
   numShards: number;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const creationFeeBuf = Buffer.alloc(8);
   creationFeeBuf.writeBigUInt64LE(params.creationFee);
   const executionFeeBuf = Buffer.alloc(8);
@@ -625,9 +624,9 @@ export function createUpdateProtocolIx(params: {
   executionFee: bigint;
   enabled: boolean;
   newTreasury: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const creationFeeBuf = Buffer.alloc(8);
   creationFeeBuf.writeBigUInt64LE(params.creationFee);
   const executionFeeBuf = Buffer.alloc(8);
@@ -663,9 +662,9 @@ export function createUpdateProtocolIx(params: {
 export function createRegisterPayerIx(params: {
   payer: PublicKey;
   feeRecordPda: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
 
   return new TransactionInstruction({
     programId: pid,
@@ -689,9 +688,9 @@ export function createWithdrawTreasuryIx(params: {
   protocolConfigPda: PublicKey;
   treasuryShardPda: PublicKey;
   treasury: PublicKey;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
 
   return new TransactionInstruction({
     programId: pid,
@@ -717,9 +716,9 @@ export function createInitializeTreasuryShardIx(params: {
   admin: PublicKey;
   treasuryShardPda: PublicKey;
   shardId: number;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): TransactionInstruction {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
 
   return new TransactionInstruction({
     programId: pid,

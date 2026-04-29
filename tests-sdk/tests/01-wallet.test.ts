@@ -7,7 +7,7 @@ import {
   LazorKitClient,
   AUTH_TYPE_ED25519,
   AUTH_TYPE_SECP256R1,
-  PROGRAM_ID,
+  PROGRAM_ID_DEVNET,
 } from '../../sdk/sdk-legacy/src';
 import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
@@ -37,7 +37,7 @@ describe('CreateWallet', () => {
     // Verify wallet account exists
     const walletInfo = await ctx.connection.getAccountInfo(walletPda);
     expect(walletInfo).not.toBeNull();
-    expect(walletInfo!.owner.equals(PROGRAM_ID)).toBe(true);
+    expect(walletInfo!.owner.equals(PROGRAM_ID_DEVNET)).toBe(true);
 
     // Verify authority account
     const authority = await AuthorityAccount.fromAccountAddress(

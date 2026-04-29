@@ -6,7 +6,7 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js';
 import { randomFillSync } from 'crypto';
-import { PROGRAM_ID } from '../constants';
+import { PROGRAM_ID_DEVNET, PROGRAM_ID_MAINNET } from '../constants';
 import {
   findWalletPda,
   findVaultPda,
@@ -292,6 +292,39 @@ function buildCompactLayoutAndHash(
   };
 }
 
+/**
+ * Infer the LazorKit program ID from a Connection's RPC endpoint:
+ *
+ *   - URLs containing "mainnet" → mainnet program ID
+ *   - URLs containing "devnet"  → devnet program ID
+ *   - localhost / 127.0.0.1     → devnet program ID (local-validator convention)
+ *   - anything else              → throw, caller must pass `programId` explicitly
+ *
+ * The inference is intentionally narrow: covering Solana's canonical RPCs and
+ * common third-party providers (Helius, Triton, QuickNode all encode cluster
+ * in the hostname). For air-gapped clusters, forks, mainnet-forks served from
+ * an unlabelled RPC, or any unusual setup, callers must pass `programId`
+ * explicitly to avoid silently deriving wrong PDAs.
+ */
+function inferProgramIdFromRpc(connection: Connection): PublicKey {
+  const rpc = connection.rpcEndpoint.toLowerCase();
+  if (rpc.includes('mainnet')) return PROGRAM_ID_MAINNET;
+  if (rpc.includes('devnet')) return PROGRAM_ID_DEVNET;
+  if (
+    rpc.includes('localhost') ||
+    rpc.includes('127.0.0.1') ||
+    rpc.includes('0.0.0.0')
+  ) {
+    return PROGRAM_ID_DEVNET;
+  }
+  throw new Error(
+    `LazorKitClient: cannot infer program ID from RPC endpoint "${connection.rpcEndpoint}". ` +
+      `Pass an explicit programId, e.g. ` +
+      `\`new LazorKitClient(connection, PROGRAM_ID_MAINNET)\` or ` +
+      `\`new LazorKitClient(connection, PROGRAM_ID_DEVNET)\`.`,
+  );
+}
+
 export class LazorKitClient {
   /** Cached protocol config (fetched on first fee-eligible call) */
   private _protocolConfig:
@@ -299,10 +332,27 @@ export class LazorKitClient {
     | null
     | undefined;
 
-  constructor(
-    public readonly connection: Connection,
-    public readonly programId: PublicKey = PROGRAM_ID,
-  ) {}
+  readonly connection: Connection;
+  readonly programId: PublicKey;
+
+  /**
+   * Construct a client. The program ID is inferred from the connection's RPC
+   * endpoint (mainnet / devnet / localhost), or you can pass it explicitly
+   * for forks, custom RPC providers without recognisable hostnames, or
+   * tests against arbitrary deploy keypairs:
+   *
+   * ```ts
+   * // Auto-inferred from RPC URL — typical case
+   * const client = new LazorKitClient(new Connection(MAINNET_RPC));
+   *
+   * // Explicit (custom RPC, forks, local-validator with non-default keypair)
+   * const client = new LazorKitClient(connection, PROGRAM_ID_MAINNET);
+   * ```
+   */
+  constructor(connection: Connection, programId?: PublicKey) {
+    this.connection = connection;
+    this.programId = programId ?? inferProgramIdFromRpc(connection);
+  }
 
   // ─── PDA helpers ─────────────────────────────────────────────────
 

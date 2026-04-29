@@ -1,6 +1,5 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { createHash } from 'crypto';
-import { PROGRAM_ID } from '../constants';
 
 /**
  * Generates WebAuthn authenticator data for a given RP ID.
@@ -173,9 +172,9 @@ export function buildSecp256r1Challenge(params: {
   slot: bigint;
   payer: PublicKey;
   counter: number;
-  programId?: PublicKey;
+  programId: PublicKey;
 }): Uint8Array {
-  const pid = params.programId ?? PROGRAM_ID;
+  const pid = params.programId;
   const counterBuf = Buffer.alloc(4);
   counterBuf.writeUInt32LE(params.counter);
 

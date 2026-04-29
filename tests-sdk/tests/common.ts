@@ -9,11 +9,20 @@ import {
   type Signer,
 } from '@solana/web3.js';
 
-// Program ID imported from SDK (single source of truth for TypeScript).
-// SDK constants.ts is the canonical TS source; Rust declare_id! is the canonical Rust source.
-// Use ./scripts/sync-program-id.sh to keep them in sync.
-import { PROGRAM_ID } from '../../sdk/sdk-legacy/src/constants';
-export { PROGRAM_ID };
+// Tests run against `solana-test-validator` which loads the SBF built with
+// `--features devnet`, so the on-chain program ID is the devnet vanity.
+// Re-export under the legacy name so per-test files don't need to change.
+import {
+  LazorKitClient,
+  PROGRAM_ID_DEVNET,
+} from '../../sdk/sdk-legacy/src';
+export const PROGRAM_ID = PROGRAM_ID_DEVNET;
+export { PROGRAM_ID_DEVNET };
+
+/** Construct a client for the local validator (devnet program ID). */
+export function makeClient(connection: Connection): LazorKitClient {
+  return new LazorKitClient(connection);
+}
 
 export const RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
 

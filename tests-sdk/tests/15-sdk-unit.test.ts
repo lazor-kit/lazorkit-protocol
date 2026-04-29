@@ -16,14 +16,13 @@ import * as crypto from 'crypto';
 
 import {
   LazorKitClient,
+  PROGRAM_ID_DEVNET,
   buildAuthPayload,
   buildSecp256r1PrecompileIx,
   type WalletAuthorityRecord,
 } from '../../sdk/sdk-legacy/src';
 
-const DEVNET_PROGRAM_ID = new PublicKey(
-  '4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS',
-);
+const DEVNET_PROGRAM_ID = PROGRAM_ID_DEVNET;
 
 /**
  * A Connection that counts and rejects every RPC call. Lets us assert

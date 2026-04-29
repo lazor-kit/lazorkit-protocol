@@ -32,7 +32,7 @@ import {
   computeInstructionsHash,
   AUTH_TYPE_SECP256R1,
   DISC_AUTHORIZE,
-  PROGRAM_ID,
+  PROGRAM_ID_DEVNET,
 } from '../../sdk/sdk-legacy/src';
 
 describe('Deferred Execution', () => {
@@ -52,12 +52,9 @@ describe('Deferred Execution', () => {
       ownerKey = await generateMockSecp256r1Key();
       const userSeed = crypto.randomBytes(32);
 
-      [walletPda] = findWalletPda(userSeed);
-      [vaultPda] = findVaultPda(walletPda);
-      const [authPda, authBump] = findAuthorityPda(
-        walletPda,
-        ownerKey.credentialIdHash,
-      );
+      [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
+      [vaultPda] = findVaultPda(walletPda, PROGRAM_ID_DEVNET);
+      const [authPda, authBump] = findAuthorityPda(walletPda, ownerKey.credentialIdHash, PROGRAM_ID_DEVNET);
       ownerAuthorityPda = authPda;
 
       await sendTx(ctx, [
@@ -72,6 +69,8 @@ describe('Deferred Execution', () => {
           credentialOrPubkey: ownerKey.credentialIdHash,
           secp256r1Pubkey: ownerKey.publicKeyBytes,
           rpId: ownerKey.rpId,
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
 
@@ -134,7 +133,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 1,
         payer: ctx.payer.publicKey,
-        programId: PROGRAM_ID,
+        programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
       const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
@@ -144,11 +143,7 @@ describe('Deferred Execution', () => {
       );
 
       // Derive deferred PDA (counter = 1)
-      const [deferredExecPda] = findDeferredExecPda(
-        walletPda,
-        ownerAuthorityPda,
-        1,
-      );
+      const [deferredExecPda] = findDeferredExecPda(walletPda, ownerAuthorityPda, 1, PROGRAM_ID_DEVNET);
 
       // === TX1: Authorize ===
       const authorizeIx = createAuthorizeIx({
@@ -160,6 +155,8 @@ describe('Deferred Execution', () => {
         accountsHash,
         expiryOffset: 300,
         authPayload,
+        programId: PROGRAM_ID_DEVNET,
+
       });
 
       await sendTx(ctx, [precompileIx, authorizeIx]);
@@ -188,6 +185,8 @@ describe('Deferred Execution', () => {
           },
           { pubkey: recipient, isSigner: false, isWritable: true },
         ],
+        programId: PROGRAM_ID_DEVNET,
+
       });
 
       const balanceBefore = await ctx.connection.getBalance(recipient);
@@ -267,7 +266,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 2,
         payer: ctx.payer.publicKey,
-        programId: PROGRAM_ID,
+        programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
       const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
@@ -276,11 +275,7 @@ describe('Deferred Execution', () => {
         response,
       );
 
-      const [deferredExecPda] = findDeferredExecPda(
-        walletPda,
-        ownerAuthorityPda,
-        2,
-      );
+      const [deferredExecPda] = findDeferredExecPda(walletPda, ownerAuthorityPda, 2, PROGRAM_ID_DEVNET);
 
       // TX1: Authorize
       await sendTx(ctx, [
@@ -294,6 +289,8 @@ describe('Deferred Execution', () => {
           accountsHash,
           expiryOffset: 300,
           authPayload,
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
 
@@ -317,6 +314,8 @@ describe('Deferred Execution', () => {
             { pubkey: recipient2, isSigner: false, isWritable: true },
             { pubkey: recipient3, isSigner: false, isWritable: true },
           ],
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
 
@@ -340,12 +339,9 @@ describe('Deferred Execution', () => {
       ownerKey = await generateMockSecp256r1Key();
       const userSeed = crypto.randomBytes(32);
 
-      [walletPda] = findWalletPda(userSeed);
-      [vaultPda] = findVaultPda(walletPda);
-      const [authPda, authBump] = findAuthorityPda(
-        walletPda,
-        ownerKey.credentialIdHash,
-      );
+      [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
+      [vaultPda] = findVaultPda(walletPda, PROGRAM_ID_DEVNET);
+      const [authPda, authBump] = findAuthorityPda(walletPda, ownerKey.credentialIdHash, PROGRAM_ID_DEVNET);
       ownerAuthorityPda = authPda;
 
       await sendTx(ctx, [
@@ -360,6 +356,8 @@ describe('Deferred Execution', () => {
           credentialOrPubkey: ownerKey.credentialIdHash,
           secp256r1Pubkey: ownerKey.publicKeyBytes,
           rpId: ownerKey.rpId,
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
 
@@ -414,7 +412,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 1,
         payer: ctx.payer.publicKey,
-        programId: PROGRAM_ID,
+        programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
       const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
@@ -423,11 +421,7 @@ describe('Deferred Execution', () => {
         response,
       );
 
-      const [deferredExecPda] = findDeferredExecPda(
-        walletPda,
-        ownerAuthorityPda,
-        1,
-      );
+      const [deferredExecPda] = findDeferredExecPda(walletPda, ownerAuthorityPda, 1, PROGRAM_ID_DEVNET);
 
       // TX1: Authorize
       await sendTx(ctx, [
@@ -441,6 +435,8 @@ describe('Deferred Execution', () => {
           accountsHash,
           expiryOffset: 300,
           authPayload,
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
 
@@ -476,6 +472,8 @@ describe('Deferred Execution', () => {
               },
               { pubkey: recipient, isSigner: false, isWritable: true },
             ],
+            programId: PROGRAM_ID_DEVNET,
+
           }),
         ],
         [],
@@ -500,6 +498,8 @@ describe('Deferred Execution', () => {
             },
             { pubkey: recipient, isSigner: false, isWritable: true },
           ],
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
     });
@@ -547,7 +547,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 2,
         payer: ctx.payer.publicKey,
-        programId: PROGRAM_ID,
+        programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
       const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
@@ -556,11 +556,7 @@ describe('Deferred Execution', () => {
         response,
       );
 
-      const [deferredExecPda] = findDeferredExecPda(
-        walletPda,
-        ownerAuthorityPda,
-        2,
-      );
+      const [deferredExecPda] = findDeferredExecPda(walletPda, ownerAuthorityPda, 2, PROGRAM_ID_DEVNET);
 
       // TX1: Authorize
       await sendTx(ctx, [
@@ -574,6 +570,8 @@ describe('Deferred Execution', () => {
           accountsHash,
           expiryOffset: 300,
           authPayload,
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
 
@@ -594,6 +592,8 @@ describe('Deferred Execution', () => {
           },
           { pubkey: recipient, isSigner: false, isWritable: true },
         ],
+        programId: PROGRAM_ID_DEVNET,
+
       });
 
       await sendTx(ctx, [executeDeferredIx]);
@@ -615,6 +615,8 @@ describe('Deferred Execution', () => {
             },
             { pubkey: recipient, isSigner: false, isWritable: true },
           ],
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
     });
@@ -662,7 +664,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 3,
         payer: ctx.payer.publicKey,
-        programId: PROGRAM_ID,
+        programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
       const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
@@ -671,11 +673,7 @@ describe('Deferred Execution', () => {
         response,
       );
 
-      const [deferredExecPda] = findDeferredExecPda(
-        walletPda,
-        ownerAuthorityPda,
-        3,
-      );
+      const [deferredExecPda] = findDeferredExecPda(walletPda, ownerAuthorityPda, 3, PROGRAM_ID_DEVNET);
 
       // TX1: Authorize with max expiry
       await sendTx(ctx, [
@@ -689,6 +687,8 @@ describe('Deferred Execution', () => {
           accountsHash,
           expiryOffset: 9000, // ~1 hour
           authPayload,
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
 
@@ -700,6 +700,8 @@ describe('Deferred Execution', () => {
             payer: ctx.payer.publicKey,
             deferredExecPda,
             refundDestination: ctx.payer.publicKey,
+            programId: PROGRAM_ID_DEVNET,
+
           }),
         ],
         [],
@@ -724,6 +726,8 @@ describe('Deferred Execution', () => {
             },
             { pubkey: recipient, isSigner: false, isWritable: true },
           ],
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
     });
@@ -771,7 +775,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 4,
         payer: ctx.payer.publicKey,
-        programId: PROGRAM_ID,
+        programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
       const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
@@ -780,11 +784,7 @@ describe('Deferred Execution', () => {
         response,
       );
 
-      const [deferredExecPda] = findDeferredExecPda(
-        walletPda,
-        ownerAuthorityPda,
-        4,
-      );
+      const [deferredExecPda] = findDeferredExecPda(walletPda, ownerAuthorityPda, 4, PROGRAM_ID_DEVNET);
 
       // TX1: Authorize with short expiry
       await sendTx(ctx, [
@@ -798,6 +798,8 @@ describe('Deferred Execution', () => {
           accountsHash,
           expiryOffset: 10, // minimum expiry
           authPayload,
+          programId: PROGRAM_ID_DEVNET,
+
         }),
       ]);
 
@@ -822,6 +824,8 @@ describe('Deferred Execution', () => {
             payer: wrongPayer.publicKey,
             deferredExecPda,
             refundDestination: wrongPayer.publicKey,
+            programId: PROGRAM_ID_DEVNET,
+
           }),
         ],
         [wrongPayer],
@@ -849,6 +853,8 @@ describe('Deferred Execution', () => {
               },
               { pubkey: recipient, isSigner: false, isWritable: true },
             ],
+            programId: PROGRAM_ID_DEVNET,
+
           }),
         ]);
       } catch {
@@ -858,6 +864,8 @@ describe('Deferred Execution', () => {
             payer: ctx.payer.publicKey,
             deferredExecPda,
             refundDestination: ctx.payer.publicKey,
+            programId: PROGRAM_ID_DEVNET,
+
           }),
         ]);
       }

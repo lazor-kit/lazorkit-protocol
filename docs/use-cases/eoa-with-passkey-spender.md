@@ -142,6 +142,8 @@ import {
 import { Keypair, SystemProgram } from '@solana/web3.js';
 import * as crypto from 'crypto';
 
+// Cluster is auto-inferred from the connection's RPC endpoint
+// (mainnet/devnet/localhost). For custom RPCs, pass programId explicitly.
 const client = new LazorKitClient(connection);
 
 // `userSeed` is any 32 bytes that identify this wallet. Apps typically derive

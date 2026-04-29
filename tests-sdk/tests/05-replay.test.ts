@@ -30,7 +30,7 @@ import {
   computeAccountsHash,
   AUTH_TYPE_SECP256R1,
   DISC_EXECUTE,
-  PROGRAM_ID,
+  PROGRAM_ID_DEVNET,
 } from '../../sdk/sdk-legacy/src';
 
 describe('Replay Prevention (Odometer)', () => {
@@ -84,7 +84,7 @@ describe('Replay Prevention (Odometer)', () => {
       slot,
       counter,
       payer: ctx.payer.publicKey,
-      programId: PROGRAM_ID,
+      programId: PROGRAM_ID_DEVNET,
       publicKeyBytes: ownerKey.publicKeyBytes,
     });
     const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
@@ -101,6 +101,8 @@ describe('Replay Prevention (Odometer)', () => {
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: recipient, isSigner: false, isWritable: true },
       ],
+      programId: PROGRAM_ID_DEVNET,
+
     });
 
     return { precompileIx, ix };
@@ -112,12 +114,9 @@ describe('Replay Prevention (Odometer)', () => {
     ownerKey = await generateMockSecp256r1Key();
     const userSeed = crypto.randomBytes(32);
 
-    [walletPda] = findWalletPda(userSeed);
-    [vaultPda] = findVaultPda(walletPda);
-    const [authPda, authBump] = findAuthorityPda(
-      walletPda,
-      ownerKey.credentialIdHash,
-    );
+    [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
+    [vaultPda] = findVaultPda(walletPda, PROGRAM_ID_DEVNET);
+    const [authPda, authBump] = findAuthorityPda(walletPda, ownerKey.credentialIdHash, PROGRAM_ID_DEVNET);
     ownerAuthorityPda = authPda;
 
     await sendTx(ctx, [
@@ -132,6 +131,8 @@ describe('Replay Prevention (Odometer)', () => {
         credentialOrPubkey: ownerKey.credentialIdHash,
         secp256r1Pubkey: ownerKey.publicKeyBytes,
         rpId: ownerKey.rpId,
+        programId: PROGRAM_ID_DEVNET,
+
       }),
     ]);
 

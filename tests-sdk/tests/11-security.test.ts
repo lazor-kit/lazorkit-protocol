@@ -22,7 +22,7 @@ import {
   sendTx,
   sendTxExpectError,
   getSlot,
-  PROGRAM_ID,
+  PROGRAM_ID_DEVNET,
   type TestContext,
 } from './common';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
@@ -202,7 +202,7 @@ describe('Security', () => {
       // Try to execute an instruction that calls back into the LazorKit program
       // We'll craft a fake instruction targeting the program
       const selfCallIx = new TransactionInstruction({
-        programId: PROGRAM_ID,
+        programId: PROGRAM_ID_DEVNET,
         keys: [
           { pubkey: ctx.payer.publicKey, isSigner: true, isWritable: false },
         ],
@@ -381,7 +381,7 @@ describe('Security', () => {
         slot,
         counter,
         payer: ctx.payer.publicKey,
-        programId: PROGRAM_ID,
+        programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
       const tamperedResponse = await fakeWebAuthnSign(
@@ -409,6 +409,8 @@ describe('Security', () => {
         packedInstructions: packed,
         authPayload,
         remainingAccounts: tamperedRemaining,
+        programId: PROGRAM_ID_DEVNET,
+
       });
 
       // Should fail — accounts hash won't match
