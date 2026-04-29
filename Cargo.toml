@@ -3,12 +3,12 @@ resolver = "2"
 members = ["program", "no-padding", "assertions"]
 exclude = ["tests-e2e"]
 
+[workspace.metadata.cli]
+solana = "3.0.4"
+
 [workspace.dependencies]
 pinocchio = { version = "0.9", features = ["std"] }
 pinocchio-pubkey = { version = "0.3" }
 pinocchio-system = { version = "0.3" }
 no-padding = { path = "./no-padding" }
 assertions = { path = "./assertions" }
-
-[workspace.metadata.solana]
-solana = "2.1.0"
