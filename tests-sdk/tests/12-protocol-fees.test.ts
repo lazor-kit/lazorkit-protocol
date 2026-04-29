@@ -10,6 +10,8 @@ import {
 import {
   LazorKitClient,
   PROGRAM_ID_DEVNET,
+  AUTH_TYPE_ED25519,
+  createCreateWalletIx,
   createWithdrawTreasuryIx,
   createUpdateProtocolIx,
 } from '../../sdk/sdk-legacy/src';
@@ -228,6 +230,16 @@ describe('Protocol Fees', () => {
   });
 
   it('charges fee for unregistered payer but skips FeeRecord counter update', async () => {
+    // This test verifies the on-chain entrypoint behaviour: when the
+    // FeeRecord account doesn't exist, the program still collects the
+    // creation_fee from the payer (transfer to a treasury shard) but
+    // skips the counter bump that would otherwise mutate the FeeRecord.
+    //
+    // Note: we deliberately bypass `client.createWallet` here — the
+    // high-level method auto-prepends a `RegisterPayer` instruction on
+    // the payer's first fee-paying tx, which would create the FeeRecord
+    // and defeat what this test is checking. We use the lower-level
+    // `createCreateWalletIx` builder directly so no auto-register fires.
     const newPayer = Keypair.generate();
     const sig = await ctx.connection.requestAirdrop(
       newPayer.publicKey,
@@ -236,17 +248,17 @@ describe('Protocol Fees', () => {
     await ctx.connection.confirmTransaction(sig, 'confirmed');
 
     const newClient = new LazorKitClient(ctx.connection);
-    const newCtx = { ...ctx, payer: newPayer };
 
-    // resolveProtocolFee still returns the 4 accounts for unregistered payer
+    // resolveProtocolFee returns the 4 fee accounts even for an unregistered
+    // payer (the on-chain entrypoint detects whether feeRecord is real and
+    // adapts its behaviour).
     const protocolFee = await newClient.resolveProtocolFee(newPayer.publicKey);
     expect(protocolFee).toBeDefined();
-
-    // The feeRecordPda is derived but unlikely to exist on-chain for a fresh payer
     const [expectedFeeRecordPda] = newClient.findFeeRecord(newPayer.publicKey);
     expect(protocolFee!.feeRecordPda.toBase58()).toBe(
       expectedFeeRecordPda.toBase58(),
     );
+
     const feeRecordInfo = await ctx.connection.getAccountInfo(
       protocolFee!.feeRecordPda,
     );
@@ -259,14 +271,31 @@ describe('Protocol Fees', () => {
       shardBalanceBefore += await ctx.connection.getBalance(shardPda);
     }
 
-    // createWallet: fee IS charged, but FeeRecord (uninitialized) is not mutated
+    // Build createWallet instruction MANUALLY via the low-level builder so
+    // no RegisterPayer is auto-prepended.
     const ownerKp = Keypair.generate();
-    const { instructions } = await newClient.createWallet({
+    const userSeed = crypto.randomBytes(32);
+    const [walletPda] = newClient.findWallet(userSeed);
+    const [vaultPda] = newClient.findVault(walletPda);
+    const [authorityPda, authBump] = newClient.findAuthority(
+      walletPda,
+      ownerKp.publicKey.toBytes(),
+    );
+
+    const ix = createCreateWalletIx({
       payer: newPayer.publicKey,
-      userSeed: crypto.randomBytes(32),
-      owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
+      walletPda,
+      vaultPda,
+      authorityPda,
+      userSeed,
+      authType: AUTH_TYPE_ED25519,
+      authBump,
+      credentialOrPubkey: ownerKp.publicKey.toBytes(),
+      protocolFee,
+      programId: PROGRAM_ID_DEVNET,
     });
-    await sendTx(newCtx, instructions);
+
+    await sendTx({ ...ctx, payer: newPayer }, [ix]);
 
     // Treasury should have received the creation fee
     let shardBalanceAfter = 0;
@@ -276,7 +305,8 @@ describe('Protocol Fees', () => {
     }
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(CREATION_FEE));
 
-    // FeeRecord PDA still doesn't exist — program ignored it
+    // FeeRecord PDA still doesn't exist — program ignored it because the
+    // entrypoint saw the account as system-owned + zero data.
     const feeRecordAfter = await ctx.connection.getAccountInfo(
       protocolFee!.feeRecordPda,
     );
