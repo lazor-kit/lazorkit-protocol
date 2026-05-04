@@ -34,6 +34,18 @@ export const ERROR_NAMES: Record<number, string> = {
   3027: 'ActionTokenRecurringLimitExceeded',
   3028: 'ActionWhitelistBlacklistConflict',
   3029: 'ActionTokenMaxPerTxExceeded',
+  // Session vault + token invariants (defense against System::Assign / SetAuthority escapes)
+  3030: 'SessionVaultOwnerChanged',
+  3031: 'SessionVaultDataLenChanged',
+  3032: 'SessionTokenAuthorityChanged',
+  // Protocol errors (Commercial binary only — foundation binary never emits these)
+  4001: 'ProtocolAlreadyInitialized',
+  4002: 'InvalidProtocolAdmin',
+  4003: 'ProtocolDisabled',
+  4004: 'InvalidIntegratorRecord',
+  4005: 'InsufficientFeeBalance',
+  4006: 'IntegratorAlreadyRegistered',
+  4007: 'InvalidTreasury',
 };
 
 /**
