@@ -5,6 +5,8 @@ import {
   setupTest,
   sendTx,
   sendTxExpectError,
+  getProtocolAdmin,
+  getProtocolTreasury,
   type TestContext,
 } from './common';
 import {
@@ -16,47 +18,30 @@ import {
   createUpdateProtocolIx,
 } from '../../sdk/sdk-legacy/src';
 
+// These values match what `setupTest()` uses for the global init.
+// If the constants in `common.ts` ever change, this test file's
+// expected fee values must move in lockstep.
 const NUM_SHARDS = 4;
+const CREATION_FEE = 5_000n;
+const EXECUTION_FEE = 2_000n;
 
 describe('Protocol Fees', () => {
   let ctx: TestContext;
   let client: LazorKitClient;
   let adminKp: Keypair;
   let treasuryKp: Keypair;
-  const CREATION_FEE = 5000n;
-  const EXECUTION_FEE = 2000n;
 
   beforeAll(async () => {
     ctx = await setupTest();
     client = new LazorKitClient(ctx.connection);
-    adminKp = Keypair.generate();
-    treasuryKp = Keypair.generate();
-
-    const sig = await ctx.connection.requestAirdrop(
-      adminKp.publicKey,
-      2 * LAMPORTS_PER_SOL,
-    );
-    await ctx.connection.confirmTransaction(sig, 'confirmed');
+    adminKp = getProtocolAdmin();
+    treasuryKp = getProtocolTreasury();
   });
 
-  it('initializes protocol config', async () => {
-    const { instructions, protocolConfigPda } = client.initializeProtocol({
-      payer: ctx.payer.publicKey,
-      admin: adminKp.publicKey,
-      treasury: treasuryKp.publicKey,
-      creationFee: CREATION_FEE,
-      executionFee: EXECUTION_FEE,
-      numShards: NUM_SHARDS,
-    });
-
-    await sendTx(ctx, instructions);
-
-    const info = await ctx.connection.getAccountInfo(protocolConfigPda);
-    expect(info).not.toBeNull();
-    expect(info!.data[0]).toBe(5);
-    expect(info!.data[3]).toBe(1); // enabled
-    expect(info!.data[4]).toBe(NUM_SHARDS);
-  });
+  // Note: the prior "initializes protocol config" + "initializes treasury
+  // shards" tests are now redundant — setupTest() does both globally on
+  // the first call across the suite. We keep "rejects double
+  // initialization" because it asserts on-chain idempotency.
 
   it('rejects double initialization', async () => {
     const { instructions } = client.initializeProtocol({
@@ -70,18 +55,20 @@ describe('Protocol Fees', () => {
     await sendTxExpectError(ctx, instructions, [], 4001);
   });
 
-  it('initializes treasury shards', async () => {
-    for (let i = 0; i < NUM_SHARDS; i++) {
-      const { instructions, treasuryShardPda } = client.initializeTreasuryShard(
-        {
-          payer: ctx.payer.publicKey,
-          admin: adminKp.publicKey,
-          shardId: i,
-        },
-      );
-      await sendTx(ctx, instructions, [adminKp]);
+  it('protocol config is initialized + valid', async () => {
+    // Sanity: setupTest() should have left this account in place.
+    const [protocolConfigPda] = client.findProtocolConfig();
+    const info = await ctx.connection.getAccountInfo(protocolConfigPda);
+    expect(info).not.toBeNull();
+    expect(info!.data[0]).toBe(5);
+    expect(info!.data[3]).toBe(1); // enabled
+    expect(info!.data[4]).toBe(NUM_SHARDS);
+  });
 
-      const info = await ctx.connection.getAccountInfo(treasuryShardPda);
+  it('treasury shards are initialized', async () => {
+    for (let i = 0; i < NUM_SHARDS; i++) {
+      const [shardPda] = client.findTreasuryShard(i);
+      const info = await ctx.connection.getAccountInfo(shardPda);
       expect(info).not.toBeNull();
       expect(info!.data[0]).toBe(7);
       expect(info!.data[2]).toBe(i);
@@ -98,7 +85,7 @@ describe('Protocol Fees', () => {
     });
     await sendTx(ctx, instructions, [adminKp]);
 
-    // Revert + invalidate cache
+    // Revert + invalidate cache so subsequent tests see the original fees.
     const { instructions: revertIxs } = client.updateProtocol({
       admin: adminKp.publicKey,
       creationFee: CREATION_FEE,
@@ -128,11 +115,27 @@ describe('Protocol Fees', () => {
     await sendTxExpectError(ctx, instructions, [fakeAdmin], 4002);
   });
 
+  // Note: under strict-fee enforcement, RegisterPayer is no longer
+  // strictly required — the entrypoint auto-creates the FeeRecord PDA
+  // on first use. But the standalone instruction is preserved for
+  // backward compat, so we still test it.
+
   it('registers a payer (permissionless self-registration)', async () => {
+    const standalonePayer = Keypair.generate();
+    const sig = await ctx.connection.requestAirdrop(
+      standalonePayer.publicKey,
+      LAMPORTS_PER_SOL,
+    );
+    await ctx.connection.confirmTransaction(sig, 'confirmed');
+
     const { instructions, feeRecordPda } = client.registerPayer({
-      payer: ctx.payer.publicKey,
+      payer: standalonePayer.publicKey,
     });
-    await sendTx(ctx, instructions);
+    // Send with the standalonePayer as fee payer (signer of the ix).
+    await sendTx(
+      { ...ctx, payer: standalonePayer },
+      instructions,
+    );
 
     const info = await ctx.connection.getAccountInfo(feeRecordPda);
     expect(info).not.toBeNull();
@@ -140,6 +143,22 @@ describe('Protocol Fees', () => {
   });
 
   it('rejects duplicate payer registration', async () => {
+    // ctx.payer's FeeRecord was auto-created by the inline path on
+    // its first fee-paying tx earlier in this test suite. Calling
+    // RegisterPayer for the same payer must now fail with 4006.
+    // Note: depending on test ordering, this may also catch a payer
+    // that's been auto-registered via prior CreateWallet / Execute.
+    // Trigger one more fee-paying tx first to guarantee FeeRecord
+    // exists, then attempt re-register.
+    await sendTx(
+      ctx,
+      (await client.createWallet({
+        payer: ctx.payer.publicKey,
+        userSeed: crypto.randomBytes(32),
+        owner: { type: 'ed25519', publicKey: Keypair.generate().publicKey },
+      })).instructions,
+    );
+
     const { instructions } = client.registerPayer({
       payer: ctx.payer.publicKey,
     });
@@ -172,11 +191,12 @@ describe('Protocol Fees', () => {
     }
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(CREATION_FEE));
 
-    // Verify fee record wallet_count
+    // Verify fee record wallet_count > 0 (we don't assert exact value because
+    // earlier tests in the suite have already incremented it).
     const [feeRecordPda] = client.findFeeRecord(ctx.payer.publicKey);
     const info = await ctx.connection.getAccountInfo(feeRecordPda);
     const walletCount = info!.data.readUInt32LE(20);
-    expect(walletCount).toBe(1);
+    expect(walletCount).toBeGreaterThan(0);
   });
 
   it('auto-detects payer and collects fee on Execute', async () => {
@@ -229,17 +249,12 @@ describe('Protocol Fees', () => {
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(EXECUTION_FEE));
   });
 
-  it('charges fee for unregistered payer but skips FeeRecord counter update', async () => {
-    // This test verifies the on-chain entrypoint behaviour: when the
-    // FeeRecord account doesn't exist, the program still collects the
-    // creation_fee from the payer (transfer to a treasury shard) but
-    // skips the counter bump that would otherwise mutate the FeeRecord.
-    //
-    // Note: we deliberately bypass `client.createWallet` here — the
-    // high-level method auto-prepends a `RegisterPayer` instruction on
-    // the payer's first fee-paying tx, which would create the FeeRecord
-    // and defeat what this test is checking. We use the lower-level
-    // `createCreateWalletIx` builder directly so no auto-register fires.
+  it('auto-creates FeeRecord inline for first-time unregistered payer', async () => {
+    // Strict mode replaced the pre-strict "skip counter update" path
+    // with inline auto-create. This test verifies the new behaviour:
+    // an unregistered payer making their first fee-paying tx gets a
+    // FeeRecord auto-created by the entrypoint, and the counters are
+    // bumped (not skipped).
     const newPayer = Keypair.generate();
     const sig = await ctx.connection.requestAirdrop(
       newPayer.publicKey,
@@ -249,9 +264,6 @@ describe('Protocol Fees', () => {
 
     const newClient = new LazorKitClient(ctx.connection);
 
-    // resolveProtocolFee returns the 4 fee accounts even for an unregistered
-    // payer (the on-chain entrypoint detects whether feeRecord is real and
-    // adapts its behaviour).
     const protocolFee = await newClient.resolveProtocolFee(newPayer.publicKey);
     expect(protocolFee).toBeDefined();
     const [expectedFeeRecordPda] = newClient.findFeeRecord(newPayer.publicKey);
@@ -259,20 +271,21 @@ describe('Protocol Fees', () => {
       expectedFeeRecordPda.toBase58(),
     );
 
-    const feeRecordInfo = await ctx.connection.getAccountInfo(
+    const feeRecordInfoBefore = await ctx.connection.getAccountInfo(
       protocolFee!.feeRecordPda,
     );
-    expect(feeRecordInfo).toBeNull();
+    expect(feeRecordInfoBefore).toBeNull();
 
-    // Sum shard balances before
     let shardBalanceBefore = 0;
     for (let i = 0; i < NUM_SHARDS; i++) {
       const [shardPda] = newClient.findTreasuryShard(i);
       shardBalanceBefore += await ctx.connection.getBalance(shardPda);
     }
 
-    // Build createWallet instruction MANUALLY via the low-level builder so
-    // no RegisterPayer is auto-prepended.
+    // Build createWallet instruction MANUALLY via the low-level builder
+    // — same approach as the pre-strict version of this test, but the
+    // expected post-state is now different: FeeRecord MUST exist
+    // post-tx (auto-created), and wallet_count == 1.
     const ownerKp = Keypair.generate();
     const userSeed = crypto.randomBytes(32);
     const [walletPda] = newClient.findWallet(userSeed);
@@ -297,7 +310,6 @@ describe('Protocol Fees', () => {
 
     await sendTx({ ...ctx, payer: newPayer }, [ix]);
 
-    // Treasury should have received the creation fee
     let shardBalanceAfter = 0;
     for (let i = 0; i < NUM_SHARDS; i++) {
       const [shardPda] = newClient.findTreasuryShard(i);
@@ -305,12 +317,14 @@ describe('Protocol Fees', () => {
     }
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(CREATION_FEE));
 
-    // FeeRecord PDA still doesn't exist — program ignored it because the
-    // entrypoint saw the account as system-owned + zero data.
+    // Strict mode change: FeeRecord MUST now exist, and counter is 1.
     const feeRecordAfter = await ctx.connection.getAccountInfo(
       protocolFee!.feeRecordPda,
     );
-    expect(feeRecordAfter).toBeNull();
+    expect(feeRecordAfter).not.toBeNull();
+    expect(feeRecordAfter!.data[0]).toBe(6); // FeeRecord discriminator
+    const walletCount = feeRecordAfter!.data.readUInt32LE(20);
+    expect(walletCount).toBe(1);
   });
 
   it('withdraws fees from treasury shards', async () => {
@@ -347,7 +361,6 @@ describe('Protocol Fees', () => {
   });
 
   // ── H2 — admin instructions must verify config_pda / shard_pda ownership ──
-  //
   // Pre-fix, withdraw_treasury read config_pda without checking its owner.
   // An attacker could supply a fake config (owned by their own program) with
   // attacker-controlled `admin`/`treasury` fields, hand in the real LazorKit
@@ -364,7 +377,6 @@ describe('Protocol Fees', () => {
       treasuryShardPda: shard0,
       treasury: treasuryKp.publicKey,
       programId: PROGRAM_ID_DEVNET,
-
     });
     await sendTxExpectError(ctx, [ix], [adminKp]);
   });
@@ -379,7 +391,6 @@ describe('Protocol Fees', () => {
       treasuryShardPda: fakeShard,
       treasury: treasuryKp.publicKey,
       programId: PROGRAM_ID_DEVNET,
-
     });
     await sendTxExpectError(ctx, [ix], [adminKp]);
   });
@@ -395,7 +406,6 @@ describe('Protocol Fees', () => {
       enabled: true,
       newTreasury: treasuryKp.publicKey,
       programId: PROGRAM_ID_DEVNET,
-
     });
     await sendTxExpectError(ctx, [ix], [adminKp]);
   });

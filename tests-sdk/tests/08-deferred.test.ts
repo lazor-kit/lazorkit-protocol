@@ -11,6 +11,7 @@ import {
   sendTx,
   sendTxExpectError,
   getSlot,
+  resolveFeeAccts,
   type TestContext,
 } from './common';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
@@ -37,9 +38,11 @@ import {
 
 describe('Deferred Execution', () => {
   let ctx: TestContext;
+  let protocolFee: Awaited<ReturnType<typeof resolveFeeAccts>>;
 
   beforeAll(async () => {
     ctx = await setupTest();
+    protocolFee = await resolveFeeAccts(ctx.connection, ctx.payer.publicKey);
   });
 
   describe('Happy Path', () => {
@@ -69,8 +72,8 @@ describe('Deferred Execution', () => {
           credentialOrPubkey: ownerKey.credentialIdHash,
           secp256r1Pubkey: ownerKey.publicKeyBytes,
           rpId: ownerKey.rpId,
+          protocolFee,
           programId: PROGRAM_ID_DEVNET,
-
         }),
       ]);
 
@@ -185,8 +188,8 @@ describe('Deferred Execution', () => {
           },
           { pubkey: recipient, isSigner: false, isWritable: true },
         ],
+        protocolFee,
         programId: PROGRAM_ID_DEVNET,
-
       });
 
       const balanceBefore = await ctx.connection.getBalance(recipient);
@@ -314,8 +317,8 @@ describe('Deferred Execution', () => {
             { pubkey: recipient2, isSigner: false, isWritable: true },
             { pubkey: recipient3, isSigner: false, isWritable: true },
           ],
+          protocolFee,
           programId: PROGRAM_ID_DEVNET,
-
         }),
       ]);
 
@@ -356,8 +359,8 @@ describe('Deferred Execution', () => {
           credentialOrPubkey: ownerKey.credentialIdHash,
           secp256r1Pubkey: ownerKey.publicKeyBytes,
           rpId: ownerKey.rpId,
+          protocolFee,
           programId: PROGRAM_ID_DEVNET,
-
         }),
       ]);
 
@@ -472,8 +475,8 @@ describe('Deferred Execution', () => {
               },
               { pubkey: recipient, isSigner: false, isWritable: true },
             ],
+            protocolFee,
             programId: PROGRAM_ID_DEVNET,
-
           }),
         ],
         [],
@@ -498,8 +501,8 @@ describe('Deferred Execution', () => {
             },
             { pubkey: recipient, isSigner: false, isWritable: true },
           ],
+          protocolFee,
           programId: PROGRAM_ID_DEVNET,
-
         }),
       ]);
     });
@@ -592,8 +595,8 @@ describe('Deferred Execution', () => {
           },
           { pubkey: recipient, isSigner: false, isWritable: true },
         ],
+        protocolFee,
         programId: PROGRAM_ID_DEVNET,
-
       });
 
       await sendTx(ctx, [executeDeferredIx]);
@@ -615,8 +618,8 @@ describe('Deferred Execution', () => {
             },
             { pubkey: recipient, isSigner: false, isWritable: true },
           ],
+          protocolFee,
           programId: PROGRAM_ID_DEVNET,
-
         }),
       ]);
     });
@@ -726,8 +729,8 @@ describe('Deferred Execution', () => {
             },
             { pubkey: recipient, isSigner: false, isWritable: true },
           ],
+          protocolFee,
           programId: PROGRAM_ID_DEVNET,
-
         }),
       ]);
     });
@@ -853,8 +856,8 @@ describe('Deferred Execution', () => {
               },
               { pubkey: recipient, isSigner: false, isWritable: true },
             ],
+            protocolFee,
             programId: PROGRAM_ID_DEVNET,
-
           }),
         ]);
       } catch {

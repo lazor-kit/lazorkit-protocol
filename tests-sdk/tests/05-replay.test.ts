@@ -12,6 +12,7 @@ import {
   sendTx,
   sendTxExpectError,
   getSlot,
+  resolveFeeAccts,
   type TestContext,
 } from './common';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
@@ -90,6 +91,7 @@ describe('Replay Prevention (Odometer)', () => {
     const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
     const { authPayload, precompileIx } = finalizeSecp256r1(prepared, response);
 
+    const protocolFee = await resolveFeeAccts(ctx.connection, ctx.payer.publicKey);
     const ix = createExecuteIx({
       payer: ctx.payer.publicKey,
       walletPda,
@@ -101,8 +103,8 @@ describe('Replay Prevention (Odometer)', () => {
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: recipient, isSigner: false, isWritable: true },
       ],
+      protocolFee,
       programId: PROGRAM_ID_DEVNET,
-
     });
 
     return { precompileIx, ix };
@@ -119,6 +121,7 @@ describe('Replay Prevention (Odometer)', () => {
     const [authPda, authBump] = findAuthorityPda(walletPda, ownerKey.credentialIdHash, PROGRAM_ID_DEVNET);
     ownerAuthorityPda = authPda;
 
+    const setupFee = await resolveFeeAccts(ctx.connection, ctx.payer.publicKey);
     await sendTx(ctx, [
       createCreateWalletIx({
         payer: ctx.payer.publicKey,
@@ -131,8 +134,8 @@ describe('Replay Prevention (Odometer)', () => {
         credentialOrPubkey: ownerKey.credentialIdHash,
         secp256r1Pubkey: ownerKey.publicKeyBytes,
         rpId: ownerKey.rpId,
+        protocolFee: setupFee,
         programId: PROGRAM_ID_DEVNET,
-
       }),
     ]);
 

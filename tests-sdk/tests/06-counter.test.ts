@@ -7,7 +7,7 @@ import {
   type AccountMeta,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
-import { setupTest, sendTx, getSlot, type TestContext } from './common';
+import { setupTest, sendTx, getSlot, resolveFeeAccts, type TestContext } from './common';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
   prepareSecp256r1,
@@ -48,6 +48,7 @@ describe('Counter Edge Cases', () => {
     const [vaultPda] = findVaultPda(walletPda, PROGRAM_ID_DEVNET);
     const [ownerAuthPda, authBump] = findAuthorityPda(walletPda, ownerKey.credentialIdHash, PROGRAM_ID_DEVNET);
 
+    const fee1 = await resolveFeeAccts(ctx.connection, ctx.payer.publicKey);
     await sendTx(ctx, [
       createCreateWalletIx({
         payer: ctx.payer.publicKey,
@@ -60,8 +61,8 @@ describe('Counter Edge Cases', () => {
         credentialOrPubkey: ownerKey.credentialIdHash,
         secp256r1Pubkey: ownerKey.publicKeyBytes,
         rpId: ownerKey.rpId,
+        protocolFee: fee1,
         programId: PROGRAM_ID_DEVNET,
-
       }),
     ]);
 
@@ -175,6 +176,7 @@ describe('Counter Edge Cases', () => {
       response2,
     );
 
+    const fee2 = await resolveFeeAccts(ctx.connection, ctx.payer.publicKey);
     await sendTx(ctx, [
       pi2,
       createExecuteIx({
@@ -192,8 +194,8 @@ describe('Counter Edge Cases', () => {
           },
           { pubkey: execRecipient, isSigner: false, isWritable: true },
         ],
+        protocolFee: fee2,
         programId: PROGRAM_ID_DEVNET,
-
       }),
     ]);
 
@@ -215,6 +217,7 @@ describe('Counter Edge Cases', () => {
     const [auth1Pda, auth1Bump] = findAuthorityPda(walletPda, key1.credentialIdHash, PROGRAM_ID_DEVNET);
 
     // Create wallet with key1 as owner
+    const fee3 = await resolveFeeAccts(ctx.connection, ctx.payer.publicKey);
     await sendTx(ctx, [
       createCreateWalletIx({
         payer: ctx.payer.publicKey,
@@ -227,8 +230,8 @@ describe('Counter Edge Cases', () => {
         credentialOrPubkey: key1.credentialIdHash,
         secp256r1Pubkey: key1.publicKeyBytes,
         rpId: key1.rpId,
+        protocolFee: fee3,
         programId: PROGRAM_ID_DEVNET,
-
       }),
     ]);
 
