@@ -40,19 +40,28 @@ const client = new LazorKitClient(connection);
 
 ### Cluster + program IDs
 
-LazorKit is deployed at two distinct, cluster-specific program IDs (the SBF
-binary embeds the ID via `declare_id!`, so a binary built for one cluster
-cannot serve the other):
+LazorKit binaries embed the program ID via `declare_id!` at compile time
+(Pattern D feature flags), so a binary built for one cluster cannot serve
+the other.
 
-| Cluster | Program ID |
-|---|---|
-| mainnet-beta | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` |
-| devnet | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` |
+| Cluster | Program ID | Build feature | Constant |
+|---|---|---|---|
+| mainnet-beta (commercial + foundation, slot shared) | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` | `--features mainnet` | `PROGRAM_ID_MAINNET` |
+| devnet (commercial: this repo) | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` | `--features devnet` | `PROGRAM_ID_DEVNET` |
+| devnet (foundation: program-v2) | `FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao` | (built in `program-v2`) | `PROGRAM_ID_FOUNDATION_DEVNET` |
 
-Both are exported as `PROGRAM_ADDRESS_MAINNET` / `PROGRAM_ID_MAINNET` and
-`PROGRAM_ADDRESS_DEVNET` / `PROGRAM_ID_DEVNET`. The `LazorKitClient`
-constructor auto-selects the right one based on the connection's RPC
-endpoint; pass an explicit `programId` argument to override.
+The mainnet slot is shared between this repo's commercial build (with
+protocol fees) and the sibling [`program-v2`](https://github.com/lazor-kit/program-v2)
+foundation build (no fees). The same SDK works for both — the
+`LazorKitClient` probes the on-chain `ProtocolConfig` PDA on first use and
+appends fee accounts to fee-eligible instructions only when the PDA exists
+(commercial). For the foundation build the probe returns null and no fee
+accounts are appended.
+
+The `LazorKitClient` constructor auto-selects the right program ID based on
+the connection's RPC endpoint; pass an explicit `programId` argument to
+override (e.g., target `PROGRAM_ID_FOUNDATION_DEVNET` against a localhost
+validator running the foundation binary).
 
 ### Create a wallet
 

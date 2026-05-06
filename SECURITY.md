@@ -31,7 +31,7 @@ Out of scope:
 
 ## Audit status
 
-LazorKit V2 underwent an audit by **Accretion** (Solana Foundation funded) plus internal pre-mainnet review. All findings were resolved.
+LazorKit V2 underwent an audit by **Accretion** plus internal pre-mainnet review. All findings were resolved.
 
 ## Security mechanisms
 

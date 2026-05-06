@@ -12,8 +12,8 @@
 ```
 /program           Rust smart contract (pinocchio, zero-copy)
 /sdk/sdk-legacy    TypeScript SDK (@solana/web3.js v1, hand-written)
-/tests-sdk         Integration tests (vitest, ~103 tests)
-/scripts           Build/deploy/sync automation
+/tests-sdk         Integration tests (vitest, ~118 tests across 16 files)
+/scripts           Build/deploy automation
 /no-padding        Custom NoPadding derive macro
 /assertions        Custom assertion helpers
 ```
@@ -35,15 +35,28 @@ cd tests-sdk && npm run test:local
 
 ### A. Build Program
 
+The program ID is chosen at build time via the `mainnet` / `devnet` cargo
+features (see `assertions/src/lib.rs`). Exactly one must be set; an
+unflagged build fails with a `compile_error!`.
+
 ```bash
-cargo build-sbf
+# Devnet build — embeds 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
+cargo build-sbf --features devnet
+
+# Mainnet build — embeds LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi
+cargo build-sbf --features mainnet
 ```
 
 ### B. Run Rust Tests
 
 ```bash
-cargo test
+cargo test --features devnet
 ```
+
+The `--features devnet` flag is required because the assertions crate's
+`compile_error!` fires on un-flagged builds. Choose either feature —
+host-side tests use a runtime `program_id: Pubkey::new_unique()`, so the
+embedded ID doesn't affect test outcomes.
 
 ### C. Run SDK Integration Tests
 
@@ -53,7 +66,7 @@ cargo test
 cd tests-sdk && npm run test:local
 ```
 
-This starts a local validator with the program loaded, runs all ~103 tests, then stops the validator.
+This starts a local validator with the program loaded, runs all ~118 tests, then stops the validator.
 
 **Manual (two terminals):**
 
@@ -72,10 +85,7 @@ npm run validator:stop
 
 ```bash
 # Build program + generate IDL + build SDK
-./scripts/build-all.sh
-
-# Or with a new program ID
-./scripts/build-all.sh <NEW_PROGRAM_ID>
+./scripts/build-all.sh devnet     # or mainnet
 ```
 
 ### E. SDK
@@ -85,21 +95,15 @@ The SDK is fully hand-written (no code generation). After modifying program inst
 ### F. IDL Generation (using Shank)
 
 ```bash
-cd program && shank idl -o . --out-filename idl.json -p 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
+cd program
+PROGRAM_ID=$(solana-keygen pubkey ../target/deploy/lazorkit_program-keypair.json)
+shank idl -o . --out-filename idl.json -p "$PROGRAM_ID"
 ```
 
-### G. Program ID Sync
+### G. Deploy to Devnet
 
 ```bash
-./scripts/sync-program-id.sh <NEW_PROGRAM_ID>
-```
-
-Updates program ID across: assertions/src/lib.rs, SDK constants, test configs, validator script.
-
-### H. Deploy to Devnet
-
-```bash
-cargo build-sbf
+cargo build-sbf --features devnet
 solana program deploy target/deploy/lazorkit_program.so -u d
 ```
 
