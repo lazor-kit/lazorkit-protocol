@@ -55,6 +55,29 @@ pub enum ProtocolError {
     InsufficientFeeBalance = 4005,
     IntegratorAlreadyRegistered = 4006,
     InvalidTreasury = 4007,
+    // Strict-fee enforcement errors (entrypoint::try_collect_fee).
+    // The commercial binary requires every fee-eligible instruction
+    // (disc 0/4/7) to carry a valid `[ProtocolConfig, FeeRecord,
+    // TreasuryShard, SystemProgram]` suffix and to result in a
+    // successful payer→shard transfer. Any deviation returns one
+    // of the codes below; there is no silent-skip path.
+    /// Caller passed fewer than 5 accounts, or the trailing
+    /// `SystemProgram` sentinel is missing.
+    FeeAccountsRequired = 4008,
+    /// `ProtocolConfig` PDA does not exist or has the wrong account
+    /// discriminator. Admin must call `initialize_protocol` first.
+    ProtocolNotInitialized = 4009,
+    /// `TreasuryShard` PDA owner ≠ program or wrong discriminator.
+    /// Admin must call `initialize_treasury_shard` for the picked shard.
+    InvalidTreasuryShard = 4010,
+    /// `FeeRecord` PDA address does not match the canonical seed for
+    /// the payer, or the account is owned by a foreign program.
+    InvalidFeeRecord = 4011,
+    /// `ProtocolConfig.creation_fee` (or `execution_fee`) is `0` —
+    /// admin must update via `update_protocol` to a non-zero value.
+    /// Strict mode rejects zero-fee config to prevent silent
+    /// degradation to the pre-strict opt-in behaviour.
+    FeeNotConfigured = 4012,
 }
 
 impl From<ProtocolError> for ProgramError {
