@@ -6,6 +6,28 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — foundation devnet support (SDK 0.3.0)
+
+The single source of truth for both LazorKit on-chain builds. `@lazorkit/sdk-legacy`
+ships from this repo and is also consumed by the sibling `program-v2` repo
+(the foundation, no-fee build that occupies the same mainnet program ID slot
+during the foundation contract). These changes let one SDK serve both binaries
+at the same mainnet ID and keep dApp DX uniform across the binary swap.
+
+- **`PROGRAM_ID_FOUNDATION_DEVNET`** constant (`FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao`)
+  exported from `constants.ts`. Lets devs target the foundation devnet binary
+  for testing without overriding `programId` manually. The mainnet ID
+  (`LazorjRF…`) and existing commercial devnet ID (`4h3X…`) are unchanged;
+  the new constant is additive.
+- **Error decoding** in `utils/errors.ts` now covers the additional codes
+  emitted by the two builds:
+  - `3030 SessionVaultOwnerChanged`, `3031 SessionVaultDataLenChanged`,
+    `3032 SessionTokenAuthorityChanged` — vault / token-authority invariant
+    defenses against `System::Assign` / `SetAuthority` / `Approve` escapes.
+  - `4001 ProtocolAlreadyInitialized` through `4007 InvalidTreasury` —
+    protocol-fee management errors emitted by the commercial flow.
+  No runtime API changes; existing callers continue to work unmodified.
+
 ### Added — dual-cluster program ID support (SDK 0.2.0)
 
 - **Program — Pattern D feature flags.** The on-chain SBF binary now
