@@ -1,0 +1,81 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  clippy:
+    name: clippy (rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: lint-clippy-${{ hashFiles('**/Cargo.lock') }}
+
+      # Allow-list explained:
+      # - op_ref / needless_borrow / manual_range_contains / too_many_arguments:
+      #   stylistic lints that fire in audited code shared byte-identically with
+      #   program-v2. Touching them changes audited bytes and triggers an
+      #   unnecessary delta audit on cosmetic refactors.
+      # - unused_mut: same — appears in a test closure in state/action.rs.
+      # When the audit baseline rolls over, revisit and tighten this list.
+      - name: cargo clippy (devnet features)
+        run: |
+          cargo clippy --features devnet --all-targets -- \
+            -D warnings \
+            -A clippy::op_ref \
+            -A clippy::needless_borrow \
+            -A clippy::manual_range_contains \
+            -A clippy::too_many_arguments \
+            -A unused_mut
+
+  tsc-sdk:
+    name: tsc (sdk-legacy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/sdk-legacy/package-lock.json
+
+      - name: install
+        working-directory: sdk/sdk-legacy
+        run: npm ci || npm install
+
+      - name: tsc --noEmit
+        working-directory: sdk/sdk-legacy
+        run: npx tsc --noEmit
+
+# tsc on tests-sdk is intentionally NOT included here.
+#
+# tests-sdk imports SDK source via a relative path
+# (../../sdk/sdk-legacy/src). When tsc walks those imports it pulls in
+# @solana/web3.js + other deps that live in sdk-legacy's own package.json,
+# not tests-sdk's. Wiring this up in CI cleanly requires either an npm
+# workspace setup or a published @lazorkit/sdk-legacy that tests-sdk
+# depends on by name.
+#
+# The strict-build of the SDK (`tsc-sdk` above) already gates type errors
+# in the published package. tests-sdk type errors are caught locally
+# (`npx tsc --noEmit` from tests-sdk works against the local sibling).
+#
+# When the npm workspace migration lands, restore this job.
