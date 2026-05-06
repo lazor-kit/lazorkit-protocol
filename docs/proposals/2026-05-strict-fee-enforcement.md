@@ -1,14 +1,14 @@
 # Strict fee enforcement for `lazorkit-protocol`
 
-- **Status:** Draft — pending audit review
+- **Status:** Draft — self-review workflow (Accretion no longer engaged)
 - **Date:** 2026-05-07
 - **Author:** internal
-- **Audience:** Accretion delta-audit reviewer, lazor-kit core team
+- **Audience:** lazor-kit core team
 - **Affects:** `lazorkit-protocol` (commercial binary). `program-v2` (foundation
   binary) is unaffected — see § 4.
 - **Decision required before:** next mainnet deploy of the commercial binary
-- **No code is changed by this document.** This is a design proposal to be
-  ratified before implementation.
+- **No code is changed by this document.** This is a design proposal that
+  must pass the self-review checklist in § 10.B before implementation.
 
 ## 0. TL;DR
 
@@ -22,6 +22,10 @@ suffix and *must* result in a successful `payer → shard` transfer plus a
 `FeeRecord` counter bump. Anything else returns a custom error. The foundation
 binary (`program-v2`) is unaffected because the entire fee module is stripped
 from its source tree (§ 4).
+
+**Workflow:** self-review (no Accretion). The implementation PR must
+pass the checklist in § 10.B end-to-end before merge. Total elapsed
+calendar from internal sign-off to mainnet: ~1 week.
 
 ## 1. Background
 
@@ -472,9 +476,14 @@ public use. Multisig signs steps 3 + 4 via the same path as future
 All three are loud failures (custom error code, no silent degradation),
 consistent with the rest of the program's failure surface.
 
-## 7. Audit considerations
+## 7. Self-review considerations
 
-### 7.1 Surface change for delta audit
+External audit (Accretion) is **no longer engaged**. The team will
+self-review using the checklist in § 10.B before merging. This section
+documents the surface area + risk mapping so the self-review has a
+single place to look.
+
+### 7.1 Surface change
 
 | Touched | LOC delta (estimate) | Risk |
 |---|---|---|
@@ -485,38 +494,55 @@ consistent with the rest of the program's failure surface.
 | Test suite migration (Approach A) | +30 / 0 in `common.ts` | None |
 | `program-v2/scripts/fee-paths.txt` (add 6 forbidden symbols) | +6 | None |
 
-Estimated audit scope: 1 function (the new `try_collect_fee`). The path
-is mostly "the existing skip points become returns" plus an inline
-account-creation block.
+Estimated review scope: 1 function (the new `try_collect_fee`). The
+path is mostly "the existing skip points become returns" plus an
+inline account-creation block.
 
-### 7.2 Specific questions for Accretion
+### 7.2 What the change does NOT touch
 
-1. Inline `system_instruction::create_account` from inside the entrypoint
-   (before the inner processor runs) — any concern about CPI-stack-height
-   accounting for the inner processor?
-2. The new error codes 4007–4012 are returned from the entrypoint, before
-   any processor logic. Confirm this is consistent with audit-level
-   guidance on early-return error reporting.
-3. The `FeeRecord` auto-create reuses the canonical `[b"fee_record", payer]`
-   seeds with the bump derived inside the entrypoint. Confirm this matches
-   the expectations of finding R-1 (admin-not-rotatable) — there's no
-   privilege-escalation path because the seed is payer-bound.
-4. Approach A vs B preference, given Accretion's general guidance on
-   feature-flag complexity vs single-code-path auditability.
+The previously-reviewed bytes for the following remain intact (no
+changes to function bodies — only the entrypoint's invocation gate
+changes):
 
-### 7.3 Re-audit scope
-
-A delta audit on a single 90-LOC function should be inexpensive. The
-proposal does not touch:
-
-- secp256r1 verification
-- session permission enforcement
-- compact-instruction packing
-- vault invariants (H1 fix)
-- admin-pda owner checks (H2 fix)
+- secp256r1 verification (`auth/secp256r1/mod.rs`)
+- session permission enforcement (`processor/execute/actions.rs`)
+- compact-instruction packing (`compact.rs`)
+- vault invariants (H1 fix in `processor/execute/immediate.rs`)
+- admin-pda owner checks (H2 fix in `processor/protocol/*`)
 - counter / replay logic
+- account discriminators + state struct layouts
 
-All of those remain at their previously-audited bytes.
+This is a tight, localised change on a function that was already
+designed for being the single fee gate. The previous opt-in path
+returns become error returns; the fee-charging path itself is
+mostly unchanged.
+
+### 7.3 Self-review risk areas (must be checked manually — see § 10.B)
+
+1. **Inline `system_instruction::create_account`** from the entrypoint —
+   verify CPI-stack-height accounting still leaves room for the inner
+   processor's CPIs, especially Execute (which CPIs into user
+   programs). Bound: BPF_MAX_INSTRUCTION_DEPTH = 4. Entrypoint
+   invocation is depth 1; create_account → depth 2; processor runs at
+   depth 1 (it's not a sub-CPI, just sequential code in the same call
+   frame); processor's user CPI → depth 2. Math should hold but
+   verify with a test that exercises a deeply-nested CPI.
+2. **Early-return error codes 4007–4012** — verify they don't shadow
+   any existing error code (none do; existing range stops at 4006).
+   Verify they're returned before any state mutation (they are by
+   construction — all in the validation prologue).
+3. **`FeeRecord` auto-create seed binding** — `[b"fee_record",
+   payer.key()]`. The entrypoint MUST assert
+   `maybe_record.key() == expected_pda` before invoking
+   `create_account`. Privilege escalation is impossible because the
+   payer must sign the tx (they're `accounts[0]` with `is_signer =
+   true` per the upstream processors' account layout assertions —
+   verify this assumption holds for all three discriminators 0/4/7).
+4. **Bootstrap window** — between deploy and first
+   `initialize_protocol`, every 0/4/7 instruction returns 4008. This
+   is intended but the deploy runbook (§ 6.2) MUST land in the same
+   PR as the implementation, otherwise an admin who forgets step 3/4
+   leaves the program inert.
 
 ## 8. Open questions
 
@@ -572,19 +598,147 @@ guards this). Treated as expected behaviour.
 
 ## 10. Next steps (sequencing)
 
-1. ✱ **This document → Accretion review.** Estimated 1 week.
-2. After sign-off: implement on a feature branch
-   `feat/strict-fee-enforcement`. ~3 days code + tests.
-3. Open PR; request delta audit on the single function. ~1 week.
-4. After audit clean: merge, then mainnet deploy with the new runbook
-   (§ 6.2). The very next admin-signed tx after deploy must be
-   `initialize_protocol`.
-5. After deploy: update `program-v2/scripts/fee-paths.txt` with the new
-   forbidden symbols (one-line cherry-pick).
+### 10.A Sequencing
 
-Total elapsed: ~3 weeks calendar from sign-off to mainnet, gated mostly on
-audit lead time. No mainnet deploy of the commercial binary should happen
-without this fix.
+1. ✱ **This document → internal team review on PR #23.** ~1–2 days.
+2. After internal sign-off: implement on a feature branch
+   `feat/strict-fee-enforcement` (~2–3 days code + tests).
+3. Open implementation PR. Run the **self-review checklist (§ 10.B)**
+   end-to-end, attach the completed checklist as a PR comment.
+4. Merge after the checklist passes + all tests green. Mainnet deploy
+   uses the new runbook (§ 6.2). The very next admin-signed tx after
+   deploy must be `initialize_protocol`.
+5. After deploy: update `program-v2/scripts/fee-paths.txt` with the
+   new forbidden symbols (one-line cherry-pick).
+
+Total elapsed: ~1 week calendar from sign-off to mainnet (no external
+audit gate). Mainnet commercial deploy MUST NOT happen without this
+fix in place.
+
+### 10.B Self-review checklist (must complete before merge)
+
+Reviewer must check each item ON the implementation PR (not on this
+proposal PR). Each `[ ]` becomes `[x]` only after the reviewer has
+read the relevant code path AND there is a test that exercises it.
+
+#### Entrypoint correctness
+
+- [ ] All five reject paths in `try_collect_fee` (4007 / 4008 / 4009 /
+      4010 / 4011 / 4012) return BEFORE any account is mutated.
+- [ ] No `Ok(accounts)` skip path remains in the strict version.
+- [ ] Match arms for `discriminator` use `unreachable!()` for
+      values outside `{0, 4, 7}` — entrypoint dispatcher already
+      restricts to those, but assert defensively.
+- [ ] `try_borrow_data` / `try_borrow_mut_data` are released
+      (`drop(data)`) before any CPI to avoid borrow conflicts.
+- [ ] `checked_add` on counter + `total_paid` increments — overflow
+      returns 4013 `Overflow`, not silent wrap.
+
+#### FeeRecord auto-create
+
+- [ ] PDA seed is exactly `[b"fee_record", payer.key()]` — no extra
+      bytes, no salt drift from the existing `register_payer`
+      handler.
+- [ ] `maybe_record.key() == expected_pda` is asserted BEFORE the
+      `create_account` CPI (else attacker-controlled PDA could be
+      created).
+- [ ] `payer` is verified as a signer (it must be — the inner
+      processors all require it; document assumption explicitly in
+      a comment).
+- [ ] Initial struct field zero-init: discriminator,
+      bump, payer, wallet_count=0, execute_count=0, total_paid=0.
+      No leftover bytes from previous account at the same address
+      (System::create_account allocates fresh).
+- [ ] Branch where `maybe_record.owner() != program_id &&
+      maybe_record.owner() != SYSTEM_PROGRAM_ID` returns 4012, not
+      panic.
+
+#### CPI stack budget
+
+- [ ] Confirm via test: a deeply-CPI'd Execute (e.g., session →
+      Jupiter swap) still works with the new auto-create branch
+      having taken effect on a previous tx. Stack max is 4; the
+      auto-create branch adds depth 2 transiently before the
+      processor runs at depth 1, so processor's CPIs still have 3
+      levels available.
+
+#### Test coverage
+
+- [ ] Each new error code has at least one test in
+      `tests-sdk-kit/tests/16-strict-fee.test.ts`.
+- [ ] First-time payer auto-create produces a valid
+      `FeeRecord` with correct field values (decode and assert).
+- [ ] Second tx from same payer increments wallet_count to 2 (not
+      reset to 1).
+- [ ] CreateWallet / Execute / ExecuteDeferred all charge the
+      correct fee variant (creation_fee for 0, execution_fee for
+      4 + 7).
+- [ ] Bootstrap window: pre-init CreateWallet returns 4008 (not
+      panic, not silent skip).
+- [ ] Existing tests in 01–15 (after Approach A migration) still
+      green.
+
+#### `program-v2` parity
+
+- [ ] `scripts/fee-paths.txt` updated with the six new forbidden
+      symbols.
+- [ ] `bash scripts/check-no-fee.sh` still passes on program-v2 main.
+- [ ] No new file in lazorkit-protocol introduces a path that needs
+      to be added to fee-paths.txt for stripping (the change is
+      entirely within existing files).
+
+#### SDK changes
+
+- [ ] `@lazorkit/sdk-legacy` still produces byte-identical
+      transactions for the happy path (test against a strict-mode
+      validator, all 12-protocol-fees tests still pass).
+- [ ] `resolveProtocolFeeWithRegister` simplification doesn't
+      change wire format on the happy path; no need to bump SDK
+      major version.
+- [ ] Remove the in-memory `_registeredPayers` cache (no longer
+      needed — on-chain auto-create handles first-time-per-payer).
+
+#### CI gates
+
+- [ ] `scripts/check-strict-fee.sh` (new) greps the built `.so` for
+      4007–4012 markers; CI workflow runs it on the
+      `--features mainnet` build.
+- [ ] Existing `sbf-cluster-check.yml` still passes (mainnet ≠
+      devnet binaries).
+
+#### Operational
+
+- [ ] `docs/DEPLOY_RUNBOOK.md` updated with the post-deploy
+      `initialize_protocol` + `initialize_treasury_shard × N` step.
+- [ ] Multisig signers briefed on the new sign-required ops
+      (init_protocol is admin-only).
+- [ ] Rollback plan documented: if init step fails, the program is
+      inert (no public ops succeed) — this is safer than partial
+      enforcement, but the team must redeploy or fix before
+      announcing.
+
+### 10.C Why self-review is sufficient here
+
+The change is unusually amenable to self-review because:
+
+1. **Surface is tiny** — one function, ~90 LOC, with a clear
+   precondition (post-init) → expected effect (charge + bump)
+   contract.
+2. **Failure modes are loud** — every reject path returns a custom
+   error code, no silent skip, no partial state mutation. A test
+   suite that hits every reject path provides high confidence.
+3. **No new cryptography, no new account layouts, no new instruction
+   data formats** — purely a control-flow change in the gate. The
+   bytes that previous audits signed off on remain signed off.
+4. **Empirical bypass is reproducible** — we have the demonstration
+   from § 1.3. Any successful strict-mode implementation must make
+   that demonstration FAIL. This is a concrete, testable acceptance
+   criterion.
+
+For sections 4-7-8-9 the team should still do a careful walkthrough
+of the proposal during the implementation PR review, with at least
+two reviewers: one focused on Rust correctness, one focused on
+operational impact (deploy runbook, multisig flow, monitoring).
 
 ---
 
