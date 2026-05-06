@@ -1,0 +1,66 @@
+{
+  "name": "@lazorkit/sdk",
+  "version": "0.1.0-alpha.1",
+  "description": "LazorKit Protocol TypeScript SDK — passkey-based smart wallet on Solana (Solana Kit / web3.js v2)",
+  "keywords": [
+    "solana",
+    "solana-kit",
+    "wallet",
+    "smart-wallet",
+    "passkey",
+    "webauthn",
+    "secp256r1",
+    "session-keys",
+    "lazorkit"
+  ],
+  "license": "MIT",
+  "author": "LazorKit",
+  "homepage": "https://github.com/lazor-kit/lazorkit-protocol#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lazor-kit/lazorkit-protocol.git",
+    "directory": "sdk/sdk-kit"
+  },
+  "bugs": {
+    "url": "https://github.com/lazor-kit/lazorkit-protocol/issues"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "peerDependencies": {
+    "@solana/kit": "^6.9.0"
+  },
+  "devDependencies": {
+    "@solana/kit": "^6.9.0",
+    "@solana/web3.js": "^1.98.4",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}
