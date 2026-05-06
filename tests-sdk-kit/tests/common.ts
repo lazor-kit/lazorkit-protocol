@@ -27,11 +27,7 @@ import {
   type SolanaRpcSubscriptionsApi,
   type TransactionSigner,
 } from '@solana/kit';
-import {
-  LazorKit,
-  PROGRAM_ID_DEVNET,
-  type LazorKitRpc,
-} from '@lazorkit/sdk';
+import { LazorKit, PROGRAM_ID_DEVNET, type LazorKitRpc } from '@lazorkit/sdk';
 
 export const RPC_URL = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
 export const RPC_WS_URL = process.env.RPC_WS_URL ?? 'ws://127.0.0.1:8900';
@@ -67,7 +63,10 @@ export async function setupTest(): Promise<TestContext> {
     commitment: 'confirmed',
   });
 
-  const sendAndConfirm = sendAndConfirmTransactionFactory({ rpc, rpcSubscriptions });
+  const sendAndConfirm = sendAndConfirmTransactionFactory({
+    rpc,
+    rpcSubscriptions,
+  });
 
   return { rpc, rpcSubscriptions, payer, sendAndConfirm };
 }
@@ -128,14 +127,26 @@ export async function sendTxExpectError(
     const msg = String(err);
     if (msg.includes('Transaction should have failed')) throw err;
     if (expectedErrorCode !== undefined) {
+      // kit's SolanaError wraps the on-chain custom error code inside
+      // err.context.cause.context.error (an object like
+      // `{ InstructionError: [0, { Custom: 3006 }] }`). Walk the cause
+      // chain + serialize the whole thing to make matching robust.
+      const fullDump = serializeError(err);
       const hexCode = expectedErrorCode.toString(16);
-      if (
-        !msg.includes(`0x${hexCode}`) &&
-        !msg.includes(`Custom(${expectedErrorCode})`) &&
-        !msg.includes(`custom: ${expectedErrorCode}`)
-      ) {
+      const numStr = String(expectedErrorCode);
+      const matches =
+        fullDump.includes(`0x${hexCode}`) ||
+        fullDump.includes(`Custom(${expectedErrorCode})`) ||
+        fullDump.includes(`custom: ${expectedErrorCode}`) ||
+        // kit JSON-shaped: `"Custom":3006`
+        fullDump.includes(`"Custom":${numStr}`) ||
+        // And: `'Custom':3006` (some serializers)
+        fullDump.includes(`'Custom':${numStr}`) ||
+        // kit's SolanaError stringification: `Custom program error: #3006`
+        fullDump.includes(`Custom program error: #${numStr}`);
+      if (!matches) {
         throw new Error(
-          `Expected error code ${expectedErrorCode} (0x${hexCode}), got: ${msg}`,
+          `Expected error code ${expectedErrorCode} (0x${hexCode}), got: ${fullDump}`,
         );
       }
     }
@@ -143,9 +154,97 @@ export async function sendTxExpectError(
   }
 }
 
+function serializeError(err: unknown): string {
+  if (err == null) return String(err);
+  const seen = new WeakSet();
+  const replacer = (_k: string, v: unknown) => {
+    if (typeof v === 'bigint') return v.toString();
+    if (typeof v === 'object' && v !== null) {
+      if (seen.has(v as object)) return '[circular]';
+      seen.add(v as object);
+    }
+    return v;
+  };
+  // Walk cause chain so kit's nested error structure is included.
+  const chain: unknown[] = [];
+  let cur: unknown = err;
+  for (let i = 0; i < 8 && cur != null; i++) {
+    chain.push(cur);
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  try {
+    const parts = chain.map((e) => {
+      const own = Object.getOwnPropertyNames(e as object);
+      return (
+        JSON.stringify(e, [...own, 'context', 'cause'], replacer) || String(e)
+      );
+    });
+    return parts.join(' || ') + ' || ' + String(err);
+  } catch {
+    return String(err);
+  }
+}
+
 export async function getSlot(ctx: TestContext): Promise<bigint> {
   const slot = await ctx.rpc.getSlot({ commitment: 'confirmed' }).send();
   return slot;
+}
+
+/**
+ * Build a SystemProgram Transfer instruction where `from` is NOT a
+ * regular signer (e.g. a wallet vault PDA — the on-chain LazorKit
+ * program signs for it via PDA invocation). @solana-program/system's
+ * getTransferSolInstruction requires `source: TransactionSigner` which
+ * we don't have for PDAs, so we hand-build the layout. Wire format:
+ *   data:    [u32 LE: ix_disc=2] [u64 LE: lamports]
+ *   keys:    from (writable, NOT signer) → to (writable, NOT signer)
+ */
+export function systemTransferFromPda(
+  from: import('@solana/kit').Address,
+  to: import('@solana/kit').Address,
+  lamports: bigint,
+): Instruction {
+  const data = new Uint8Array(12);
+  // 4-byte discriminator (Transfer = 2)
+  new DataView(data.buffer).setUint32(0, 2, /* le */ true);
+  new DataView(data.buffer).setBigUint64(4, lamports, /* le */ true);
+  return {
+    programAddress:
+      '11111111111111111111111111111111' as import('@solana/kit').Address,
+    accounts: [
+      { address: from, role: /* WRITABLE */ 1 },
+      { address: to, role: /* WRITABLE */ 1 },
+    ],
+    data,
+  };
+}
+
+/** Helper: get an Address's lamports balance via the RPC. */
+export async function getBalance(
+  ctx: TestContext,
+  address: import('@solana/kit').Address,
+): Promise<bigint> {
+  const info = await ctx.rpc
+    .getBalance(address, { commitment: 'confirmed' })
+    .send();
+  return info.value;
+}
+
+/** Airdrop convenience for vault funding inside tests. */
+export async function airdrop(
+  ctx: TestContext,
+  to: import('@solana/kit').Address,
+  amount: bigint,
+): Promise<void> {
+  const airdropFn = airdropFactory({
+    rpc: ctx.rpc as never,
+    rpcSubscriptions: ctx.rpcSubscriptions as never,
+  });
+  await airdropFn({
+    recipientAddress: to,
+    lamports: lamports(amount),
+    commitment: 'confirmed',
+  });
 }
 
 /**

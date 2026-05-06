@@ -38,11 +38,13 @@ describe('CreateWallet', () => {
     const ownerSigner: KeyPairSigner = await generateKeyPairSigner();
     const userSeed = crypto.randomBytes(32);
 
-    const { instructions, walletPda, authorityPda } = await client.createWallet({
-      payer: ctx.payer.address,
-      userSeed,
-      owner: { type: 'ed25519', publicKey: ownerSigner.address },
-    });
+    const { instructions, walletPda, authorityPda } = await client.createWallet(
+      {
+        payer: ctx.payer.address,
+        userSeed,
+        owner: { type: 'ed25519', publicKey: ownerSigner.address },
+      },
+    );
 
     await sendTx(ctx, instructions);
 
@@ -82,16 +84,18 @@ describe('CreateWallet', () => {
     const key = await generateMockSecp256r1Key();
     const userSeed = crypto.randomBytes(32);
 
-    const { instructions, walletPda, authorityPda } = await client.createWallet({
-      payer: ctx.payer.address,
-      userSeed,
-      owner: {
-        type: 'secp256r1',
-        credentialIdHash: key.credentialIdHash,
-        compressedPubkey: key.publicKeyBytes,
-        rpId: key.rpId,
+    const { instructions, walletPda, authorityPda } = await client.createWallet(
+      {
+        payer: ctx.payer.address,
+        userSeed,
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: key.credentialIdHash,
+          compressedPubkey: key.publicKeyBytes,
+          rpId: key.rpId,
+        },
       },
-    });
+    );
 
     await sendTx(ctx, instructions);
 
@@ -142,8 +146,11 @@ describe('CreateWallet', () => {
       // the on-chain "already in use" is in the cause/logs. Either way,
       // the second send must fail.
       expect(err).toBeDefined();
-      const all = JSON.stringify(err, Object.getOwnPropertyNames(err)) + String(err);
-      expect(all).toMatch(/already in use|0x0|uninitialized|simulation failed/i);
+      const all =
+        JSON.stringify(err, Object.getOwnPropertyNames(err)) + String(err);
+      expect(all).toMatch(
+        /already in use|0x0|uninitialized|simulation failed/i,
+      );
     }
   });
 });

@@ -105,7 +105,9 @@ export async function fakeWebAuthnSign(
     origin: `https://${key.rpId}`,
     crossOrigin: false,
   });
-  const clientDataJsonBytes = new Uint8Array(Buffer.from(clientDataJson, 'utf-8'));
+  const clientDataJsonBytes = new Uint8Array(
+    Buffer.from(clientDataJson, 'utf-8'),
+  );
   const clientDataJsonHash = new Uint8Array(
     crypto.createHash('sha256').update(clientDataJsonBytes).digest(),
   );
