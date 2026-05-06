@@ -23,17 +23,21 @@ import {
 import {
   LazorKit,
   SYSTEM_PROGRAM_ADDRESS,
-  createExecuteDeferredIx,
-  createReclaimDeferredIx,
   decodeAuthorityAccount,
   packCompactInstructions,
 } from '@lazorkit/sdk';
+// Low-level instruction builders — internal-only.
+import {
+  createExecuteDeferredIx,
+  createReclaimDeferredIx,
+} from '../../sdk/sdk-kit/src/instructions/builders.js';
 import {
   setupTest,
   sendTx,
   sendTxExpectError,
   airdrop,
   getBalance,
+  resolveFeeAccts,
   systemTransferFromPda,
   type TestContext,
   makeClient,
@@ -217,6 +221,7 @@ describe('Deferred Execution', () => {
       ];
       const wrongPacked = packCompactInstructions(wrongCompact);
 
+      const tamperedFee = await resolveFeeAccts(ctx.rpc as never, ctx.payer.address);
       const tamperedIx = createExecuteDeferredIx({
         payer: ctx.payer.address,
         walletPda,
@@ -225,6 +230,7 @@ describe('Deferred Execution', () => {
         refundDestination: ctx.payer.address,
         packedInstructions: wrongPacked,
         remainingAccounts: deferredPayload.remainingAccounts,
+        protocolFee: tamperedFee,
         programId: client.programId,
       });
       await sendTxExpectError(ctx, [tamperedIx], [], 3015);

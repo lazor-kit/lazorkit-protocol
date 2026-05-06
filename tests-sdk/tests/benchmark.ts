@@ -26,10 +26,6 @@ import {
   findVaultPda,
   findAuthorityPda,
   findSessionPda,
-  createCreateWalletIx,
-  createAddAuthorityIx,
-  createExecuteIx,
-  createCreateSessionIx,
   packCompactInstructions,
   computeAccountsHash,
   AUTH_TYPE_ED25519,
@@ -40,10 +36,17 @@ import {
   DISC_AUTHORIZE,
   ROLE_ADMIN,
   PROGRAM_ID_DEVNET,
-  createAuthorizeIx,
-  createExecuteDeferredIx,
   computeInstructionsHash,
 } from '../../sdk/sdk-legacy/src';
+// Low-level instruction builders — internal-only.
+import {
+  createCreateWalletIx,
+  createAddAuthorityIx,
+  createExecuteIx,
+  createCreateSessionIx,
+  createAuthorizeIx,
+  createExecuteDeferredIx,
+} from '../../sdk/sdk-legacy/src/utils/instructions';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
   prepareSecp256r1,

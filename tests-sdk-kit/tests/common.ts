@@ -50,6 +50,56 @@ export interface TestContext {
   sendAndConfirm: ReturnType<typeof sendAndConfirmTransactionFactory>;
 }
 
+// ─── Strict-fee setup (Approach A from the proposal) ─────────────────
+//
+// Strict-fee enforcement on the commercial binary requires every disc
+// 0/4/7 instruction to carry a valid [ProtocolConfig, FeeRecord,
+// TreasuryShard, SystemProgram] suffix. Pre-init wallet creation
+// fails with 4009 ProtocolNotInitialized. So every test suite has to
+// ensure ProtocolConfig is initialized before its first
+// CreateWallet / Execute / ExecuteDeferred — otherwise *every* test
+// breaks.
+//
+// To keep the per-test-file `setupTest()` stable, we lift protocol
+// init to the module level: the first `setupTest()` call across the
+// entire vitest run creates a shared admin + treasury keypair-signer
+// and runs `initialize_protocol` + `initialize_treasury_shard × NUM_SHARDS`.
+// Subsequent calls are no-ops.
+//
+// Tests that need admin-only operations (UpdateProtocol, WithdrawTreasury)
+// import `getProtocolAdmin()` to get the shared admin signer.
+
+const NUM_SHARDS = 4;
+const CREATION_FEE = 5_000n; // 0.000005 SOL — fits all test budgets
+const EXECUTION_FEE = 2_000n;
+
+let _initialized = false;
+let _adminSigner: KeyPairSigner | undefined;
+let _treasurySigner: KeyPairSigner | undefined;
+
+/**
+ * Returns the shared admin keypair signer. Throws if init hasn't
+ * happened yet — callers must chain after a `setupTest()` in their
+ * `beforeAll`.
+ */
+export function getProtocolAdmin(): KeyPairSigner {
+  if (!_adminSigner) {
+    throw new Error(
+      'getProtocolAdmin() called before setupTest(). ' +
+        'Call setupTest() in beforeAll first.',
+    );
+  }
+  return _adminSigner;
+}
+
+/** Returns the shared treasury keypair signer. Same usage rules. */
+export function getProtocolTreasury(): KeyPairSigner {
+  if (!_treasurySigner) {
+    throw new Error('getProtocolTreasury() called before setupTest()');
+  }
+  return _treasurySigner;
+}
+
 export async function setupTest(): Promise<TestContext> {
   const rpc = createSolanaRpc(RPC_URL);
   const rpcSubscriptions = createSolanaRpcSubscriptions(RPC_WS_URL);
@@ -68,7 +118,74 @@ export async function setupTest(): Promise<TestContext> {
     rpcSubscriptions,
   });
 
-  return { rpc, rpcSubscriptions, payer, sendAndConfirm };
+  const ctx: TestContext = { rpc, rpcSubscriptions, payer, sendAndConfirm };
+  await ensureProtocolInitialized(ctx);
+  return ctx;
+}
+
+/**
+ * Idempotent protocol initializer. Runs at most once per vitest process.
+ *
+ * Order of effects:
+ *   1. Generate `_adminSigner` + `_treasurySigner` (module-level)
+ *   2. Airdrop a small amount to the admin so it can sign
+ *      `initialize_treasury_shard` (which requires admin to be a writable signer)
+ *   3. Probe `ProtocolConfig` PDA via `client.getProtocolConfig()`
+ *      - If null: validator is fresh → run init + shard creation
+ *      - If non-null: validator carries leftover state from a previous
+ *        run; rare, but tolerated. The shared admin won't be able to
+ *        sign UpdateProtocol etc. against the leftover config — that's
+ *        an explicit failure mode, document for users.
+ */
+async function ensureProtocolInitialized(ctx: TestContext): Promise<void> {
+  if (_initialized) return;
+  _initialized = true; // claim the slot before any await — no double-init
+
+  _adminSigner = await generateKeyPairSigner();
+  _treasurySigner = await generateKeyPairSigner();
+
+  // Fund admin so it can sign initialize_treasury_shard.
+  const airdrop = airdropFactory({
+    rpc: ctx.rpc as never,
+    rpcSubscriptions: ctx.rpcSubscriptions as never,
+  });
+  await airdrop({
+    recipientAddress: _adminSigner.address,
+    lamports: lamports(1n * 1_000_000_000n),
+    commitment: 'confirmed',
+  });
+
+  const client = makeClient(ctx.rpc as never);
+  const config = await client.getProtocolConfig();
+  if (config && config.enabled) {
+    console.warn(
+      '[tests-sdk-kit/common.ts] ProtocolConfig already initialized on this validator. ' +
+        'Admin-only tests will fail unless you --reset the validator.',
+    );
+    return;
+  }
+
+  // Fresh validator — initialize protocol + shards.
+  const init = await client.initializeProtocol({
+    payer: ctx.payer.address,
+    admin: _adminSigner.address,
+    treasury: _treasurySigner.address,
+    creationFee: CREATION_FEE,
+    executionFee: EXECUTION_FEE,
+    numShards: NUM_SHARDS,
+  });
+  await sendTx(ctx, init.instructions);
+
+  for (let i = 0; i < NUM_SHARDS; i++) {
+    const shard = await client.initializeTreasuryShard({
+      payer: ctx.payer.address,
+      admin: _adminSigner.address,
+      shardId: i,
+    });
+    await sendTx(ctx, shard.instructions, [_adminSigner]);
+  }
+
+  client.invalidateProtocolCache();
 }
 
 /**
@@ -173,11 +290,20 @@ function serializeError(err: unknown): string {
     cur = (cur as { cause?: unknown }).cause;
   }
   try {
+    // Walk own properties manually instead of using JSON's allowlist arg
+    // (TS overloads make passing both an allowlist + a replacer fn
+    // ambiguous). We use the replacer-only form and inline the
+    // own-properties dump for each link in the cause chain.
     const parts = chain.map((e) => {
-      const own = Object.getOwnPropertyNames(e as object);
-      return (
-        JSON.stringify(e, [...own, 'context', 'cause'], replacer) || String(e)
-      );
+      const obj: Record<string, unknown> = {};
+      for (const k of Object.getOwnPropertyNames(e as object)) {
+        obj[k] = (e as Record<string, unknown>)[k];
+      }
+      try {
+        return JSON.stringify(obj, replacer) || String(e);
+      } catch {
+        return String(e);
+      }
     });
     return parts.join(' || ') + ' || ' + String(err);
   } catch {
@@ -188,6 +314,34 @@ function serializeError(err: unknown): string {
 export async function getSlot(ctx: TestContext): Promise<bigint> {
   const slot = await ctx.rpc.getSlot({ commitment: 'confirmed' }).send();
   return slot;
+}
+
+/**
+ * Helper for tests that bypass the high-level client and call low-level
+ * builders (createCreateWalletIx / createExecuteIx /
+ * createExecuteDeferredIx) directly. Strict-fee enforcement requires
+ * those calls to carry the [ProtocolConfig, FeeRecord, TreasuryShard,
+ * SystemProgram] suffix; resolveFeeAccts() returns the three program-
+ * owned accounts (the SystemProgram one is appended by the builder
+ * helper). Tests pass the result as the `protocolFee` arg.
+ */
+export async function resolveFeeAccts(
+  rpc: LazorKitRpc,
+  payer: Address,
+): Promise<{
+  protocolConfigPda: Address;
+  feeRecordPda: Address;
+  treasuryShardPda: Address;
+}> {
+  const client = makeClient(rpc);
+  const accts = await client.resolveProtocolFee(payer);
+  if (!accts) {
+    throw new Error(
+      'resolveFeeAccts: ProtocolConfig is not initialized or disabled. ' +
+        'Did setupTest() run? Did the validator start with --reset?',
+    );
+  }
+  return accts;
 }
 
 /**

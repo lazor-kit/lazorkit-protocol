@@ -23,9 +23,6 @@ import {
   ROLE_SPENDER,
   SYSTEM_PROGRAM_ADDRESS,
   computeAccountsHash,
-  createAddAuthorityIx,
-  createCreateWalletIx,
-  createExecuteIx,
   decodeAuthorityAccount,
   finalizeSecp256r1,
   findAuthorityPda,
@@ -34,11 +31,18 @@ import {
   packCompactInstructions,
   prepareSecp256r1,
 } from '@lazorkit/sdk';
+// Low-level instruction builders — internal-only.
+import {
+  createAddAuthorityIx,
+  createCreateWalletIx,
+  createExecuteIx,
+} from '../../sdk/sdk-kit/src/instructions/builders.js';
 import {
   setupTest,
   sendTx,
   airdrop,
   getSlot,
+  resolveFeeAccts,
   type TestContext,
 } from './common.js';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils.js';
@@ -73,6 +77,7 @@ describe('Counter Edge Cases', () => {
       ownerKey.credentialIdHash,
       PROGRAM_ID_DEVNET,
     );
+    const protocolFee = await resolveFeeAccts(ctx.rpc as never, ctx.payer.address);
 
     await sendTx(ctx, [
       createCreateWalletIx({
@@ -86,6 +91,7 @@ describe('Counter Edge Cases', () => {
         credentialOrPubkey: ownerKey.credentialIdHash,
         secp256r1Pubkey: ownerKey.publicKeyBytes,
         rpId: ownerKey.rpId,
+        protocolFee,
         programId: PROGRAM_ID_DEVNET,
       }),
     ]);
@@ -192,6 +198,7 @@ describe('Counter Edge Cases', () => {
           { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
           { address: execRecipient, role: AccountRole.WRITABLE },
         ],
+        protocolFee,
         programId: PROGRAM_ID_DEVNET,
       }),
     ]);
@@ -211,6 +218,7 @@ describe('Counter Edge Cases', () => {
       key1.credentialIdHash,
       PROGRAM_ID_DEVNET,
     );
+    const protocolFee = await resolveFeeAccts(ctx.rpc as never, ctx.payer.address);
 
     await sendTx(ctx, [
       createCreateWalletIx({
@@ -224,6 +232,7 @@ describe('Counter Edge Cases', () => {
         credentialOrPubkey: key1.credentialIdHash,
         secp256r1Pubkey: key1.publicKeyBytes,
         rpId: key1.rpId,
+        protocolFee,
         programId: PROGRAM_ID_DEVNET,
       }),
     ]);

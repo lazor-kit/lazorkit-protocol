@@ -24,10 +24,6 @@ import {
   findVaultPda,
   findAuthorityPda,
   findDeferredExecPda,
-  createCreateWalletIx,
-  createAuthorizeIx,
-  createExecuteDeferredIx,
-  createReclaimDeferredIx,
   packCompactInstructions,
   computeAccountsHash,
   computeInstructionsHash,
@@ -35,6 +31,13 @@ import {
   DISC_AUTHORIZE,
   PROGRAM_ID_DEVNET,
 } from '../../sdk/sdk-legacy/src';
+// Low-level instruction builders — internal-only.
+import {
+  createCreateWalletIx,
+  createAuthorizeIx,
+  createExecuteDeferredIx,
+  createReclaimDeferredIx,
+} from '../../sdk/sdk-legacy/src/utils/instructions';
 
 describe('Deferred Execution', () => {
   let ctx: TestContext;

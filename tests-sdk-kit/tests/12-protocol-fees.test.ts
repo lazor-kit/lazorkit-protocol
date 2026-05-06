@@ -25,16 +25,21 @@ import {
   AUTH_TYPE_ED25519,
   LazorKit,
   PROGRAM_ID_DEVNET,
+  ed25519,
+} from '@lazorkit/sdk';
+// Low-level instruction builders — internal-only.
+import {
   createCreateWalletIx,
   createUpdateProtocolIx,
   createWithdrawTreasuryIx,
-  ed25519,
-} from '@lazorkit/sdk';
+} from '../../sdk/sdk-kit/src/instructions/builders.js';
 import {
   setupTest,
   sendTx,
   sendTxExpectError,
   airdrop,
+  getProtocolAdmin,
+  getProtocolTreasury,
   systemTransferFromPda,
   type TestContext,
   makeClient,
@@ -65,41 +70,17 @@ describe('Protocol Fees', () => {
   beforeAll(async () => {
     ctx = await setupTest();
     client = makeClient(ctx.rpc as never);
-    adminSigner = await generateKeyPairSigner();
-    treasurySigner = await generateKeyPairSigner();
-
-    // Fund the admin so it can pay tx fees on UpdateProtocol etc.
-    const airdropFn = airdropFactory({
-      rpc: ctx.rpc as never,
-      rpcSubscriptions: ctx.rpcSubscriptions as never,
-    });
-    await airdropFn({
-      recipientAddress: adminSigner.address,
-      lamports: lamports(2n * LAMPORTS_PER_SOL),
-      commitment: 'confirmed',
-    });
+    // Use the shared admin/treasury created globally by setupTest (Approach A).
+    // setupTest already ran initialize_protocol + initialize_treasury_shard×N
+    // with these keypairs, so the on-chain config matches what we sign with.
+    adminSigner = getProtocolAdmin();
+    treasurySigner = getProtocolTreasury();
   });
 
-  it('initializes protocol config', async () => {
-    const { instructions, protocolConfigPda } = await client.initializeProtocol({
-      payer: ctx.payer.address,
-      admin: adminSigner.address,
-      treasury: treasurySigner.address,
-      creationFee: CREATION_FEE,
-      executionFee: EXECUTION_FEE,
-      numShards: NUM_SHARDS,
-    });
-    await sendTx(ctx, instructions);
-
-    const info = await ctx.rpc
-      .getAccountInfo(protocolConfigPda, { encoding: 'base64' })
-      .send();
-    expect(info.value).not.toBeNull();
-    const data = new Uint8Array(Buffer.from(info.value!.data[0], 'base64'));
-    expect(data[0]).toBe(5); // ProtocolConfig discriminator
-    expect(data[3]).toBe(1); // enabled
-    expect(data[4]).toBe(NUM_SHARDS);
-  });
+  // Note: the standalone "initializes protocol config" + "initializes
+  // treasury shards" tests are now redundant — setupTest() does both
+  // globally on the first call across the suite. We keep "rejects double
+  // initialization" because it asserts on-chain idempotency.
 
   it('rejects double initialization', async () => {
     const { instructions } = await client.initializeProtocol({
@@ -113,17 +94,23 @@ describe('Protocol Fees', () => {
     await sendTxExpectError(ctx, instructions, [], 4001);
   });
 
-  it('initializes treasury shards', async () => {
-    for (let i = 0; i < NUM_SHARDS; i++) {
-      const { instructions, treasuryShardPda } = await client.initializeTreasuryShard({
-        payer: ctx.payer.address,
-        admin: adminSigner.address,
-        shardId: i,
-      });
-      await sendTx(ctx, instructions, [adminSigner]);
+  it('protocol config is initialized + valid', async () => {
+    const [protocolConfigPda] = await client.findProtocolConfig();
+    const info = await ctx.rpc
+      .getAccountInfo(protocolConfigPda, { encoding: 'base64' })
+      .send();
+    expect(info.value).not.toBeNull();
+    const data = new Uint8Array(Buffer.from(info.value!.data[0], 'base64'));
+    expect(data[0]).toBe(5); // ProtocolConfig discriminator
+    expect(data[3]).toBe(1); // enabled
+    expect(data[4]).toBe(NUM_SHARDS);
+  });
 
+  it('treasury shards are initialized', async () => {
+    for (let i = 0; i < NUM_SHARDS; i++) {
+      const [shardPda] = await client.findTreasuryShard(i);
       const info = await ctx.rpc
-        .getAccountInfo(treasuryShardPda, { encoding: 'base64' })
+        .getAccountInfo(shardPda, { encoding: 'base64' })
         .send();
       expect(info.value).not.toBeNull();
       const data = new Uint8Array(Buffer.from(info.value!.data[0], 'base64'));
@@ -254,16 +241,15 @@ describe('Protocol Fees', () => {
     expect(after - before).toBe(EXECUTION_FEE);
   });
 
-  it('charges fee for unregistered payer but skips FeeRecord counter update', async () => {
-    // Use a fresh payer that has not yet self-registered. The high-level
-    // createWallet auto-prepends RegisterPayer for first-time payers, so
-    // we go through the low-level builder to bypass that.
+  it('auto-creates FeeRecord inline for first-time unregistered payer', async () => {
+    // Strict mode replaces the pre-strict "skip counter update" path
+    // with inline auto-create. An unregistered payer's first
+    // fee-paying tx must result in: (a) fee charged to a shard, (b)
+    // FeeRecord PDA auto-created with valid discriminator, (c)
+    // wallet_count == 1.
     const newPayer = await generateKeyPairSigner();
     await airdrop(ctx, newPayer.address, 5n * LAMPORTS_PER_SOL);
 
-    // resolveProtocolFee returns 4 fee accounts even for an unregistered
-    // payer — the on-chain entrypoint detects the missing FeeRecord and
-    // adapts (charges fee, skips counter bump).
     const protocolFee = await client.resolveProtocolFee(newPayer.address);
     expect(protocolFee).toBeDefined();
     const [expectedFeeRecordPda] = await client.findFeeRecord(newPayer.address);
@@ -299,17 +285,23 @@ describe('Protocol Fees', () => {
       programId: PROGRAM_ID_DEVNET,
     });
 
-    // Send with the new payer as fee payer.
     await sendTx({ ...ctx, payer: newPayer }, [ix]);
 
     const after = await sumShardBalances();
     expect(after - before).toBe(CREATION_FEE);
 
-    // FeeRecord PDA still doesn't exist.
+    // Strict-mode change: FeeRecord MUST exist after the tx, with the
+    // canonical discriminator (6) and wallet_count == 1.
     const feeRecordInfoAfter = await ctx.rpc
       .getAccountInfo(protocolFee!.feeRecordPda, { encoding: 'base64' })
       .send();
-    expect(feeRecordInfoAfter.value).toBeNull();
+    expect(feeRecordInfoAfter.value).not.toBeNull();
+    const recBytes = new Uint8Array(
+      Buffer.from(feeRecordInfoAfter.value!.data[0], 'base64'),
+    );
+    expect(recBytes[0]).toBe(6); // FeeRecord discriminator
+    const walletCount = new DataView(recBytes.buffer, recBytes.byteOffset).getUint32(20, true);
+    expect(walletCount).toBe(1);
   });
 
   it('withdraws fees from treasury shards', async () => {

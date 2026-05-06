@@ -14,7 +14,7 @@ import {
   generateKeyPairSigner,
   type AccountMeta,
   type Address,
-  type IInstruction as Instruction,
+  type Instruction,
 } from '@solana/kit';
 import {
   DISC_EXECUTE,
@@ -25,12 +25,13 @@ import {
   SYSVAR_INSTRUCTIONS_ADDRESS,
   buildCompactLayout,
   computeAccountsHash,
-  createExecuteIx,
   ed25519,
   finalizeSecp256r1,
   packCompactInstructions,
   prepareSecp256r1,
 } from '@lazorkit/sdk';
+// Low-level instruction builders — internal-only.
+import { createExecuteIx } from '../../sdk/sdk-kit/src/instructions/builders.js';
 import {
   setupTest,
   sendTx,
@@ -38,6 +39,7 @@ import {
   airdrop,
   getBalance,
   getSlot,
+  resolveFeeAccts,
   systemTransferFromPda,
   type TestContext,
   makeClient,
@@ -318,6 +320,7 @@ describe('Security', () => {
         acc.address === recipientA ? { ...acc, address: recipientB } : acc,
       );
 
+      const protocolFee = await resolveFeeAccts(ctx.rpc as never, ctx.payer.address);
       const tamperedIx = createExecuteIx({
         payer: ctx.payer.address,
         walletPda: result.walletPda,
@@ -326,6 +329,7 @@ describe('Security', () => {
         packedInstructions: packed,
         authPayload,
         remainingAccounts: tamperedRemaining,
+        protocolFee,
         programId: PROGRAM_ID_DEVNET,
       });
 

@@ -25,14 +25,21 @@ import {
   findWalletPda,
   findVaultPda,
   findAuthorityPda,
-  createCreateWalletIx,
-  createExecuteIx,
   packCompactInstructions,
   computeAccountsHash,
   AUTH_TYPE_SECP256R1,
   DISC_EXECUTE,
   PROGRAM_ID_DEVNET,
 } from '../../sdk/sdk-legacy/src';
+// Low-level instruction builders are internal-only — not part of the
+// SDK's public surface. Tests that exercise edge cases (custom
+// counter values, replay scenarios) import them directly from the
+// instructions module. dApp consumers should use `LazorKitClient`
+// methods (which auto-resolve fee accts on the fee-eligible paths).
+import {
+  createCreateWalletIx,
+  createExecuteIx,
+} from '../../sdk/sdk-legacy/src/utils/instructions';
 
 describe('Replay Prevention (Odometer)', () => {
   let ctx: TestContext;

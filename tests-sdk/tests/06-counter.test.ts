@@ -17,9 +17,6 @@ import {
   findWalletPda,
   findVaultPda,
   findAuthorityPda,
-  createCreateWalletIx,
-  createAddAuthorityIx,
-  createExecuteIx,
   packCompactInstructions,
   computeAccountsHash,
   AUTH_TYPE_SECP256R1,
@@ -30,6 +27,13 @@ import {
   DISC_EXECUTE,
   PROGRAM_ID_DEVNET,
 } from '../../sdk/sdk-legacy/src';
+// Low-level instruction builders — internal-only (see comment in
+// 05-replay.test.ts).
+import {
+  createCreateWalletIx,
+  createAddAuthorityIx,
+  createExecuteIx,
+} from '../../sdk/sdk-legacy/src/utils/instructions';
 import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
 
 describe('Counter Edge Cases', () => {

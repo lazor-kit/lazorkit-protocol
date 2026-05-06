@@ -41,11 +41,12 @@ import {
   findWalletPda,
   findVaultPda,
   findAuthorityPda,
-  createExecuteIx,
   packCompactInstructions,
   computeAccountsHash,
   DISC_EXECUTE,
 } from '../../sdk/sdk-legacy/src';
+// Low-level instruction builders — internal-only.
+import { createExecuteIx } from '../../sdk/sdk-legacy/src/utils/instructions';
 
 describe('Security', () => {
   let ctx: TestContext;

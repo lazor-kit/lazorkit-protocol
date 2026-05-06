@@ -14,7 +14,7 @@ import {
   AccountRole,
   generateKeyPairSigner,
   type Address,
-  type IInstruction as Instruction,
+  type Instruction,
   type KeyPairSigner,
 } from '@solana/kit';
 import {

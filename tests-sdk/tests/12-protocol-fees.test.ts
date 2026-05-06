@@ -13,10 +13,13 @@ import {
   LazorKitClient,
   PROGRAM_ID_DEVNET,
   AUTH_TYPE_ED25519,
+} from '../../sdk/sdk-legacy/src';
+// Low-level instruction builders — internal-only.
+import {
   createCreateWalletIx,
   createWithdrawTreasuryIx,
   createUpdateProtocolIx,
-} from '../../sdk/sdk-legacy/src';
+} from '../../sdk/sdk-legacy/src/utils/instructions';
 
 // These values match what `setupTest()` uses for the global init.
 // If the constants in `common.ts` ever change, this test file's

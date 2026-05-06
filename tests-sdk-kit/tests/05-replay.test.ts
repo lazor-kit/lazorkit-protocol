@@ -20,8 +20,6 @@ import {
   DISC_EXECUTE,
   PROGRAM_ID_DEVNET,
   computeAccountsHash,
-  createCreateWalletIx,
-  createExecuteIx,
   finalizeSecp256r1,
   findAuthorityPda,
   findVaultPda,
@@ -30,12 +28,22 @@ import {
   prepareSecp256r1,
   SYSTEM_PROGRAM_ADDRESS,
 } from '@lazorkit/sdk';
+// Low-level instruction builders are internal-only — not part of the
+// SDK's public surface. Tests that exercise edge cases (custom
+// counter values, replay scenarios) import them directly from the
+// builders module. dApp consumers should use `LazorKit` methods
+// (which auto-resolve fee accounts on the fee-eligible paths).
+import {
+  createCreateWalletIx,
+  createExecuteIx,
+} from '../../sdk/sdk-kit/src/instructions/builders.js';
 import {
   setupTest,
   sendTx,
   sendTxExpectError,
   airdrop,
   getSlot,
+  resolveFeeAccts,
   type TestContext,
 } from './common.js';
 import {
@@ -103,6 +111,7 @@ describe('Replay Prevention (Odometer)', () => {
     const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
     const { authPayload, precompileIx } = finalizeSecp256r1(prepared, response);
 
+    const protocolFee = await resolveFeeAccts(ctx.rpc as never, ctx.payer.address);
     const ix = createExecuteIx({
       payer: ctx.payer.address,
       walletPda,
@@ -114,6 +123,7 @@ describe('Replay Prevention (Odometer)', () => {
         { address: SYSTEM_PROGRAM_ADDRESS, role: AccountRole.READONLY },
         { address: recipient, role: AccountRole.WRITABLE },
       ],
+      protocolFee,
       programId: PROGRAM_ID_DEVNET,
     });
     return { precompileIx, ix };
@@ -133,6 +143,7 @@ describe('Replay Prevention (Odometer)', () => {
     );
     ownerAuthorityPda = authPda;
 
+    const setupFee = await resolveFeeAccts(ctx.rpc as never, ctx.payer.address);
     await sendTx(ctx, [
       createCreateWalletIx({
         payer: ctx.payer.address,
@@ -145,6 +156,7 @@ describe('Replay Prevention (Odometer)', () => {
         credentialOrPubkey: ownerKey.credentialIdHash,
         secp256r1Pubkey: ownerKey.publicKeyBytes,
         rpId: ownerKey.rpId,
+        protocolFee: setupFee,
         programId: PROGRAM_ID_DEVNET,
       }),
     ]);
