@@ -1,46 +1,48 @@
 #!/bin/bash
-set -e
-
-# Full build workflow: build program → generate IDL → build SDK
+# Build the Rust program for a chosen cluster, derive the program ID from
+# the resulting keypair, regenerate IDL, rebuild the SDK.
 #
 # Usage:
-#   ./scripts/build-all.sh                    # Use existing program ID
-#   ./scripts/build-all.sh <new_program_id>   # Sync program ID first
+#   ./scripts/build-all.sh devnet     # builds with --features devnet (4h3X...)
+#   ./scripts/build-all.sh mainnet    # builds with --features mainnet (LazorjRF...)
+#
+# After this script the .so + keypair live at target/deploy/. Deploy with:
+#   solana program deploy target/deploy/lazorkit_program.so -u <cluster>
+set -e
 
+CLUSTER=$1
 ROOT_DIR=$(pwd)
 PROGRAM_DIR="$ROOT_DIR/program"
 SDK_DIR="$ROOT_DIR/sdk/sdk-legacy"
 
-# Step 0: Optionally sync program ID
-if [ -n "$1" ]; then
-    echo "[0/3] Syncing Program ID to $1..."
-    ./scripts/sync-program-id.sh "$1"
+if [ "$CLUSTER" != "mainnet" ] && [ "$CLUSTER" != "devnet" ]; then
+    echo "Usage: $0 <mainnet|devnet>"
+    exit 1
 fi
 
-# Step 1: Build Rust Program
-echo "[1/3] Building Rust Program (BPF)..."
-cargo build-sbf
+echo "--- 🚀 LazorKit build (cluster: $CLUSTER) ---"
 
-# Step 2: Generate IDL using Shank
-echo "[2/3] Generating IDL..."
-PROGRAM_ID=$(grep -A1 'declare_id' "$PROGRAM_DIR/src/lib.rs" 2>/dev/null | grep -oE '[A-HJ-NP-Za-km-z1-9]{32,44}' | head -1 || echo "4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS")
+# Step 1: Build Rust Program with the chosen cluster feature.
+# This embeds the right declare_id! at compile time via assertions/src/lib.rs.
+echo "[1/3] Building Rust Program (cargo build-sbf --features $CLUSTER)..."
 cd "$PROGRAM_DIR"
+cargo build-sbf --features "$CLUSTER"
+
+# Step 2: Generate IDL using Shank, picking the program ID from the keypair
+# the build emitted at target/deploy/lazorkit_program-keypair.json.
+echo "[2/3] Generating IDL..."
+PROGRAM_ID=$(solana-keygen pubkey ../target/deploy/lazorkit_program-keypair.json)
+echo "  resolved program ID: $PROGRAM_ID"
 if command -v shank &> /dev/null; then
     shank idl -o . --out-filename idl.json -p "$PROGRAM_ID"
 else
     echo "⚠️  shank CLI not found (install: cargo install shank-cli). Skipping IDL generation."
 fi
 
-# Step 3: Build SDK
+# Step 3: Build SDK.
 echo "[3/3] Building SDK..."
 cd "$SDK_DIR"
 npm run build
 
-echo ""
-echo "✅ Build complete!"
-echo ""
-echo "To test locally:"
-echo "  cd tests-sdk && npm run test:local"
-echo ""
-echo "To deploy to devnet:"
-echo "  solana program deploy target/deploy/lazorkit_program.so -u d"
+echo "--- ✅ Done ($CLUSTER) ---"
+echo "Deploy:  solana program deploy target/deploy/lazorkit_program.so -u $([ "$CLUSTER" = "mainnet" ] && echo m || echo d)"
