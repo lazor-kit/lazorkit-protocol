@@ -15,7 +15,14 @@ A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r
 npm install @lazorkit/sdk-legacy
 ```
 
-Program ID: `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` (devnet).
+Program IDs (chosen at compile time via `--features mainnet` / `--features devnet`):
+
+| Cluster | Program ID |
+|---|---|
+| mainnet | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` |
+| devnet | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` |
+
+The mainnet slot is shared with the [program-v2](https://github.com/lazor-kit/program-v2) foundation build (no fees). `@lazorkit/sdk-legacy` works against either binary at the shared slot — see the [SDK README](sdk/sdk-legacy/README.md#cluster--program-ids) for details.
 
 ## Quick start
 
