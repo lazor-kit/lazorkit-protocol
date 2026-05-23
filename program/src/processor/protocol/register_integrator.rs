@@ -18,8 +18,8 @@ use crate::{
 ///
 /// Creates a FeeRecord PDA keyed by the payer's pubkey. Permissionless:
 /// any payer registers themselves, paying their own rent. There is no
-/// admin gate — fee collection works regardless of whether a FeeRecord
-/// exists, so this only enables stats tracking for that payer.
+/// admin gate; fee-paying instructions require this canonical record and
+/// may also create it inline when the account is still system-owned.
 ///
 /// # Accounts:
 /// 1. `[signer, writable]` Payer (funds rent; must equal target_payer)

@@ -10,7 +10,6 @@ import { createHash } from 'node:crypto';
 import {
   getAddressEncoder,
   type AccountMeta,
-  type Address,
 } from '@solana/kit';
 
 const addressEncoder = getAddressEncoder();

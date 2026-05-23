@@ -336,8 +336,10 @@ includes the relayer signature plus the secp256r1 precompile session sig.
 
 The SDK auto-prepends a `RegisterPayer` instruction on the relayer's first
 fee-paying tx per program. This costs ~1,113,600 lamports (≈0.00112 SOL)
-once, ever, per relayer. Subsequent txs skip this. Fee collection works even
-if the relayer never registers — registration only enables stats tracking.
+once, ever, per relayer. Subsequent txs skip this. Strict fee enforcement
+requires every successful fee-paying tx to have the canonical `FeeRecord`;
+custom clients that skip `RegisterPayer` must still pass that PDA so the
+entrypoint can initialize it inline.
 
 Full size/CU/cost numbers per instruction are in
 [tests-sdk/tests/benchmark-fees.ts](../../tests-sdk/tests/benchmark-fees.ts);

@@ -29,7 +29,7 @@ graph TD
     Auth -.->|Owner/Admin secp256r1 may commit| Deferred[DeferredExec PDA<br/>temporary hash commitment]
 
     Config[ProtocolConfig PDA<br/>fees, treasury, num shards] -.->|read on every fee-eligible tx| Wallet
-    FeeRecord[FeeRecord PDA<br/>per-payer stats, optional] -.->|auto-created on first fee tx| Wallet
+    FeeRecord[FeeRecord PDA<br/>required per-payer stats] -.->|created before or during first fee tx| Wallet
     Treasury[TreasuryShard PDA × N<br/>fee destination] -.->|protocol fee lands here| Wallet
 
     classDef pda fill:#e1f5ff,stroke:#0288d1,color:#000
@@ -311,7 +311,7 @@ pub struct ProtocolConfig {
 // Sharded fee destination (N shards spread write contention).
 ```
 
-Fee flow: SDK appends `[protocolConfig, feeRecord, treasuryShard, systemProgram]` to fee-eligible instructions. Entrypoint transfers `fee` from payer to a random `treasuryShard`, bumps `FeeRecord` counters if one exists (otherwise just charges the fee), then strips the 4 accounts and dispatches to the processor. Admin withdraws from shards to `treasury` via `WithdrawTreasury`.
+Fee flow: SDK appends `[protocolConfig, feeRecord, treasuryShard, systemProgram]` to fee-eligible instructions. Entrypoint validates the canonical config, fee record, and treasury shard PDAs, creates the `FeeRecord` inline if the canonical account is still system-owned, transfers `fee` from payer to a random `treasuryShard`, bumps `FeeRecord` counters, then strips the 4 accounts and dispatches to the processor. Admin withdraws from shards to `treasury` via `WithdrawTreasury`.
 
 ## Auth payload layout (Secp256r1)
 

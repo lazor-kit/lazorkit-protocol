@@ -263,7 +263,7 @@ await client.createWallet({ payer, userSeed, owner });   // 5000 lamport protoco
 await client.execute({ payer, walletPda, signer, instructions });  // 5000 lamport protocol fee
 ```
 
-**Auto-registration**: a `FeeRecord` PDA tracks per-payer cumulative fees. The SDK auto-prepends a one-time `RegisterPayer` instruction on the payer's first fee-paying tx (~0.00112 SOL of FeeRecord rent, paid by the payer). An in-memory cache short-circuits the existence check on subsequent calls. Fee collection works regardless — registration only enables stats tracking.
+**Auto-registration**: a `FeeRecord` PDA tracks per-payer cumulative fees and is required for every successful fee-paying instruction. The SDK auto-prepends a one-time `RegisterPayer` instruction on the payer's first fee-paying tx (~0.00112 SOL of FeeRecord rent, paid by the payer). An in-memory cache short-circuits the existence check on subsequent calls. The on-chain entrypoint also creates the canonical `FeeRecord` inline when a custom client supplies the correct system-owned PDA.
 
 If you want to register explicitly (e.g. to front-load the cost during onboarding):
 

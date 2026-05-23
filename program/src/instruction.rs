@@ -305,8 +305,9 @@ pub enum ProgramIx {
     },
 
     /// Register a payer for fee-stats tracking. Permissionless: the payer
-    /// signer is the registration target. Fee collection works regardless
-    /// of whether a FeeRecord exists; this only enables stats tracking.
+    /// signer is the registration target. Fee-paying instructions require
+    /// the canonical FeeRecord PDA; this instruction lets clients create it
+    /// before their first fee-paying transaction.
     #[account(
         0,
         signer,
