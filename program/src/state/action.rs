@@ -185,20 +185,20 @@ pub fn validate_actions_buffer(buf: &[u8]) -> Result<(), ProgramError> {
                     return Err(AuthError::ActionBufferInvalid.into());
                 }
                 has_sol_limit = true;
-            }
+            },
             ActionType::SolRecurringLimit => {
                 if has_sol_recurring {
                     return Err(AuthError::ActionBufferInvalid.into());
                 }
                 has_sol_recurring = true;
-            }
+            },
             ActionType::SolMaxPerTx => {
                 if has_sol_max_per_tx {
                     return Err(AuthError::ActionBufferInvalid.into());
                 }
                 has_sol_max_per_tx = true;
-            }
-            _ => {} // Repeatable types are fine
+            },
+            _ => {}, // Repeatable types are fine
         }
     }
 
@@ -217,8 +217,10 @@ pub fn validate_actions_buffer(buf: &[u8]) -> Result<(), ProgramError> {
                 .collect();
             for i in 0..token_actions.len() {
                 for j in (i + 1)..token_actions.len() {
-                    let mint_a = &buf[token_actions[i].data_offset..token_actions[i].data_offset + 32];
-                    let mint_b = &buf[token_actions[j].data_offset..token_actions[j].data_offset + 32];
+                    let mint_a =
+                        &buf[token_actions[i].data_offset..token_actions[i].data_offset + 32];
+                    let mint_b =
+                        &buf[token_actions[j].data_offset..token_actions[j].data_offset + 32];
                     if mint_a == mint_b {
                         return Err(AuthError::ActionBufferInvalid.into());
                     }
@@ -691,7 +693,7 @@ mod tests {
     fn test_validate_trailing_bytes_rejected() {
         let mut buf = build_action(3, 0, &500_000u64.to_le_bytes());
         buf.push(0xFF); // trailing garbage byte
-        // parse_actions should fail because the trailing byte doesn't form a valid header
+                        // parse_actions should fail because the trailing byte doesn't form a valid header
         assert!(validate_actions_buffer(&buf).is_err());
     }
 }

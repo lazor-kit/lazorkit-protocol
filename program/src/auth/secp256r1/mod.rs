@@ -141,17 +141,18 @@ impl Authenticator for Secp256r1Authenticator {
         }
 
         // --- Parse Mode 1 payload: authenticatorData + clientDataJSON ---
-        let auth_data_len =
-            u16::from_le_bytes(auth_payload[14..16].try_into().unwrap()) as usize;
+        let auth_data_len = u16::from_le_bytes(auth_payload[14..16].try_into().unwrap()) as usize;
         if auth_payload.len() < 16 + auth_data_len + 2 {
             return Err(AuthError::InvalidAuthorityPayload.into());
         }
         let authenticator_data_raw = &auth_payload[16..16 + auth_data_len];
 
         let cdj_len_offset = 16 + auth_data_len;
-        let cdj_len =
-            u16::from_le_bytes(auth_payload[cdj_len_offset..cdj_len_offset + 2].try_into().unwrap())
-                as usize;
+        let cdj_len = u16::from_le_bytes(
+            auth_payload[cdj_len_offset..cdj_len_offset + 2]
+                .try_into()
+                .unwrap(),
+        ) as usize;
         let cdj_offset = cdj_len_offset + 2;
         // L2: strict length — trailing bytes after cdj are not covered by
         // challenge hash or precompile message, so they're rejected.
@@ -174,8 +175,7 @@ impl Authenticator for Secp256r1Authenticator {
 
         // Validate "challenge" field matches expected base64url(challenge_hash).
         // L3: constant-time byte comparison.
-        let challenge_value =
-            extract_top_level_string_field(raw_client_data_json, b"challenge")?;
+        let challenge_value = extract_top_level_string_field(raw_client_data_json, b"challenge")?;
         let expected_challenge_b64 = base64url_encode_no_pad(&hasher);
         if !ct_eq(challenge_value, expected_challenge_b64.as_slice()) {
             return Err(AuthError::InvalidMessageHash.into());

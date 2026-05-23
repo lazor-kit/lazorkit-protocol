@@ -27,15 +27,9 @@ pub fn process(
     accounts: &[AccountInfo],
     _instruction_data: &[u8],
 ) -> ProgramResult {
-    let payer = accounts
-        .first()
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let deferred_pda = accounts
-        .get(1)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let refund_dest = accounts
-        .get(2)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let payer = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let deferred_pda = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let refund_dest = accounts.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
 
     // Validate signer
     if !payer.is_signer() {
@@ -53,9 +47,8 @@ pub fn process(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    let deferred = unsafe {
-        std::ptr::read_unaligned(deferred_data.as_ptr() as *const DeferredExecAccount)
-    };
+    let deferred =
+        unsafe { std::ptr::read_unaligned(deferred_data.as_ptr() as *const DeferredExecAccount) };
 
     if deferred.discriminator != AccountDiscriminator::DeferredExec as u8 {
         return Err(ProgramError::InvalidAccountData);

@@ -125,13 +125,12 @@ pub fn process(
                         &[4],
                         program_id,
                     )?;
-                }
+                },
                 1 => {
                     // Secp256r1 (WebAuthn)
                     let data_payload = &instruction_data[..compact_len];
                     let authority_payload = &instruction_data[compact_len..];
-                    let accounts_hash =
-                        compute_accounts_hash(accounts, &compact_instructions)?;
+                    let accounts_hash = compute_accounts_hash(accounts, &compact_instructions)?;
                     let mut extended_payload = Vec::with_capacity(compact_len + 32);
                     extended_payload.extend_from_slice(data_payload);
                     extended_payload.extend_from_slice(&accounts_hash);
@@ -144,10 +143,10 @@ pub fn process(
                         &[4],
                         program_id,
                     )?;
-                }
+                },
                 _ => return Err(AuthError::InvalidAuthenticationKind.into()),
             }
-        }
+        },
         3 => {
             // Session — reuse the existing `authority_data` borrow; no re-borrow needed.
 
@@ -159,15 +158,13 @@ pub fn process(
                 return Err(AuthError::PermissionDenied.into());
             }
 
-            if authority_data.len()
-                < std::mem::size_of::<crate::state::session::SessionAccount>()
-            {
+            if authority_data.len() < std::mem::size_of::<crate::state::session::SessionAccount>() {
                 return Err(ProgramError::InvalidAccountData);
             }
 
             let session = unsafe {
                 std::ptr::read_unaligned(
-                    authority_data.as_ptr() as *const crate::state::session::SessionAccount,
+                    authority_data.as_ptr() as *const crate::state::session::SessionAccount
                 )
             };
 
@@ -208,7 +205,7 @@ pub fn process(
 
             is_session = true;
             session_slot = current_slot;
-        }
+        },
         _ => return Err(ProgramError::InvalidAccountData),
     }
 
@@ -311,8 +308,8 @@ pub fn process(
         if is_session {
             let post = vault_pda.lamports();
             if prev_vault_lamports > post {
-                vault_lamports_gross_out = vault_lamports_gross_out
-                    .saturating_add(prev_vault_lamports - post);
+                vault_lamports_gross_out =
+                    vault_lamports_gross_out.saturating_add(prev_vault_lamports - post);
             }
             prev_vault_lamports = post;
         }

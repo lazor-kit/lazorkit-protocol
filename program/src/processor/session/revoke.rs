@@ -1,17 +1,12 @@
 use crate::{
-    auth::{ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator},
-    error::AuthError,
-    state::{
-        authority::AuthorityAccountHeader,
-        session::SessionAccount,
-        AccountDiscriminator,
+    auth::{
+        ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
+    error::AuthError,
+    state::{authority::AuthorityAccountHeader, session::SessionAccount, AccountDiscriminator},
 };
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    ProgramResult,
+    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
 };
 
 /// Process the RevokeSession instruction.
@@ -37,21 +32,11 @@ pub fn process(
 ) -> ProgramResult {
     let authority_payload = instruction_data;
 
-    let payer = accounts
-        .first()
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let wallet_pda = accounts
-        .get(1)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let admin_auth_pda = accounts
-        .get(2)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let session_pda = accounts
-        .get(3)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let refund_dest = accounts
-        .get(4)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let payer = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let wallet_pda = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let admin_auth_pda = accounts.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let session_pda = accounts.get(3).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let refund_dest = accounts.get(4).ok_or(ProgramError::NotEnoughAccountKeys)?;
 
     // Validate payer is signer
     if !payer.is_signer() {
@@ -82,9 +67,8 @@ pub fn process(
     if admin_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
         return Err(ProgramError::InvalidAccountData);
     }
-    let admin_header = unsafe {
-        std::ptr::read_unaligned(admin_data.as_ptr() as *const AuthorityAccountHeader)
-    };
+    let admin_header =
+        unsafe { std::ptr::read_unaligned(admin_data.as_ptr() as *const AuthorityAccountHeader) };
 
     if admin_header.discriminator != AccountDiscriminator::Authority as u8 {
         return Err(ProgramError::InvalidAccountData);
@@ -107,14 +91,24 @@ pub fn process(
     match admin_header.authority_type {
         0 => {
             Ed25519Authenticator.authenticate(
-                accounts, admin_data, &[], &data_payload, &[9], program_id,
+                accounts,
+                admin_data,
+                &[],
+                &data_payload,
+                &[9],
+                program_id,
             )?;
-        }
+        },
         1 => {
             Secp256r1Authenticator.authenticate(
-                accounts, admin_data, authority_payload, &data_payload, &[9], program_id,
+                accounts,
+                admin_data,
+                authority_payload,
+                &data_payload,
+                &[9],
+                program_id,
             )?;
-        }
+        },
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
 
@@ -123,9 +117,8 @@ pub fn process(
     if session_data.len() < std::mem::size_of::<SessionAccount>() {
         return Err(ProgramError::InvalidAccountData);
     }
-    let session = unsafe {
-        std::ptr::read_unaligned(session_data.as_ptr() as *const SessionAccount)
-    };
+    let session =
+        unsafe { std::ptr::read_unaligned(session_data.as_ptr() as *const SessionAccount) };
 
     if session.discriminator != AccountDiscriminator::Session as u8 {
         return Err(AuthError::InvalidSessionAccount.into());

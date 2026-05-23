@@ -2,9 +2,8 @@ use crate::{
     auth::{secp256r1::Secp256r1Authenticator, traits::Authenticator},
     error::AuthError,
     state::{
-        authority::AuthorityAccountHeader,
-        deferred::DeferredExecAccount,
-        AccountDiscriminator, CURRENT_ACCOUNT_VERSION,
+        authority::AuthorityAccountHeader, deferred::DeferredExecAccount, AccountDiscriminator,
+        CURRENT_ACCOUNT_VERSION,
     },
     utils::initialize_pda_account,
 };
@@ -45,24 +44,12 @@ pub fn process(
     instruction_data: &[u8],
 ) -> ProgramResult {
     // Parse accounts
-    let payer = accounts
-        .first()
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let wallet_pda = accounts
-        .get(1)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let authority_pda = accounts
-        .get(2)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let deferred_pda = accounts
-        .get(3)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let system_program = accounts
-        .get(4)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let _rent_sysvar = accounts
-        .get(5)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let payer = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let wallet_pda = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let authority_pda = accounts.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let deferred_pda = accounts.get(3).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let system_program = accounts.get(4).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let _rent_sysvar = accounts.get(5).ok_or(ProgramError::NotEnoughAccountKeys)?;
 
     // Validate payer is signer
     if !payer.is_signer() {
@@ -92,8 +79,7 @@ pub fn process(
 
     let instructions_hash: [u8; 32] = instruction_data[0..32].try_into().unwrap();
     let accounts_hash: [u8; 32] = instruction_data[32..64].try_into().unwrap();
-    let expiry_offset =
-        u16::from_le_bytes(instruction_data[64..66].try_into().unwrap());
+    let expiry_offset = u16::from_le_bytes(instruction_data[64..66].try_into().unwrap());
     let auth_payload = &instruction_data[66..];
 
     // Validate expiry window

@@ -205,16 +205,16 @@ pub fn extract_top_level_string_field<'a>(
                                 cursor += 1;
                             }
                             continue;
-                        }
+                        },
                         b'{' | b'[' => nest += 1,
                         b'}' | b']' => {
                             if nest == 0 {
                                 break;
                             }
                             nest -= 1;
-                        }
+                        },
                         b',' if nest == 0 => break,
-                        _ => {}
+                        _ => {},
                     }
                     cursor += 1;
                 }
@@ -236,7 +236,8 @@ mod tests {
 
     #[test]
     fn test_extract_field_basic() {
-        let json = br#"{"type":"webauthn.get","challenge":"abc123","origin":"https://example.com"}"#;
+        let json =
+            br#"{"type":"webauthn.get","challenge":"abc123","origin":"https://example.com"}"#;
         assert_eq!(
             extract_top_level_string_field(json, b"type").unwrap(),
             b"webauthn.get"
@@ -571,8 +572,7 @@ mod tests {
     #[test]
     fn test_extract_from_safari_no_crossorigin() {
         // Safari may omit crossOrigin entirely
-        let json =
-            br#"{"type":"webauthn.get","challenge":"xyz","origin":"https://lazorkit.app"}"#;
+        let json = br#"{"type":"webauthn.get","challenge":"xyz","origin":"https://lazorkit.app"}"#;
         assert_eq!(
             extract_top_level_string_field(json, b"type").unwrap(),
             b"webauthn.get"

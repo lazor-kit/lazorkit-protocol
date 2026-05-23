@@ -177,8 +177,7 @@ mod tests {
         data[SIGNATURE_DATA_OFFSET..SIGNATURE_DATA_OFFSET + 64].copy_from_slice(signature);
         data[PUBKEY_DATA_OFFSET..PUBKEY_DATA_OFFSET + 33].copy_from_slice(pubkey);
         // Byte at offset 113 is alignment padding (zero)
-        data[MESSAGE_DATA_OFFSET..MESSAGE_DATA_OFFSET + message.len()]
-            .copy_from_slice(message);
+        data[MESSAGE_DATA_OFFSET..MESSAGE_DATA_OFFSET + message.len()].copy_from_slice(message);
 
         data
     }

@@ -34,21 +34,11 @@ pub fn process(
     instruction_data: &[u8],
 ) -> ProgramResult {
     // Parse accounts
-    let payer = accounts
-        .first()
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let wallet_pda = accounts
-        .get(1)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let vault_pda = accounts
-        .get(2)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let deferred_pda = accounts
-        .get(3)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
-    let refund_dest = accounts
-        .get(4)
-        .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let payer = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let wallet_pda = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let vault_pda = accounts.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let deferred_pda = accounts.get(3).ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let refund_dest = accounts.get(4).ok_or(ProgramError::NotEnoughAccountKeys)?;
 
     // Validate payer
     if !payer.is_signer() {
@@ -195,11 +185,7 @@ fn compute_sha256(data: &[u8]) -> [u8; 32] {
     let mut hash = [0u8; 32];
     #[cfg(target_os = "solana")]
     unsafe {
-        pinocchio::syscalls::sol_sha256(
-            [data].as_ptr() as *const u8,
-            1,
-            hash.as_mut_ptr(),
-        );
+        pinocchio::syscalls::sol_sha256([data].as_ptr() as *const u8, 1, hash.as_mut_ptr());
     }
     #[cfg(not(target_os = "solana"))]
     {

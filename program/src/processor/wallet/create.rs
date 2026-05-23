@@ -205,8 +205,8 @@ pub fn process(
     // every subsequent Execute saves one sol_sha256 syscall.
     let header_size = std::mem::size_of::<AuthorityAccountHeader>();
     let auth_space = match args.authority_type {
-        0 => header_size + 32,              // Ed25519
-        1 => header_size + 32 + 33 + 32,    // Secp256r1 fixed
+        0 => header_size + 32,           // Ed25519
+        1 => header_size + 32 + 33 + 32, // Secp256r1 fixed
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     };
     let auth_rent = rent.minimum_balance(auth_space);
@@ -257,15 +257,13 @@ pub fn process(
     match args.authority_type {
         0 => {
             // Ed25519: pubkey(32) — full_auth_data is exactly 32 bytes
-            auth_account_data[header_size..header_size + 32]
-                .copy_from_slice(&full_auth_data[..32]);
-        }
+            auth_account_data[header_size..header_size + 32].copy_from_slice(&full_auth_data[..32]);
+        },
         1 => {
             // Secp256r1: cred_hash(32) ∥ pubkey(33) ∥ rpIdHash(32).
             // full_auth_data layout as parsed above:
             //   [cred_hash(32)] [pubkey(33)] [rpIdLen(1)] [rpId(N)]
-            auth_account_data[header_size..header_size + 32]
-                .copy_from_slice(&full_auth_data[..32]);
+            auth_account_data[header_size..header_size + 32].copy_from_slice(&full_auth_data[..32]);
             auth_account_data[header_size + 32..header_size + 32 + 33]
                 .copy_from_slice(&full_auth_data[32..32 + 33]);
             // Compute rpIdHash from rpId
@@ -285,7 +283,7 @@ pub fn process(
                 let _ = rp_id;
                 auth_account_data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
             }
-        }
+        },
         _ => unreachable!(),
     }
 

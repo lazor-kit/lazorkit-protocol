@@ -158,7 +158,10 @@ impl CompactInstructions {
     pub fn into_bytes(&self) -> Vec<u8> {
         // Lengths are encoded as u8 — values > 255 would silently truncate and corrupt
         // the instruction stream on deserialization. Enforce at runtime, not just debug.
-        assert!(self.inner_instructions.len() <= 255, "instruction count exceeds u8 max");
+        assert!(
+            self.inner_instructions.len() <= 255,
+            "instruction count exceeds u8 max"
+        );
         let mut bytes = vec![self.inner_instructions.len() as u8];
         for ix in self.inner_instructions.iter() {
             assert!(ix.accounts.len() <= 255, "account count exceeds u8 max");

@@ -25,9 +25,7 @@ declare_id!("4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS");
     all(feature = "mainnet", feature = "devnet"),
     all(not(feature = "mainnet"), not(feature = "devnet"))
 ))]
-compile_error!(
-    "LazorKit: pick exactly one cluster — `--features mainnet` OR `--features devnet`"
-);
+compile_error!("LazorKit: pick exactly one cluster — `--features mainnet` OR `--features devnet`");
 
 #[allow(unused_imports)]
 use std::mem::MaybeUninit;

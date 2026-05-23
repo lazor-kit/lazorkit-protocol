@@ -176,7 +176,14 @@ pub fn process_add_authority(
     match admin_header.authority_type {
         0 => {
             // Ed25519: Include payer + new_auth_pda in signed payload
-            Ed25519Authenticator.authenticate(accounts, admin_data, &[], &ed25519_payload, &[1], program_id)?;
+            Ed25519Authenticator.authenticate(
+                accounts,
+                admin_data,
+                &[],
+                &ed25519_payload,
+                &[1],
+                program_id,
+            )?;
         },
         1 => {
             // Secp256r1 (WebAuthn) - Must be Writable
@@ -224,8 +231,8 @@ pub fn process_add_authority(
     // Fixed sizes per auth type (see wallet/create.rs for layout).
     let header_size = std::mem::size_of::<AuthorityAccountHeader>();
     let space = match args.authority_type {
-        0 => header_size + 32,                // Ed25519: pubkey
-        1 => header_size + 32 + 33 + 32,      // Secp256r1: cred ∥ pubkey ∥ rpIdHash
+        0 => header_size + 32,           // Ed25519: pubkey
+        1 => header_size + 32 + 33 + 32, // Secp256r1: cred ∥ pubkey ∥ rpIdHash
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     };
     let rent_lamports = rent.minimum_balance(space);
@@ -270,7 +277,7 @@ pub fn process_add_authority(
     match args.authority_type {
         0 => {
             data[header_size..header_size + 32].copy_from_slice(&full_auth_data[..32]);
-        }
+        },
         1 => {
             data[header_size..header_size + 32].copy_from_slice(&full_auth_data[..32]);
             data[header_size + 32..header_size + 32 + 33]
@@ -291,7 +298,7 @@ pub fn process_add_authority(
                 let _ = rp_id;
                 data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
             }
-        }
+        },
         _ => unreachable!(),
     }
 
@@ -385,7 +392,14 @@ pub fn process_remove_authority(
     match admin_header.authority_type {
         0 => {
             // Ed25519: Include data_payload in signature verification
-            Ed25519Authenticator.authenticate(accounts, admin_data, &[], &data_payload, &[2], program_id)?;
+            Ed25519Authenticator.authenticate(
+                accounts,
+                admin_data,
+                &[],
+                &data_payload,
+                &[2],
+                program_id,
+            )?;
         },
         1 => {
             Secp256r1Authenticator.authenticate(

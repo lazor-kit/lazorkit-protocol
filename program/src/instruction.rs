@@ -26,7 +26,13 @@ pub enum ProgramIx {
     },
 
     /// Add a new authority to the wallet
-    #[account(0, signer, writable, name = "payer", desc = "Payer and rent contributor")]
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Payer and rent contributor"
+    )]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,
@@ -86,7 +92,13 @@ pub enum ProgramIx {
     RemoveAuthority,
 
     /// Transfer ownership (atomic swap of Owner role)
-    #[account(0, signer, writable, name = "payer", desc = "Payer and rent contributor")]
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Payer and rent contributor"
+    )]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
         2,
@@ -130,7 +142,12 @@ pub enum ProgramIx {
         name = "authority",
         desc = "Authority or Session PDA authorizing execution (counter incremented)"
     )]
-    #[account(3, writable, name = "vault", desc = "Vault PDA (signer for CPI, lamports debited)")]
+    #[account(
+        3,
+        writable,
+        name = "vault",
+        desc = "Vault PDA (signer for CPI, lamports debited)"
+    )]
     #[account(
         4,
         optional,
@@ -315,7 +332,12 @@ pub enum ProgramIx {
         name = "payer",
         desc = "Payer and rent contributor; the FeeRecord is keyed by this pubkey"
     )]
-    #[account(1, writable, name = "fee_record", desc = "FeeRecord PDA derived from [\"fee_record\", payer]")]
+    #[account(
+        1,
+        writable,
+        name = "fee_record",
+        desc = "FeeRecord PDA derived from [\"fee_record\", payer]"
+    )]
     #[account(2, name = "system_program", desc = "System Program")]
     #[account(3, name = "rent_sysvar", desc = "Rent Sysvar")]
     RegisterPayer,

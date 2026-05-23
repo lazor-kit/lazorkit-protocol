@@ -244,7 +244,7 @@ pub fn process(
                 &[5],
                 program_id,
             )?;
-        }
+        },
         1 => {
             // Secp256r1: Include payer in data_payload
             let mut extended_data_payload = Vec::with_capacity(data_payload.len() + 32);
@@ -259,7 +259,7 @@ pub fn process(
                 &[5],
                 program_id,
             )?;
-        }
+        },
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
 
