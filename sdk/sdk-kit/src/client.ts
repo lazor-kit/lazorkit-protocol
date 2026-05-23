@@ -365,6 +365,12 @@ export class LazorKit {
     this._protocolConfig = undefined;
   }
 
+  /**
+   * Returns the four fee accounts required by fee-eligible instructions when
+   * protocol fees are initialized and enabled. The FeeRecord address is always
+   * canonical for the payer, and the program requires every successful fee
+   * payment to update that record.
+   */
   async resolveProtocolFee(payer: Address): Promise<ProtocolFeeAccounts | undefined> {
     const config = await this.getProtocolConfig();
     if (!config || !config.enabled) return undefined;

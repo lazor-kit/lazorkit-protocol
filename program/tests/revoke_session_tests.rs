@@ -15,12 +15,12 @@ use solana_sdk::{
 fn setup_wallet_with_session(
     context: &mut TestContext,
 ) -> (
-    Pubkey,   // wallet_pda
-    Pubkey,   // vault_pda
-    Pubkey,   // owner_auth_pda
-    Keypair,  // owner_keypair
-    Pubkey,   // session_pda
-    Keypair,  // session_keypair
+    Pubkey,  // wallet_pda
+    Pubkey,  // vault_pda
+    Pubkey,  // owner_auth_pda
+    Keypair, // owner_keypair
+    Pubkey,  // session_pda
+    Keypair, // session_keypair
 ) {
     let user_seed = rand::random::<[u8; 32]>();
     let owner_keypair = Keypair::new();
@@ -49,14 +49,17 @@ fn setup_wallet_with_session(
 
         let ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(owner_auth_pda, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(owner_auth_pda, false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+                ],
+                context,
+            ),
             data: {
                 let mut data = vec![0];
                 data.extend_from_slice(&instruction_data);
@@ -64,19 +67,36 @@ fn setup_wallet_with_session(
             },
         };
         let msg = v0::Message::try_compile(
-            &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-        ).unwrap();
-        let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer]).unwrap();
-        context.svm.send_transaction(tx).expect("CreateWallet failed");
+            &context.payer.pubkey(),
+            &[ix],
+            &[],
+            context.svm.latest_blockhash(),
+        )
+        .unwrap();
+        let tx =
+            VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer]).unwrap();
+        context
+            .svm
+            .send_transaction(tx)
+            .expect("CreateWallet failed");
     }
 
     // Fund vault
     {
-        let ix = solana_sdk::system_instruction::transfer(&context.payer.pubkey(), &vault_pda, 1_000_000);
+        let ix = solana_sdk::system_instruction::transfer(
+            &context.payer.pubkey(),
+            &vault_pda,
+            1_000_000,
+        );
         let msg = v0::Message::try_compile(
-            &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-        ).unwrap();
-        let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer]).unwrap();
+            &context.payer.pubkey(),
+            &[ix],
+            &[],
+            context.svm.latest_blockhash(),
+        )
+        .unwrap();
+        let tx =
+            VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer]).unwrap();
         context.svm.send_transaction(tx).expect("Fund vault failed");
     }
 
@@ -86,7 +106,11 @@ fn setup_wallet_with_session(
     let expires_at = current_slot + 1000;
 
     let (session_pda, _) = Pubkey::find_program_address(
-        &[b"session", wallet_pda.as_ref(), session_keypair.pubkey().as_ref()],
+        &[
+            b"session",
+            wallet_pda.as_ref(),
+            session_keypair.pubkey().as_ref(),
+        ],
         &context.program_id,
     );
 
@@ -113,15 +137,31 @@ fn setup_wallet_with_session(
             },
         };
         let msg = v0::Message::try_compile(
-            &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-        ).unwrap();
+            &context.payer.pubkey(),
+            &[ix],
+            &[],
+            context.svm.latest_blockhash(),
+        )
+        .unwrap();
         let tx = VersionedTransaction::try_new(
-            VersionedMessage::V0(msg), &[&context.payer, &owner_keypair],
-        ).unwrap();
-        context.svm.send_transaction(tx).expect("CreateSession failed");
+            VersionedMessage::V0(msg),
+            &[&context.payer, &owner_keypair],
+        )
+        .unwrap();
+        context
+            .svm
+            .send_transaction(tx)
+            .expect("CreateSession failed");
     }
 
-    (wallet_pda, vault_pda, owner_auth_pda, owner_keypair, session_pda, session_keypair)
+    (
+        wallet_pda,
+        vault_pda,
+        owner_auth_pda,
+        owner_keypair,
+        session_pda,
+        session_keypair,
+    )
 }
 
 /// Build a RevokeSession instruction for Ed25519 auth
@@ -156,24 +196,37 @@ fn test_revoke_session_by_owner() {
 
     // Verify session exists before revoke
     let session_account = context.svm.get_account(&session_pda);
-    assert!(session_account.is_some(), "Session should exist before revoke");
+    assert!(
+        session_account.is_some(),
+        "Session should exist before revoke"
+    );
     assert!(session_account.unwrap().lamports > 0);
 
     // Revoke session
     let refund_dest = context.payer.pubkey();
     let ix = build_revoke_session_ix(
-        &context.program_id, &context.payer.pubkey(),
-        &wallet_pda, &owner_auth_pda, &session_pda, &refund_dest,
+        &context.program_id,
+        &context.payer.pubkey(),
+        &wallet_pda,
+        &owner_auth_pda,
+        &session_pda,
+        &refund_dest,
         &owner_kp.pubkey(),
     );
 
     let msg = v0::Message::try_compile(
-        &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-    ).unwrap();
-    let tx = VersionedTransaction::try_new(
-        VersionedMessage::V0(msg), &[&context.payer, &owner_kp],
-    ).unwrap();
-    context.svm.send_transaction(tx).expect("RevokeSession failed");
+        &context.payer.pubkey(),
+        &[ix],
+        &[],
+        context.svm.latest_blockhash(),
+    )
+    .unwrap();
+    let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer, &owner_kp])
+        .unwrap();
+    context
+        .svm
+        .send_transaction(tx)
+        .expect("RevokeSession failed");
 
     // Verify session is closed
     let session_account = context.svm.get_account(&session_pda);
@@ -193,7 +246,11 @@ fn test_revoke_session_by_admin() {
     // Add an admin authority
     let admin_kp = Keypair::new();
     let (admin_auth_pda, _) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), admin_kp.pubkey().as_ref()],
+        &[
+            b"authority",
+            wallet_pda.as_ref(),
+            admin_kp.pubkey().as_ref(),
+        ],
         &context.program_id,
     );
 
@@ -222,28 +279,45 @@ fn test_revoke_session_by_admin() {
             },
         };
         let msg = v0::Message::try_compile(
-            &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-        ).unwrap();
-        let tx = VersionedTransaction::try_new(
-            VersionedMessage::V0(msg), &[&context.payer, &owner_kp],
-        ).unwrap();
-        context.svm.send_transaction(tx).expect("AddAuthority (admin) failed");
+            &context.payer.pubkey(),
+            &[ix],
+            &[],
+            context.svm.latest_blockhash(),
+        )
+        .unwrap();
+        let tx =
+            VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer, &owner_kp])
+                .unwrap();
+        context
+            .svm
+            .send_transaction(tx)
+            .expect("AddAuthority (admin) failed");
     }
 
     // Admin revokes session
     let refund_dest = context.payer.pubkey();
     let ix = build_revoke_session_ix(
-        &context.program_id, &context.payer.pubkey(),
-        &wallet_pda, &admin_auth_pda, &session_pda, &refund_dest,
+        &context.program_id,
+        &context.payer.pubkey(),
+        &wallet_pda,
+        &admin_auth_pda,
+        &session_pda,
+        &refund_dest,
         &admin_kp.pubkey(),
     );
     let msg = v0::Message::try_compile(
-        &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-    ).unwrap();
-    let tx = VersionedTransaction::try_new(
-        VersionedMessage::V0(msg), &[&context.payer, &admin_kp],
-    ).unwrap();
-    context.svm.send_transaction(tx).expect("Admin RevokeSession failed");
+        &context.payer.pubkey(),
+        &[ix],
+        &[],
+        context.svm.latest_blockhash(),
+    )
+    .unwrap();
+    let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer, &admin_kp])
+        .unwrap();
+    context
+        .svm
+        .send_transaction(tx)
+        .expect("Admin RevokeSession failed");
 
     // Verify closed
     let session_account = context.svm.get_account(&session_pda);
@@ -263,7 +337,11 @@ fn test_revoke_session_spender_fails() {
     // Add a spender
     let spender_kp = Keypair::new();
     let (spender_auth_pda, _) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), spender_kp.pubkey().as_ref()],
+        &[
+            b"authority",
+            wallet_pda.as_ref(),
+            spender_kp.pubkey().as_ref(),
+        ],
         &context.program_id,
     );
 
@@ -292,29 +370,47 @@ fn test_revoke_session_spender_fails() {
             },
         };
         let msg = v0::Message::try_compile(
-            &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-        ).unwrap();
-        let tx = VersionedTransaction::try_new(
-            VersionedMessage::V0(msg), &[&context.payer, &owner_kp],
-        ).unwrap();
-        context.svm.send_transaction(tx).expect("AddAuthority (spender) failed");
+            &context.payer.pubkey(),
+            &[ix],
+            &[],
+            context.svm.latest_blockhash(),
+        )
+        .unwrap();
+        let tx =
+            VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer, &owner_kp])
+                .unwrap();
+        context
+            .svm
+            .send_transaction(tx)
+            .expect("AddAuthority (spender) failed");
     }
 
     // Spender tries to revoke — should fail
     let refund_dest = context.payer.pubkey();
     let ix = build_revoke_session_ix(
-        &context.program_id, &context.payer.pubkey(),
-        &wallet_pda, &spender_auth_pda, &session_pda, &refund_dest,
+        &context.program_id,
+        &context.payer.pubkey(),
+        &wallet_pda,
+        &spender_auth_pda,
+        &session_pda,
+        &refund_dest,
         &spender_kp.pubkey(),
     );
     let msg = v0::Message::try_compile(
-        &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-    ).unwrap();
-    let tx = VersionedTransaction::try_new(
-        VersionedMessage::V0(msg), &[&context.payer, &spender_kp],
-    ).unwrap();
+        &context.payer.pubkey(),
+        &[ix],
+        &[],
+        context.svm.latest_blockhash(),
+    )
+    .unwrap();
+    let tx =
+        VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer, &spender_kp])
+            .unwrap();
     let result = context.svm.send_transaction(tx);
-    assert!(result.is_err(), "Spender should not be able to revoke session");
+    assert!(
+        result.is_err(),
+        "Spender should not be able to revoke session"
+    );
     println!("✅ Spender revoke correctly rejected");
 }
 
@@ -323,24 +419,30 @@ fn test_revoke_session_wrong_wallet_fails() {
     let mut context = setup_test();
 
     // Create two wallets — use wallet A's owner to revoke wallet B's session
-    let (wallet_a, _, owner_auth_a, owner_kp_a, _, _) =
-        setup_wallet_with_session(&mut context);
-    let (_wallet_b, _, _, _, session_pda_b, _) =
-        setup_wallet_with_session(&mut context);
+    let (wallet_a, _, owner_auth_a, owner_kp_a, _, _) = setup_wallet_with_session(&mut context);
+    let (_wallet_b, _, _, _, session_pda_b, _) = setup_wallet_with_session(&mut context);
 
     // Try to revoke wallet B's session using wallet A's authority
     let refund_dest = context.payer.pubkey();
     let ix = build_revoke_session_ix(
-        &context.program_id, &context.payer.pubkey(),
-        &wallet_a, &owner_auth_a, &session_pda_b, &refund_dest,
+        &context.program_id,
+        &context.payer.pubkey(),
+        &wallet_a,
+        &owner_auth_a,
+        &session_pda_b,
+        &refund_dest,
         &owner_kp_a.pubkey(),
     );
     let msg = v0::Message::try_compile(
-        &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-    ).unwrap();
-    let tx = VersionedTransaction::try_new(
-        VersionedMessage::V0(msg), &[&context.payer, &owner_kp_a],
-    ).unwrap();
+        &context.payer.pubkey(),
+        &[ix],
+        &[],
+        context.svm.latest_blockhash(),
+    )
+    .unwrap();
+    let tx =
+        VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer, &owner_kp_a])
+            .unwrap();
     let result = context.svm.send_transaction(tx);
     assert!(result.is_err(), "Cross-wallet session revoke should fail");
     println!("✅ Cross-wallet revoke correctly rejected");
@@ -368,16 +470,19 @@ fn test_execute_after_revocation_fails() {
 
         let ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(session_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(context.payer.pubkey(), false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(session_kp.pubkey(), true),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(session_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(context.payer.pubkey(), false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(session_kp.pubkey(), true),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![4];
                 data.extend_from_slice(&compact_bytes);
@@ -385,12 +490,21 @@ fn test_execute_after_revocation_fails() {
             },
         };
         let msg = v0::Message::try_compile(
-            &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-        ).unwrap();
+            &context.payer.pubkey(),
+            &[ix],
+            &[],
+            context.svm.latest_blockhash(),
+        )
+        .unwrap();
         let tx = VersionedTransaction::try_new(
-            VersionedMessage::V0(msg), &[&context.payer, &session_kp],
-        ).unwrap();
-        context.svm.send_transaction(tx).expect("Session execute before revoke should succeed");
+            VersionedMessage::V0(msg),
+            &[&context.payer, &session_kp],
+        )
+        .unwrap();
+        context
+            .svm
+            .send_transaction(tx)
+            .expect("Session execute before revoke should succeed");
     }
     println!("✅ Session execute succeeded before revoke");
 
@@ -398,17 +512,28 @@ fn test_execute_after_revocation_fails() {
     {
         let refund_dest = context.payer.pubkey();
         let ix = build_revoke_session_ix(
-            &context.program_id, &context.payer.pubkey(),
-            &wallet_pda, &owner_auth_pda, &session_pda, &refund_dest,
+            &context.program_id,
+            &context.payer.pubkey(),
+            &wallet_pda,
+            &owner_auth_pda,
+            &session_pda,
+            &refund_dest,
             &owner_kp.pubkey(),
         );
         let msg = v0::Message::try_compile(
-            &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-        ).unwrap();
-        let tx = VersionedTransaction::try_new(
-            VersionedMessage::V0(msg), &[&context.payer, &owner_kp],
-        ).unwrap();
-        context.svm.send_transaction(tx).expect("RevokeSession failed");
+            &context.payer.pubkey(),
+            &[ix],
+            &[],
+            context.svm.latest_blockhash(),
+        )
+        .unwrap();
+        let tx =
+            VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&context.payer, &owner_kp])
+                .unwrap();
+        context
+            .svm
+            .send_transaction(tx)
+            .expect("RevokeSession failed");
     }
 
     // Try to execute with the same session AFTER revoke — should fail
@@ -427,16 +552,19 @@ fn test_execute_after_revocation_fails() {
 
         let ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(session_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(context.payer.pubkey(), false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(session_kp.pubkey(), true),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(session_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(context.payer.pubkey(), false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(session_kp.pubkey(), true),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![4];
                 data.extend_from_slice(&compact_bytes);
@@ -444,11 +572,17 @@ fn test_execute_after_revocation_fails() {
             },
         };
         let msg = v0::Message::try_compile(
-            &context.payer.pubkey(), &[ix], &[], context.svm.latest_blockhash(),
-        ).unwrap();
+            &context.payer.pubkey(),
+            &[ix],
+            &[],
+            context.svm.latest_blockhash(),
+        )
+        .unwrap();
         let tx = VersionedTransaction::try_new(
-            VersionedMessage::V0(msg), &[&context.payer, &session_kp],
-        ).unwrap();
+            VersionedMessage::V0(msg),
+            &[&context.payer, &session_kp],
+        )
+        .unwrap();
         let result = context.svm.send_transaction(tx);
         assert!(result.is_err(), "Execute with revoked session should fail");
     }

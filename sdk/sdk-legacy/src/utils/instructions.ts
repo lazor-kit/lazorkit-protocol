@@ -59,7 +59,7 @@ export function createCreateWalletIx(params: {
   secp256r1Pubkey?: Uint8Array;
   /** Secp256r1 only: RP ID string (stored on-chain for per-tx savings) */
   rpId?: string;
-  /** Optional protocol fee accounts (integrator opt-in) */
+  /** Protocol fee accounts. Required by the strict commercial binary. */
   protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
   programId: PublicKey;
 }): TransactionInstruction {
@@ -303,7 +303,7 @@ export function createExecuteIx(params: {
   authorizerSigner?: PublicKey;
   /** Additional account metas for the inner CPI instructions */
   remainingAccounts?: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
-  /** Optional protocol fee accounts (integrator opt-in) */
+  /** Protocol fee accounts. Required by the strict commercial binary. */
   protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
   programId: PublicKey;
 }): TransactionInstruction {
@@ -469,7 +469,7 @@ export function createExecuteDeferredIx(params: {
   packedInstructions: Uint8Array;
   /** Additional account metas for the inner CPI instructions */
   remainingAccounts?: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
-  /** Optional protocol fee accounts (integrator opt-in) */
+  /** Protocol fee accounts. Required by the strict commercial binary. */
   protocolFee?: { protocolConfigPda: PublicKey; feeRecordPda: PublicKey; treasuryShardPda: PublicKey };
   programId: PublicKey;
 }): TransactionInstruction {
@@ -749,4 +749,3 @@ export function appendProtocolFeeAccounts(
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   );
 }
-

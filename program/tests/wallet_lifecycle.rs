@@ -46,14 +46,17 @@ fn test_create_wallet_ed25519() {
     // Build CreateWallet instruction
     let create_wallet_ix = Instruction {
         program_id: context.program_id,
-        accounts: vec![
-            AccountMeta::new(context.payer.pubkey(), true),
-            AccountMeta::new(wallet_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new(auth_pda, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-        ],
+        accounts: with_protocol_fee_accounts(
+            vec![
+                AccountMeta::new(context.payer.pubkey(), true),
+                AccountMeta::new(wallet_pda, false),
+                AccountMeta::new(vault_pda, false),
+                AccountMeta::new(auth_pda, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            ],
+            &context,
+        ),
         data: {
             let mut data = vec![0]; // CreateWallet discriminator
             data.extend_from_slice(&instruction_data);
@@ -159,14 +162,17 @@ fn test_authority_lifecycle() {
 
         let create_wallet_ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(owner_auth_pda, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(owner_auth_pda, false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![0]; // CreateWallet discriminator
                 data.extend_from_slice(&instruction_data);
@@ -367,14 +373,17 @@ fn test_execute_with_compact_instructions() {
 
         let create_wallet_ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(owner_auth_pda, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(owner_auth_pda, false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![0];
                 data.extend_from_slice(&instruction_data);
@@ -437,18 +446,21 @@ fn test_execute_with_compact_instructions() {
     // 3. Execute Instruction
     let execute_ix = Instruction {
         program_id: context.program_id,
-        accounts: vec![
-            AccountMeta::new(context.payer.pubkey(), true), // Payer
-            AccountMeta::new(wallet_pda, false),            // Wallet
-            AccountMeta::new(owner_auth_pda, false),        // Authority (PDA) must be writable
-            AccountMeta::new(vault_pda, false),             // Vault (Context)
-            // Inner accounts start here:
-            AccountMeta::new(vault_pda, false), // Index 0: Vault (will satisfy Signer via seeds)
-            AccountMeta::new(context.payer.pubkey(), false), // Index 1: Payer (Dest)
-            AccountMeta::new_readonly(solana_sdk::system_program::id(), false), // Index 2: SystemProgram
-            // Authentication: Owner Keypair
-            AccountMeta::new_readonly(owner_keypair.pubkey(), true), // Owner signs transaction
-        ],
+        accounts: with_protocol_fee_accounts(
+            vec![
+                AccountMeta::new(context.payer.pubkey(), true), // Payer
+                AccountMeta::new(wallet_pda, false),            // Wallet
+                AccountMeta::new(owner_auth_pda, false),        // Authority (PDA) must be writable
+                AccountMeta::new(vault_pda, false),             // Vault (Context)
+                // Inner accounts start here:
+                AccountMeta::new(vault_pda, false), // Index 0: Vault (will satisfy Signer via seeds)
+                AccountMeta::new(context.payer.pubkey(), false), // Index 1: Payer (Dest)
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false), // Index 2: SystemProgram
+                // Authentication: Owner Keypair
+                AccountMeta::new_readonly(owner_keypair.pubkey(), true), // Owner signs transaction
+            ],
+            &context,
+        ),
         data: {
             let mut data = vec![4]; // Execute discriminator
             data.extend_from_slice(&compact_bytes);

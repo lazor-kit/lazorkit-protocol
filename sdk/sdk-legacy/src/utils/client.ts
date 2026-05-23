@@ -420,10 +420,10 @@ export class LazorKitClient {
   /**
    * Auto-resolve protocol fee accounts for a payer.
    *
-   * Returns the 4 accounts to append whenever the protocol is initialized and enabled,
-   * regardless of whether the payer is registered. The `feeRecordPda` is always derived
-   * from the payer; on-chain, the entrypoint detects whether it's a real FeeRecord and
-   * only updates reward-tracking counters if so. Unregistered payers still pay the fee.
+   * Returns the 4 accounts to append whenever the protocol is initialized and enabled.
+   * The `feeRecordPda` is always the canonical PDA derived from the payer. Under strict
+   * fee enforcement, every successful fee-paying instruction must create or update this
+   * record; there is no "pay fee but skip accounting" path.
    *
    * Returns undefined only if the protocol isn't initialized or is disabled.
    */

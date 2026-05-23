@@ -104,7 +104,7 @@ const RO = AccountRole.READONLY;
 const SIGNER_RO = AccountRole.READONLY_SIGNER;
 const SIGNER_RW = AccountRole.WRITABLE_SIGNER;
 
-/** Append the four trailing protocol-fee accounts to an existing accounts list. */
+/** Append the four trailing protocol-fee accounts required by the strict commercial binary. */
 export function appendProtocolFeeAccounts(
   accounts: AccountMeta[],
   protocolConfigPda: Address,

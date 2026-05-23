@@ -52,14 +52,17 @@ fn test_create_wallet_secp256r1_repro() {
 
     let create_wallet_ix = Instruction {
         program_id: context.program_id,
-        accounts: vec![
-            AccountMeta::new(context.payer.pubkey(), true),
-            AccountMeta::new(wallet_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new(auth_pda, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-        ],
+        accounts: with_protocol_fee_accounts(
+            vec![
+                AccountMeta::new(context.payer.pubkey(), true),
+                AccountMeta::new(wallet_pda, false),
+                AccountMeta::new(vault_pda, false),
+                AccountMeta::new(auth_pda, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            ],
+            &context,
+        ),
         data: {
             let mut data = vec![0]; // Discriminator
             data.extend_from_slice(&instruction_data);
@@ -114,14 +117,17 @@ fn test_add_multiple_secp256r1_authorities() {
 
         let create_wallet_ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(owner_pda, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(owner_pda, false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![0]; // CreateWallet
                 data.extend_from_slice(&instruction_data);

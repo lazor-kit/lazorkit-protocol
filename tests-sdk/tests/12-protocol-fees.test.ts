@@ -17,6 +17,8 @@ import {
 // Low-level instruction builders — internal-only.
 import {
   createCreateWalletIx,
+  createExecuteDeferredIx,
+  createExecuteIx,
   createWithdrawTreasuryIx,
   createUpdateProtocolIx,
 } from '../../sdk/sdk-legacy/src/utils/instructions';
@@ -40,6 +42,48 @@ describe('Protocol Fees', () => {
     adminKp = getProtocolAdmin();
     treasuryKp = getProtocolTreasury();
   });
+
+  function feeAccountsFor(payer = ctx.payer.publicKey, shardId = 0) {
+    const [protocolConfigPda] = client.findProtocolConfig();
+    const [feeRecordPda] = client.findFeeRecord(payer);
+    const [treasuryShardPda] = client.findTreasuryShard(shardId);
+    return { protocolConfigPda, feeRecordPda, treasuryShardPda };
+  }
+
+  function buildRawCreateWalletIx(
+    payer = ctx.payer.publicKey,
+    protocolFee?: ReturnType<typeof feeAccountsFor>,
+  ) {
+    const ownerKp = Keypair.generate();
+    const userSeed = crypto.randomBytes(32);
+    const [walletPda] = client.findWallet(userSeed);
+    const [vaultPda] = client.findVault(walletPda);
+    const [authorityPda, authBump] = client.findAuthority(
+      walletPda,
+      ownerKp.publicKey.toBytes(),
+    );
+    return createCreateWalletIx({
+      payer,
+      walletPda,
+      vaultPda,
+      authorityPda,
+      userSeed,
+      authType: AUTH_TYPE_ED25519,
+      authBump,
+      credentialOrPubkey: ownerKp.publicKey.toBytes(),
+      protocolFee,
+      programId: PROGRAM_ID_DEVNET,
+    });
+  }
+
+  async function sumShardBalances(): Promise<number> {
+    let total = 0;
+    for (let i = 0; i < NUM_SHARDS; i++) {
+      const [shardPda] = client.findTreasuryShard(i);
+      total += await ctx.connection.getBalance(shardPda);
+    }
+    return total;
+  }
 
   // Note: the prior "initializes protocol config" + "initializes treasury
   // shards" tests are now redundant — setupTest() does both globally on
@@ -75,6 +119,136 @@ describe('Protocol Fees', () => {
       expect(info).not.toBeNull();
       expect(info!.data[0]).toBe(7);
       expect(info!.data[2]).toBe(i);
+    }
+  });
+
+  it('rejects CreateWallet when fee accounts are omitted', async () => {
+    await sendTxExpectError(ctx, [buildRawCreateWalletIx()], [], 4008);
+  });
+
+  it('rejects Execute when fee accounts are omitted', async () => {
+    const ix = createExecuteIx({
+      payer: ctx.payer.publicKey,
+      walletPda: Keypair.generate().publicKey,
+      authorityPda: Keypair.generate().publicKey,
+      vaultPda: Keypair.generate().publicKey,
+      packedInstructions: new Uint8Array([0]),
+      programId: PROGRAM_ID_DEVNET,
+    });
+    await sendTxExpectError(ctx, [ix], [], 4008);
+  });
+
+  it('rejects ExecuteDeferred when fee accounts are omitted', async () => {
+    const ix = createExecuteDeferredIx({
+      payer: ctx.payer.publicKey,
+      walletPda: Keypair.generate().publicKey,
+      vaultPda: Keypair.generate().publicKey,
+      deferredExecPda: Keypair.generate().publicKey,
+      refundDestination: ctx.payer.publicKey,
+      packedInstructions: new Uint8Array([0]),
+      programId: PROGRAM_ID_DEVNET,
+    });
+    await sendTxExpectError(ctx, [ix], [], 4008);
+  });
+
+  it('rejects CreateWallet with fake ProtocolConfig', async () => {
+    const protocolFee = {
+      ...feeAccountsFor(),
+      protocolConfigPda: Keypair.generate().publicKey,
+    };
+    await sendTxExpectError(
+      ctx,
+      [buildRawCreateWalletIx(ctx.payer.publicKey, protocolFee)],
+      [],
+      4009,
+    );
+  });
+
+  it('rejects CreateWallet with fake TreasuryShard', async () => {
+    const protocolFee = {
+      ...feeAccountsFor(),
+      treasuryShardPda: Keypair.generate().publicKey,
+    };
+    await sendTxExpectError(
+      ctx,
+      [buildRawCreateWalletIx(ctx.payer.publicKey, protocolFee)],
+      [],
+      4010,
+    );
+  });
+
+  it('rejects CreateWallet with non-canonical FeeRecord PDA', async () => {
+    const protocolFee = {
+      ...feeAccountsFor(),
+      feeRecordPda: Keypair.generate().publicKey,
+    };
+    await sendTxExpectError(
+      ctx,
+      [buildRawCreateWalletIx(ctx.payer.publicKey, protocolFee)],
+      [],
+      4011,
+    );
+  });
+
+  it('rejects fee-eligible instructions while protocol is disabled', async () => {
+    const disable = client.updateProtocol({
+      admin: adminKp.publicKey,
+      creationFee: CREATION_FEE,
+      executionFee: EXECUTION_FEE,
+      enabled: false,
+      newTreasury: treasuryKp.publicKey,
+    });
+    await sendTx(ctx, disable.instructions, [adminKp]);
+    client.invalidateProtocolCache();
+
+    try {
+      await sendTxExpectError(
+        ctx,
+        [buildRawCreateWalletIx(ctx.payer.publicKey, feeAccountsFor())],
+        [],
+        4003,
+      );
+    } finally {
+      const enable = client.updateProtocol({
+        admin: adminKp.publicKey,
+        creationFee: CREATION_FEE,
+        executionFee: EXECUTION_FEE,
+        enabled: true,
+        newTreasury: treasuryKp.publicKey,
+      });
+      await sendTx(ctx, enable.instructions, [adminKp]);
+      client.invalidateProtocolCache();
+    }
+  });
+
+  it('rejects fee-eligible instructions when creation fee is zero', async () => {
+    const zeroCreationFee = client.updateProtocol({
+      admin: adminKp.publicKey,
+      creationFee: 0n,
+      executionFee: EXECUTION_FEE,
+      enabled: true,
+      newTreasury: treasuryKp.publicKey,
+    });
+    await sendTx(ctx, zeroCreationFee.instructions, [adminKp]);
+    client.invalidateProtocolCache();
+
+    try {
+      await sendTxExpectError(
+        ctx,
+        [buildRawCreateWalletIx(ctx.payer.publicKey, feeAccountsFor())],
+        [],
+        4012,
+      );
+    } finally {
+      const revert = client.updateProtocol({
+        admin: adminKp.publicKey,
+        creationFee: CREATION_FEE,
+        executionFee: EXECUTION_FEE,
+        enabled: true,
+        newTreasury: treasuryKp.publicKey,
+      });
+      await sendTx(ctx, revert.instructions, [adminKp]);
+      client.invalidateProtocolCache();
     }
   });
 
@@ -172,11 +346,7 @@ describe('Protocol Fees', () => {
     const ownerKp = Keypair.generate();
     const userSeed = crypto.randomBytes(32);
 
-    let shardBalanceBefore = 0;
-    for (let i = 0; i < NUM_SHARDS; i++) {
-      const [shardPda] = client.findTreasuryShard(i);
-      shardBalanceBefore += await ctx.connection.getBalance(shardPda);
-    }
+    const shardBalanceBefore = await sumShardBalances();
 
     // Just call createWallet — SDK auto-detects fee record + picks shard
     const { instructions } = await client.createWallet({
@@ -187,11 +357,7 @@ describe('Protocol Fees', () => {
 
     await sendTx(ctx, instructions);
 
-    let shardBalanceAfter = 0;
-    for (let i = 0; i < NUM_SHARDS; i++) {
-      const [shardPda] = client.findTreasuryShard(i);
-      shardBalanceAfter += await ctx.connection.getBalance(shardPda);
-    }
+    const shardBalanceAfter = await sumShardBalances();
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(CREATION_FEE));
 
     // Verify fee record wallet_count > 0 (we don't assert exact value because
@@ -200,6 +366,41 @@ describe('Protocol Fees', () => {
     const info = await ctx.connection.getAccountInfo(feeRecordPda);
     const walletCount = info!.data.readUInt32LE(20);
     expect(walletCount).toBeGreaterThan(0);
+  });
+
+  it('SDK creates FeeRecord for a first-time payer before CreateWallet', async () => {
+    const firstTimePayer = Keypair.generate();
+    const sig = await ctx.connection.requestAirdrop(
+      firstTimePayer.publicKey,
+      5 * LAMPORTS_PER_SOL,
+    );
+    await ctx.connection.confirmTransaction(sig, 'confirmed');
+
+    const firstTimeClient = new LazorKitClient(ctx.connection);
+    const [feeRecordPda] = firstTimeClient.findFeeRecord(firstTimePayer.publicKey);
+    expect(await ctx.connection.getAccountInfo(feeRecordPda)).toBeNull();
+
+    const before = await sumShardBalances();
+    const { instructions } = await firstTimeClient.createWallet({
+      payer: firstTimePayer.publicKey,
+      userSeed: crypto.randomBytes(32),
+      owner: { type: 'ed25519', publicKey: Keypair.generate().publicKey },
+    });
+
+    expect(instructions.length).toBe(2);
+    expect(instructions[0].data[0]).toBe(12); // RegisterPayer
+    expect(instructions[1].data[0]).toBe(0); // CreateWallet
+
+    await sendTx({ ...ctx, payer: firstTimePayer }, instructions);
+
+    const after = await sumShardBalances();
+    expect(after - before).toBe(Number(CREATION_FEE));
+
+    const record = await ctx.connection.getAccountInfo(feeRecordPda);
+    expect(record).not.toBeNull();
+    expect(record!.data[0]).toBe(6);
+    expect(record!.data.readBigUInt64LE(8)).toBe(CREATION_FEE);
+    expect(record!.data.readUInt32LE(20)).toBe(1);
   });
 
   it('auto-detects payer and collects fee on Execute', async () => {
@@ -222,11 +423,7 @@ describe('Protocol Fees', () => {
     );
     await ctx.connection.confirmTransaction(fundSig, 'confirmed');
 
-    let shardBalanceBefore = 0;
-    for (let i = 0; i < NUM_SHARDS; i++) {
-      const [shardPda] = client.findTreasuryShard(i);
-      shardBalanceBefore += await ctx.connection.getBalance(shardPda);
-    }
+    const shardBalanceBefore = await sumShardBalances();
 
     const { SystemProgram } = await import('@solana/web3.js');
     const { instructions: execIxs } = await client.execute({
@@ -244,11 +441,7 @@ describe('Protocol Fees', () => {
 
     await sendTx(ctx, execIxs, [ownerKp]);
 
-    let shardBalanceAfter = 0;
-    for (let i = 0; i < NUM_SHARDS; i++) {
-      const [shardPda] = client.findTreasuryShard(i);
-      shardBalanceAfter += await ctx.connection.getBalance(shardPda);
-    }
+    const shardBalanceAfter = await sumShardBalances();
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(EXECUTION_FEE));
   });
 

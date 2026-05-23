@@ -53,7 +53,9 @@ pub fn process_instruction(
         11 => crate::processor::protocol::update_protocol::process(program_id, accounts, data),
         12 => crate::processor::protocol::register_integrator::process(program_id, accounts, data),
         13 => crate::processor::protocol::withdraw_treasury::process(program_id, accounts, data),
-        14 => crate::processor::protocol::initialize_treasury_shard::process(program_id, accounts, data),
+        14 => crate::processor::protocol::initialize_treasury_shard::process(
+            program_id, accounts, data,
+        ),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -148,11 +150,13 @@ fn try_collect_fee<'a>(
     }
 
     // TreasuryShard validation (admin must have called
-    // `initialize_treasury_shard` for this shard id).
+    // `initialize_treasury_shard` for this shard id). The account must be
+    // both shaped like a TreasuryShard and live at the canonical PDA for
+    // the shard id stored in its data.
     if maybe_shard.owner() != program_id {
         return Err(ProtocolError::InvalidTreasuryShard.into());
     }
-    {
+    let shard_id = {
         let shard_data = maybe_shard.try_borrow_data()?;
         if shard_data.is_empty()
             || shard_data[0] != AccountDiscriminator::TreasuryShard as u8
@@ -160,6 +164,14 @@ fn try_collect_fee<'a>(
         {
             return Err(ProtocolError::InvalidTreasuryShard.into());
         }
+        let shard = unsafe { &*(shard_data.as_ptr() as *const TreasuryShard) };
+        shard.shard_id
+    };
+    let shard_id_arr = [shard_id];
+    let (expected_shard_key, _) =
+        find_program_address(&[b"treasury_shard", &shard_id_arr], program_id);
+    if maybe_shard.key() != &expected_shard_key {
+        return Err(ProtocolError::InvalidTreasuryShard.into());
     }
 
     // Payer must sign — every processor that accepts disc 0/4/7 already

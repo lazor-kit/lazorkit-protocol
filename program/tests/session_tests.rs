@@ -43,14 +43,17 @@ fn test_session_lifecycle() {
 
         let create_wallet_ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(owner_auth_pda, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(owner_auth_pda, false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![0]; // CreateWallet discriminator
                 data.extend_from_slice(&instruction_data);
@@ -165,18 +168,21 @@ fn test_session_lifecycle() {
 
         let execute_ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(session_pda, false), // Session PDA as Authority
-                AccountMeta::new(vault_pda, false),
-                // Inner accounts
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(context.payer.pubkey(), false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                // Signer for Session Match
-                AccountMeta::new_readonly(session_keypair.pubkey(), true),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(session_pda, false), // Session PDA as Authority
+                    AccountMeta::new(vault_pda, false),
+                    // Inner accounts
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(context.payer.pubkey(), false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    // Signer for Session Match
+                    AccountMeta::new_readonly(session_keypair.pubkey(), true),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![4]; // Execute discriminator
                 data.extend_from_slice(&compact_bytes);
@@ -223,16 +229,19 @@ fn test_session_lifecycle() {
 
         let execute_ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(session_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(context.payer.pubkey(), false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(session_keypair.pubkey(), true),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(session_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(context.payer.pubkey(), false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(session_keypair.pubkey(), true),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![4];
                 data.extend_from_slice(&compact_bytes);

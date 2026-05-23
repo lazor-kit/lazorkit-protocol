@@ -44,15 +44,18 @@ fn test_spoof_system_program() {
     // 3. Create Instruction with FAKE System Program
     let create_wallet_ix = Instruction {
         program_id: context.program_id,
-        accounts: vec![
-            AccountMeta::new(context.payer.pubkey(), true),
-            AccountMeta::new(wallet_pda, false),
-            AccountMeta::new(vault_pda, false),
-            AccountMeta::new(auth_pda, false),
-            // PASS FAKE SYSTEM PROGRAM HERE
-            AccountMeta::new_readonly(fake_system_program.pubkey(), false),
-            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-        ],
+        accounts: with_protocol_fee_accounts(
+            vec![
+                AccountMeta::new(context.payer.pubkey(), true),
+                AccountMeta::new(wallet_pda, false),
+                AccountMeta::new(vault_pda, false),
+                AccountMeta::new(auth_pda, false),
+                // PASS FAKE SYSTEM PROGRAM HERE
+                AccountMeta::new_readonly(fake_system_program.pubkey(), false),
+                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            ],
+            &context,
+        ),
         data: {
             let mut data = vec![0]; // CreateWallet discriminator
             data.extend_from_slice(&instruction_data);

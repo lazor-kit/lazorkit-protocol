@@ -55,14 +55,17 @@ fn test_nonce_slot_truncation_fix() {
 
         let ix = Instruction {
             program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new(wallet_pda, false),
-                AccountMeta::new(vault_pda, false),
-                AccountMeta::new(auth_pda, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-            ],
+            accounts: with_protocol_fee_accounts(
+                vec![
+                    AccountMeta::new(context.payer.pubkey(), true),
+                    AccountMeta::new(wallet_pda, false),
+                    AccountMeta::new(vault_pda, false),
+                    AccountMeta::new(auth_pda, false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+                ],
+                &context,
+            ),
             data: {
                 let mut data = vec![0]; // CreateWallet
                 data.extend_from_slice(&instruction_data);
@@ -124,13 +127,16 @@ fn test_nonce_slot_truncation_fix() {
 
     let execute_ix = Instruction {
         program_id: context.program_id,
-        accounts: vec![
-            AccountMeta::new(context.payer.pubkey(), true),           // 0
-            AccountMeta::new(wallet_pda, false),                       // 1
-            AccountMeta::new(auth_pda, false),                         // 2 - Authority (Writable)
-            AccountMeta::new(vault_pda, false),                        // 3 - Vault
-            AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false), // 4
-        ],
+        accounts: with_protocol_fee_accounts(
+            vec![
+                AccountMeta::new(context.payer.pubkey(), true), // 0
+                AccountMeta::new(wallet_pda, false),            // 1
+                AccountMeta::new(auth_pda, false),              // 2 - Authority (Writable)
+                AccountMeta::new(vault_pda, false),             // 3 - Vault
+                AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false), // 4
+            ],
+            &context,
+        ),
         data: execute_data,
     };
 

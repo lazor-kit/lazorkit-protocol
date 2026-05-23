@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn test_validate_duplicate_token_recurring_same_mint() {
         let mint = [0xBB; 32];
-        let mut make_data = || {
+        let make_data = || {
             let mut data = Vec::new();
             data.extend_from_slice(&mint);
             data.extend_from_slice(&1_000_000u64.to_le_bytes()); // limit
