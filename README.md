@@ -191,9 +191,11 @@ Each authority has its own PDA, so different authorities on the same wallet exec
 
 ## Security
 
-- Odometer counter replay protection (monotonic u32 per authority; works with synced passkeys).
+- Odometer counter replay protection (monotonic u32 per authority; checked increment never wraps; works with synced passkeys).
 - Clock-based slot freshness (150-slot window).
 - CPI reentrancy prevention (`stack_height` check on every authenticated path).
+- Authority creation rejects all-zero authority identity material.
+- Fee-eligible instructions require canonical protocol fee accounts and per-payer `FeeRecord` accounting.
 - Expired session limits treated as fully exhausted (never "unlocked").
 - `SolMaxPerTx` uses per-CPI gross-outflow tracking — DeFi round-trips can't bypass the per-tx cap by returning most lamports.
 - Vault + per-listed-mint token account invariants enforced during session execute (blocks `System::Assign`, `SetAuthority`, `Approve` escapes).
