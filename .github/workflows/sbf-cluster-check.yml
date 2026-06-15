@@ -22,7 +22,8 @@ on:
       - 'assertions/**'
       - '.github/workflows/sbf-cluster-check.yml'
   push:
-    branches: [main]
+    branches: [main, develop]
+  workflow_dispatch:
 
 jobs:
   cluster-check:
