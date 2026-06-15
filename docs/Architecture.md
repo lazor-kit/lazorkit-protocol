@@ -395,6 +395,20 @@ The role check is per-instruction, not per-authority globally. Below is what
 happens when a Spender (lowest privilege) calls `Execute` — and what would
 happen if the same Spender tried to call `AddAuthority` instead.
 
+### Execute signer forwarding and paymasters
+
+`Execute` and `ExecuteDeferred` intentionally preserve signer privilege from
+outer transaction accounts when constructing inner CPIs, while also signing
+for the wallet vault PDA. This means a payer/paymaster/dev account that signs
+the outer transaction can also be consumed as a signer by an inner instruction
+if that same account appears in the compact instruction account list.
+
+That behavior is part of the sponsored-transaction model rather than a contract
+bug. A paymaster must parse and approve the full transaction, including all
+inner compact instructions and expected lamport/token movement, before signing.
+The protocol still charges fees and records them against that fee payer's
+canonical `FeeRecord`.
+
 ```mermaid
 sequenceDiagram
     autonumber
