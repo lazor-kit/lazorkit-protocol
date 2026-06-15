@@ -41,6 +41,7 @@ import {
   DISC_REMOVE_AUTHORITY,
   DISC_REVOKE_SESSION,
   DISC_TRANSFER_OWNERSHIP,
+  ROLE_OWNER,
   createAddAuthorityIx,
   createAuthorizeIx,
   createCreateSessionIx,
@@ -272,6 +273,19 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
     secp256r1Pubkey: owner.compressedPubkey,
     rpId: owner.rpId,
   };
+}
+
+function assertAddAuthorityRole(role: number): void {
+  if (role === ROLE_OWNER) {
+    throw new Error(
+      'AddAuthority cannot create Owner authorities; use transferOwnership instead',
+    );
+  }
+  if (role < 1 || role > 2) {
+    throw new Error(
+      'AddAuthority role must be ROLE_ADMIN (1) or ROLE_SPENDER (2)',
+    );
+  }
 }
 
 function concatBytes(parts: ReadonlyArray<Uint8Array>): Uint8Array {
@@ -604,6 +618,7 @@ export class LazorKit {
     newAuthority: CreateWalletOwner;
     role: number;
   }): Promise<{ instructions: Instruction[]; newAuthorityPda: Address }> {
+    assertAddAuthorityRole(params.role);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
       params.newAuthority,
     );
@@ -646,6 +661,7 @@ export class LazorKit {
     newAuthority: CreateWalletOwner;
     role: number;
   }): Promise<PreparedAddAuthority> {
+    assertAddAuthorityRole(params.role);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
       params.newAuthority,
     );

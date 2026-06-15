@@ -349,7 +349,7 @@ flowchart LR
     Authorize[Authorize<br/>deferred TX1]
     Exec[Execute<br/>immediate]
 
-    Owner --> Add
+    Owner -->|Admin/Spender role only| Add
     Owner --> Remove
     Owner --> Transfer
     Owner --> CreateS
@@ -381,8 +381,9 @@ extra constraints (e.g. Admin can only add `Spender`-role authorities;
 
 Notable rules not visible above:
 
-- The **Owner role itself can never be removed** (`manage.rs:430`). Only
-  `TransferOwnership` swaps it atomically with a new Owner.
+- The **Owner role itself can never be added or removed** through
+  `AddAuthority`/`RemoveAuthority`. Only `TransferOwnership` swaps it
+  atomically with a new Owner.
 - An authority **cannot remove itself** (`manage.rs:435`).
 - `ExecuteDeferred` (TX2) and `ReclaimDeferred` are not gated by role —
   they're gated by hash match + payer-pubkey, respectively. Anyone can

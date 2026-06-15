@@ -21,7 +21,10 @@ use crate::{
 ///
 /// Layout:
 /// - `authority_type`: 0 for Ed25519, 1 for Secp256r1.
-/// - `new_role`: Role to assign (0=Owner, 1=Admin, 2=Spender).
+/// - `new_role`: Role to assign (1=Admin, 2=Spender).
+///
+/// `Owner` is intentionally excluded here. Ownership changes must use
+/// `TransferOwnership`, which atomically closes the old owner authority.
 /// - `_padding`: Reserved to align to 8-byte boundary.
 #[repr(C, align(8))]
 #[derive(NoPadding)]
@@ -59,7 +62,7 @@ impl AddAuthorityArgs {
 /// # Logic:
 /// 1. **Authentication**: Verifies the `admin_authority` (must be Admin or Owner).
 /// 2. **Authorization**: Checks permission levels:
-///    - `Owner` (0) can add any role.
+///    - `Owner` (0) can add Admin (1) or Spender (2).
 ///    - `Admin` (1) can only add `Spender` (2).
 /// 3. **Execution**: Creates a new PDA `["authority", wallet, id_hash]` and initializes it.
 ///
@@ -208,10 +211,12 @@ pub fn process_add_authority(
     }
 
     // Authorization
-    // Validate new_role is a known value (0=Owner, 1=Admin, 2=Spender).
+    // Validate new_role is a known non-owner value (1=Admin, 2=Spender).
     // Without this check an Owner could create a role-255 authority that can
-    // execute but cannot be revoked by any Admin.
-    if args.new_role > 2 {
+    // execute but cannot be revoked by any Admin. Owner creation is also
+    // disallowed here: ownership must move via TransferOwnership so there is
+    // only one active owner authority at a time.
+    if args.new_role == 0 || args.new_role > 2 {
         return Err(AuthError::PermissionDenied.into());
     }
     if admin_header.role != 0 && (admin_header.role != 1 || args.new_role != 2) {

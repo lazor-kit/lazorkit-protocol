@@ -49,6 +49,7 @@ import {
   DISC_CREATE_SESSION,
   DISC_AUTHORIZE,
   DISC_REVOKE_SESSION,
+  ROLE_OWNER,
 } from './instructions';
 import {
   prepareSecp256r1,
@@ -254,6 +255,19 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
     secp256r1Pubkey: owner.compressedPubkey,
     rpId: owner.rpId,
   };
+}
+
+function assertAddAuthorityRole(role: number): void {
+  if (role === ROLE_OWNER) {
+    throw new Error(
+      'AddAuthority cannot create Owner authorities; use transferOwnership instead',
+    );
+  }
+  if (role < 1 || role > 2) {
+    throw new Error(
+      'AddAuthority role must be ROLE_ADMIN (1) or ROLE_SPENDER (2)',
+    );
+  }
 }
 
 /**
@@ -684,6 +698,7 @@ export class LazorKitClient {
     newAuthority: CreateWalletOwner;
     role: number;
   }): Promise<PreparedAddAuthority> {
+    assertAddAuthorityRole(params.role);
     const {
       authType: newType,
       credentialOrPubkey,
@@ -1373,6 +1388,7 @@ export class LazorKitClient {
     instructions: TransactionInstruction[];
     newAuthorityPda: PublicKey;
   }> {
+    assertAddAuthorityRole(params.role);
     const {
       authType: newType,
       credentialOrPubkey,
