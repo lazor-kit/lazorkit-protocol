@@ -20,6 +20,11 @@ pub fn get_stack_height() -> u64 {
     0
 }
 
+#[inline(always)]
+pub fn is_all_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == 0)
+}
+
 /// Safely initializes a PDA account using transfer-allocate-assign pattern.
 ///
 /// This prevents DoS attacks where malicious actors pre-fund target accounts
@@ -143,4 +148,22 @@ pub fn initialize_pda_account(
     invoke_signed(&assign_ix, &[&target_pda, &system_program], &[signer])?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_all_zero;
+
+    #[test]
+    fn is_all_zero_detects_empty_and_zero_slices() {
+        assert!(is_all_zero(&[]));
+        assert!(is_all_zero(&[0; 32]));
+    }
+
+    #[test]
+    fn is_all_zero_rejects_any_nonzero_byte() {
+        let mut bytes = [0u8; 32];
+        bytes[31] = 1;
+        assert!(!is_all_zero(&bytes));
+    }
 }

@@ -94,7 +94,7 @@ Three things worth committing to memory before reading further:
 
 ### Replay protection
 
-- **Secp256r1 odometer counter (primary)** — program-controlled u32 per authority. Client submits `stored + 1`. The WebAuthn hardware counter is intentionally ignored because synced passkeys (iCloud, Google) return unreliable values. Counter is committed only after successful signature verification.
+- **Secp256r1 odometer counter (primary)** — program-controlled u32 per authority. Client submits `stored + 1`. The WebAuthn hardware counter is intentionally ignored because synced passkeys (iCloud, Google) return unreliable values. Counter is committed only after successful signature verification, and checked arithmetic rejects the terminal `u32::MAX -> 0` wrap case with `ArithmeticOverflow`.
 - **Clock-based slot freshness (secondary)** — slot from `auth_payload` must be within 150 slots of `Clock::get()`. No SlotHashes sysvar needed.
 - **Anti-CPI check** — `get_stack_height() > 1` rejects authentication via CPI.
 - **Signature binding** — challenge hash includes discriminator, payer, counter, and program_id. The accounts_hash binds the set of inner accounts, preventing recipient-reordering attacks.
@@ -227,6 +227,13 @@ Variable data after header:
 - **Ed25519**: `[pubkey(32)]` — total 80 bytes.
 - **Secp256r1**: `[credential_id_hash(32)][compressed_pubkey(33)][rpIdHash(32)]` — total 145 bytes fixed.
 
+`CreateWallet` and `AddAuthority` reject all-zero Ed25519 pubkeys, all-zero
+Secp256r1 credential hashes, and all-zero Secp256r1 compressed pubkeys before
+deriving or initializing the Authority PDA. SDK owner/authority helpers apply
+the same non-zero identity checks before building create, add, and ownership
+transfer instructions; on-chain `TransferOwnership` also rejects an all-zero
+authority seed.
+
 `rpIdHash` is pre-computed at authority creation (SHA-256 of the rpId string) and stored directly, eliminating one `sol_sha256` syscall per Execute.
 
 ### Session PDA — 80+ bytes
@@ -311,7 +318,7 @@ pub struct ProtocolConfig {
 // Sharded fee destination (N shards spread write contention).
 ```
 
-Fee flow: SDK appends `[protocolConfig, feeRecord, treasuryShard, systemProgram]` to fee-eligible instructions. Entrypoint validates the canonical config, fee record, and treasury shard PDAs, creates the `FeeRecord` inline if the canonical account is still system-owned, transfers `fee` from payer to a random `treasuryShard`, bumps `FeeRecord` counters, then strips the 4 accounts and dispatches to the processor. Admin withdraws from shards to `treasury` via `WithdrawTreasury`.
+Fee flow: SDK appends `[protocolConfig, feeRecord, treasuryShard, systemProgram]` to fee-eligible instructions and prepends `RegisterPayer` when the payer/paymaster is missing its canonical `FeeRecord`. Entrypoint validates the canonical config, fee record, and treasury shard PDAs, creates the `FeeRecord` inline if the canonical account is still system-owned, transfers `fee` from payer to a random `treasuryShard`, bumps `FeeRecord` counters, then strips the 4 accounts and dispatches to the processor. Admin withdraws from shards to `treasury` via `WithdrawTreasury`.
 
 ## Auth payload layout (Secp256r1)
 
@@ -349,7 +356,7 @@ flowchart LR
     Authorize[Authorize<br/>deferred TX1]
     Exec[Execute<br/>immediate]
 
-    Owner --> Add
+    Owner -->|Admin/Spender role only| Add
     Owner --> Remove
     Owner --> Transfer
     Owner --> CreateS
@@ -381,8 +388,9 @@ extra constraints (e.g. Admin can only add `Spender`-role authorities;
 
 Notable rules not visible above:
 
-- The **Owner role itself can never be removed** (`manage.rs:430`). Only
-  `TransferOwnership` swaps it atomically with a new Owner.
+- The **Owner role itself can never be added or removed** through
+  `AddAuthority`/`RemoveAuthority`. Only `TransferOwnership` swaps it
+  atomically with a new Owner.
 - An authority **cannot remove itself** (`manage.rs:435`).
 - `ExecuteDeferred` (TX2) and `ReclaimDeferred` are not gated by role —
   they're gated by hash match + payer-pubkey, respectively. Anyone can
@@ -393,6 +401,20 @@ Notable rules not visible above:
 The role check is per-instruction, not per-authority globally. Below is what
 happens when a Spender (lowest privilege) calls `Execute` — and what would
 happen if the same Spender tried to call `AddAuthority` instead.
+
+### Execute signer forwarding and paymasters
+
+`Execute` and `ExecuteDeferred` intentionally preserve signer privilege from
+outer transaction accounts when constructing inner CPIs, while also signing
+for the wallet vault PDA. This means a payer/paymaster/dev account that signs
+the outer transaction can also be consumed as a signer by an inner instruction
+if that same account appears in the compact instruction account list.
+
+That behavior is part of the sponsored-transaction model rather than a contract
+bug. A paymaster must parse and approve the full transaction, including all
+inner compact instructions and expected lamport/token movement, before signing.
+The protocol still charges fees and records them against that fee payer's
+canonical `FeeRecord`.
 
 ```mermaid
 sequenceDiagram

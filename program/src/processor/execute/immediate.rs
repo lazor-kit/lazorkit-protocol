@@ -272,7 +272,13 @@ pub fn process(
         Seed::from(&vault_bump_arr),
     ];
 
-    // Execute each compact instruction
+    // Execute each compact instruction.
+    //
+    // Signer forwarding is intentional here: any outer account that signed
+    // the LazorKit transaction remains a signer for matching inner CPI
+    // accounts, and the vault PDA is added as the wallet-controlled signer.
+    // This is part of the paymaster model: a payer/paymaster that signs the
+    // outer transaction must inspect the full transaction before signing.
     for compact_ix in &compact_instructions {
         let decompressed = compact_ix.decompress(accounts)?;
 

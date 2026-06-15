@@ -41,6 +41,7 @@ import {
   DISC_REMOVE_AUTHORITY,
   DISC_REVOKE_SESSION,
   DISC_TRANSFER_OWNERSHIP,
+  ROLE_OWNER,
   createAddAuthorityIx,
   createAuthorizeIx,
   createCreateSessionIx,
@@ -252,6 +253,12 @@ function assertByteLength(value: Uint8Array, expected: number, name: string): vo
   }
 }
 
+function assertNonZeroBytes(value: Uint8Array, name: string): void {
+  if (value.every((b) => b === 0)) {
+    throw new Error(`${name} must not be all zero bytes`);
+  }
+}
+
 function resolveOwnerFields(owner: CreateWalletOwner): {
   authType: number;
   credentialOrPubkey: Uint8Array;
@@ -259,19 +266,36 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
   rpId?: string;
 } {
   if (owner.type === 'ed25519') {
+    const publicKeyBytes = addressEncoder.encode(owner.publicKey) as Uint8Array;
+    assertNonZeroBytes(publicKeyBytes, 'publicKey');
     return {
       authType: AUTH_TYPE_ED25519,
-      credentialOrPubkey: addressEncoder.encode(owner.publicKey) as Uint8Array,
+      credentialOrPubkey: publicKeyBytes,
     };
   }
   assertByteLength(owner.credentialIdHash, 32, 'credentialIdHash');
   assertByteLength(owner.compressedPubkey, 33, 'compressedPubkey');
+  assertNonZeroBytes(owner.credentialIdHash, 'credentialIdHash');
+  assertNonZeroBytes(owner.compressedPubkey, 'compressedPubkey');
   return {
     authType: AUTH_TYPE_SECP256R1,
     credentialOrPubkey: owner.credentialIdHash,
     secp256r1Pubkey: owner.compressedPubkey,
     rpId: owner.rpId,
   };
+}
+
+function assertAddAuthorityRole(role: number): void {
+  if (role === ROLE_OWNER) {
+    throw new Error(
+      'AddAuthority cannot create Owner authorities; use transferOwnership instead',
+    );
+  }
+  if (role < 1 || role > 2) {
+    throw new Error(
+      'AddAuthority role must be ROLE_ADMIN (1) or ROLE_SPENDER (2)',
+    );
+  }
 }
 
 function concatBytes(parts: ReadonlyArray<Uint8Array>): Uint8Array {
@@ -604,6 +628,7 @@ export class LazorKit {
     newAuthority: CreateWalletOwner;
     role: number;
   }): Promise<{ instructions: Instruction[]; newAuthorityPda: Address }> {
+    assertAddAuthorityRole(params.role);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
       params.newAuthority,
     );
@@ -646,6 +671,7 @@ export class LazorKit {
     newAuthority: CreateWalletOwner;
     role: number;
   }): Promise<PreparedAddAuthority> {
+    assertAddAuthorityRole(params.role);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
       params.newAuthority,
     );

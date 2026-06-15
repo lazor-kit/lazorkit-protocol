@@ -88,7 +88,7 @@ impl Authenticator for Secp256r1Authenticator {
         };
 
         // --- Odometer validation ---
-        let expected_counter = header.counter.wrapping_add(1);
+        let expected_counter = next_counter(header.counter)?;
         if submitted_counter != expected_counter {
             return Err(AuthError::SignatureReused.into());
         }
@@ -276,9 +276,17 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
+#[inline(always)]
+fn next_counter(counter: u32) -> Result<u32, ProgramError> {
+    counter
+        .checked_add(1)
+        .ok_or(ProgramError::ArithmeticOverflow)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ct_eq;
+    use super::{ct_eq, next_counter};
+    use pinocchio::program_error::ProgramError;
 
     #[test]
     fn ct_eq_equal() {
@@ -306,5 +314,19 @@ mod tests {
     #[test]
     fn ct_eq_differs_at_middle() {
         assert!(!ct_eq(b"axc", b"abc"));
+    }
+
+    #[test]
+    fn next_counter_increments_without_wrapping() {
+        assert_eq!(next_counter(0).unwrap(), 1);
+        assert_eq!(next_counter(u32::MAX - 1).unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn next_counter_rejects_overflow() {
+        assert!(matches!(
+            next_counter(u32::MAX),
+            Err(ProgramError::ArithmeticOverflow)
+        ));
     }
 }
