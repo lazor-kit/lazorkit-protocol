@@ -233,6 +233,12 @@ function assertByteLength(
   }
 }
 
+function assertNonZeroBytes(value: Uint8Array, name: string): void {
+  if (value.every((b) => b === 0)) {
+    throw new Error(`${name} must not be all zero bytes`);
+  }
+}
+
 /** Resolves a CreateWalletOwner to the low-level fields needed by IX builders */
 function resolveOwnerFields(owner: CreateWalletOwner): {
   authType: number;
@@ -241,13 +247,17 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
   rpId?: string;
 } {
   if (owner.type === 'ed25519') {
+    const publicKeyBytes = owner.publicKey.toBytes();
+    assertNonZeroBytes(publicKeyBytes, 'publicKey');
     return {
       authType: AUTH_TYPE_ED25519,
-      credentialOrPubkey: owner.publicKey.toBytes(),
+      credentialOrPubkey: publicKeyBytes,
     };
   }
   assertByteLength(owner.credentialIdHash, 32, 'credentialIdHash');
   assertByteLength(owner.compressedPubkey, 33, 'compressedPubkey');
+  assertNonZeroBytes(owner.credentialIdHash, 'credentialIdHash');
+  assertNonZeroBytes(owner.compressedPubkey, 'compressedPubkey');
   return {
     authType: AUTH_TYPE_SECP256R1,
     credentialOrPubkey: owner.credentialIdHash,

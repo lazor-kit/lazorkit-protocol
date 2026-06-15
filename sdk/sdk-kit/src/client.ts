@@ -252,6 +252,12 @@ function assertByteLength(value: Uint8Array, expected: number, name: string): vo
   }
 }
 
+function assertNonZeroBytes(value: Uint8Array, name: string): void {
+  if (value.every((b) => b === 0)) {
+    throw new Error(`${name} must not be all zero bytes`);
+  }
+}
+
 function resolveOwnerFields(owner: CreateWalletOwner): {
   authType: number;
   credentialOrPubkey: Uint8Array;
@@ -259,13 +265,17 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
   rpId?: string;
 } {
   if (owner.type === 'ed25519') {
+    const publicKeyBytes = addressEncoder.encode(owner.publicKey) as Uint8Array;
+    assertNonZeroBytes(publicKeyBytes, 'publicKey');
     return {
       authType: AUTH_TYPE_ED25519,
-      credentialOrPubkey: addressEncoder.encode(owner.publicKey) as Uint8Array,
+      credentialOrPubkey: publicKeyBytes,
     };
   }
   assertByteLength(owner.credentialIdHash, 32, 'credentialIdHash');
   assertByteLength(owner.compressedPubkey, 33, 'compressedPubkey');
+  assertNonZeroBytes(owner.credentialIdHash, 'credentialIdHash');
+  assertNonZeroBytes(owner.compressedPubkey, 'compressedPubkey');
   return {
     authType: AUTH_TYPE_SECP256R1,
     credentialOrPubkey: owner.credentialIdHash,

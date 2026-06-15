@@ -12,6 +12,7 @@ use pinocchio::{
 use crate::{
     error::AuthError,
     state::{authority::AuthorityAccountHeader, wallet::WalletAccount, AccountDiscriminator},
+    utils::is_all_zero,
 };
 
 /// Arguments for the `CreateWallet` instruction.
@@ -85,6 +86,9 @@ pub fn process(
                 return Err(ProgramError::InvalidInstructionData);
             }
             let (pubkey, _) = rest.split_at(32);
+            if is_all_zero(pubkey) {
+                return Err(AuthError::InvalidPubkey.into());
+            }
             (pubkey, pubkey)
         },
         1 => {
@@ -93,6 +97,10 @@ pub fn process(
                 return Err(ProgramError::InvalidInstructionData);
             }
             let (credential_id_hash, rest_after_cred) = rest.split_at(32);
+            let compressed_pubkey = &rest_after_cred[..33];
+            if is_all_zero(credential_id_hash) || is_all_zero(compressed_pubkey) {
+                return Err(AuthError::InvalidPubkey.into());
+            }
             let rp_id_len = rest_after_cred[33] as usize;
             // Enforce a sane upper bound: max valid domain name is 253 chars.
             // Without this an attacker-controlled payer could create a 369-byte
