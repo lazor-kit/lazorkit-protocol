@@ -45,6 +45,11 @@ initialized inline before the fee is recorded. If the supplied record account
 is non-canonical, foreign-owned, malformed, or has the wrong discriminator,
 the instruction fails.
 
+The record is keyed by the fee payer, not by the wallet owner. For sponsored
+transactions this means the paymaster/dev signer gets the `FeeRecord`, and
+SDK-created `Execute` / `ExecuteDeferred` transactions must prepend
+`RegisterPayer` for that paymaster when the record is missing.
+
 `RegisterPayer` remains public for compatibility and explicit pre-registration,
 but successful fee-paying instructions no longer depend on users calling it
 manually.

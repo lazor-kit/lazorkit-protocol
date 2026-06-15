@@ -460,6 +460,56 @@ describe('Protocol Fees', () => {
     expect(after - before).toBe(EXECUTION_FEE);
   });
 
+  it('SDK creates FeeRecord for a first-time paymaster before Execute', async () => {
+    const ownerSigner = await generateKeyPairSigner();
+    const userSeed = crypto.randomBytes(32);
+    const { instructions: createIxs, walletPda, vaultPda } = await client.createWallet({
+      payer: ctx.payer.address,
+      userSeed,
+      owner: { type: 'ed25519', publicKey: ownerSigner.address },
+    });
+    await sendTx(ctx, createIxs);
+    await airdrop(ctx, vaultPda, 2n * LAMPORTS_PER_SOL);
+
+    const paymaster = await generateKeyPairSigner();
+    await airdrop(ctx, paymaster.address, 5n * LAMPORTS_PER_SOL);
+    const paymasterClient = makeClient(ctx.rpc as never);
+    const [feeRecordPda] = await paymasterClient.findFeeRecord(paymaster.address);
+    const infoBefore = await ctx.rpc
+      .getAccountInfo(feeRecordPda, { encoding: 'base64' })
+      .send();
+    expect(infoBefore.value).toBeNull();
+
+    const before = await sumShardBalances();
+    const recipient = (await generateKeyPairSigner()).address;
+    const { instructions: execIxs } = await paymasterClient.execute({
+      payer: paymaster.address,
+      walletPda,
+      signer: ed25519(ownerSigner.address),
+      instructions: [systemTransferFromPda(vaultPda, recipient, 1_000_000n)],
+    });
+
+    expect(execIxs.length).toBe(2);
+    expect((execIxs[0]!.data as Uint8Array)[0] ?? -1).toBe(12); // RegisterPayer
+    expect((execIxs[1]!.data as Uint8Array)[0] ?? -1).toBe(4); // Execute
+
+    await sendTx({ ...ctx, payer: paymaster }, execIxs, [ownerSigner]);
+
+    const after = await sumShardBalances();
+    expect(after - before).toBe(EXECUTION_FEE);
+
+    const infoAfter = await ctx.rpc
+      .getAccountInfo(feeRecordPda, { encoding: 'base64' })
+      .send();
+    expect(infoAfter.value).not.toBeNull();
+    const data = new Uint8Array(Buffer.from(infoAfter.value!.data[0], 'base64'));
+    const view = new DataView(data.buffer, data.byteOffset);
+    expect(data[0]).toBe(6);
+    expect(view.getBigUint64(8, true)).toBe(EXECUTION_FEE);
+    expect(view.getUint32(16, true)).toBe(1);
+    expect(view.getUint32(20, true)).toBe(0);
+  });
+
   it('auto-creates FeeRecord inline for first-time unregistered payer', async () => {
     // Strict mode replaces the pre-strict "skip counter update" path
     // with inline auto-create. An unregistered payer's first
