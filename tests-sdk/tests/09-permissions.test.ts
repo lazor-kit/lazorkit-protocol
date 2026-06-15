@@ -23,9 +23,11 @@ import {
   LazorKitClient,
   AUTH_TYPE_ED25519,
   ROLE_ADMIN,
+  ROLE_OWNER,
   ROLE_SPENDER,
   ed25519,
 } from '../../sdk/sdk-legacy/src';
+import { createAddAuthorityIx } from '../../sdk/sdk-legacy/src/utils/instructions';
 
 describe('Permission Boundaries', () => {
   let ctx: TestContext;
@@ -126,8 +128,29 @@ describe('Permission Boundaries', () => {
       role: ROLE_ADMIN,
     });
 
-    // Owner can add any role — should succeed
+    // Owner can add Admin/Spender through AddAuthority.
     await sendTx(ctx, instructions, [ownerKp]);
+  });
+
+  it('owner cannot add another owner through AddAuthority', async () => {
+    const newOwnerKp = Keypair.generate();
+    const [newOwnerAuthPda] = client.findAuthority(
+      walletPda,
+      newOwnerKp.publicKey.toBytes(),
+    );
+    const ix = createAddAuthorityIx({
+      payer: ctx.payer.publicKey,
+      walletPda,
+      adminAuthorityPda: ownerAuthPda,
+      newAuthorityPda: newOwnerAuthPda,
+      newType: AUTH_TYPE_ED25519,
+      newRole: ROLE_OWNER,
+      credentialOrPubkey: newOwnerKp.publicKey.toBytes(),
+      authorizerSigner: ownerKp.publicKey,
+      programId: client.programId,
+    });
+
+    await sendTxExpectError(ctx, [ix], [ownerKp], 3002);
   });
 
   // ─── RemoveAuthority permission boundaries ──────────────────────

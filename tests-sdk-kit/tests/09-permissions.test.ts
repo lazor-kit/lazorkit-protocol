@@ -9,11 +9,19 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import * as crypto from 'node:crypto';
 import {
+  getAddressEncoder,
   generateKeyPairSigner,
   type Address,
   type KeyPairSigner,
 } from '@solana/kit';
-import { LazorKit, ROLE_ADMIN, ROLE_SPENDER, ed25519 } from '@lazorkit/sdk';
+import {
+  AUTH_TYPE_ED25519,
+  LazorKit,
+  ROLE_ADMIN,
+  ROLE_OWNER,
+  ROLE_SPENDER,
+  ed25519,
+} from '@lazorkit/sdk';
 import {
   setupTest,
   sendTx,
@@ -23,6 +31,9 @@ import {
   makeClient,
 } from './common.js';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils.js';
+import { createAddAuthorityIx } from '../../sdk/sdk-kit/src/instructions/builders.js';
+
+const addressEncoder = getAddressEncoder();
 
 describe('Permission Boundaries', () => {
   let ctx: TestContext;
@@ -110,6 +121,25 @@ describe('Permission Boundaries', () => {
       role: ROLE_ADMIN,
     });
     await sendTx(ctx, instructions, [ownerSigner]);
+  });
+
+  it('owner cannot add another owner through AddAuthority', async () => {
+    const newOwnerSigner = await generateKeyPairSigner();
+    const newOwnerKey = addressEncoder.encode(newOwnerSigner.address) as Uint8Array;
+    const [newOwnerAuthPda] = await client.findAuthority(walletPda, newOwnerKey);
+    const ix = createAddAuthorityIx({
+      payer: ctx.payer.address,
+      walletPda,
+      adminAuthorityPda: ownerAuthPda,
+      newAuthorityPda: newOwnerAuthPda,
+      newType: AUTH_TYPE_ED25519,
+      newRole: ROLE_OWNER,
+      credentialOrPubkey: newOwnerKey,
+      authorizerSigner: ownerSigner.address,
+      programId: client.programId,
+    });
+
+    await sendTxExpectError(ctx, [ix], [ownerSigner], 3002);
   });
 
   it('admin cannot remove owner', async () => {
