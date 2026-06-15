@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Keypair, LAMPORTS_PER_SOL, SystemProgram } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import {
   setupTest,
@@ -443,6 +443,67 @@ describe('Protocol Fees', () => {
 
     const shardBalanceAfter = await sumShardBalances();
     expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(EXECUTION_FEE));
+  });
+
+  it('SDK creates FeeRecord for a first-time paymaster before Execute', async () => {
+    const ownerKp = Keypair.generate();
+    const userSeed = crypto.randomBytes(32);
+    const recipient = Keypair.generate().publicKey;
+
+    const { instructions: createIxs, walletPda } = await client.createWallet({
+      payer: ctx.payer.publicKey,
+      userSeed,
+      owner: { type: 'ed25519', publicKey: ownerKp.publicKey },
+    });
+    await sendTx(ctx, createIxs);
+
+    const [vaultPda] = client.findVault(walletPda);
+    const fundSig = await ctx.connection.requestAirdrop(
+      vaultPda,
+      2 * LAMPORTS_PER_SOL,
+    );
+    await ctx.connection.confirmTransaction(fundSig, 'confirmed');
+
+    const paymaster = Keypair.generate();
+    const paymasterSig = await ctx.connection.requestAirdrop(
+      paymaster.publicKey,
+      5 * LAMPORTS_PER_SOL,
+    );
+    await ctx.connection.confirmTransaction(paymasterSig, 'confirmed');
+
+    const paymasterClient = new LazorKitClient(ctx.connection);
+    const [feeRecordPda] = paymasterClient.findFeeRecord(paymaster.publicKey);
+    expect(await ctx.connection.getAccountInfo(feeRecordPda)).toBeNull();
+
+    const shardBalanceBefore = await sumShardBalances();
+    const { instructions: execIxs } = await paymasterClient.execute({
+      payer: paymaster.publicKey,
+      walletPda,
+      signer: { type: 'ed25519', publicKey: ownerKp.publicKey },
+      instructions: [
+        SystemProgram.transfer({
+          fromPubkey: vaultPda,
+          toPubkey: recipient,
+          lamports: 1_000_000,
+        }),
+      ],
+    });
+
+    expect(execIxs.length).toBe(2);
+    expect(execIxs[0]!.data[0]).toBe(12); // RegisterPayer
+    expect(execIxs[1]!.data[0]).toBe(4); // Execute
+
+    await sendTx({ ...ctx, payer: paymaster }, execIxs, [ownerKp]);
+
+    const shardBalanceAfter = await sumShardBalances();
+    expect(shardBalanceAfter - shardBalanceBefore).toBe(Number(EXECUTION_FEE));
+
+    const record = await ctx.connection.getAccountInfo(feeRecordPda);
+    expect(record).not.toBeNull();
+    expect(record!.data[0]).toBe(6);
+    expect(record!.data.readBigUInt64LE(8)).toBe(EXECUTION_FEE);
+    expect(record!.data.readUInt32LE(16)).toBe(1);
+    expect(record!.data.readUInt32LE(20)).toBe(0);
   });
 
   it('auto-creates FeeRecord inline for first-time unregistered payer', async () => {
