@@ -18,6 +18,7 @@ import {
 } from '../src/index.js';
 
 const PAYER = address('11111111111111111111111111111112');
+const ZERO_ADDRESS = address('11111111111111111111111111111111');
 const VAULT = address('So11111111111111111111111111111111111111112');
 const KP = address('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
 
@@ -95,5 +96,32 @@ describe('createWallet — Ed25519 owner, fee disabled (no RPC needed)', () => {
     expect(result.authorityPda).toBeTypeOf('string');
     // Discriminator at byte 0.
     expect(result.instructions[0]!.data?.[0]).toBe(0); // DISC_CREATE_WALLET
+  });
+
+  it('rejects an all-zero Ed25519 owner key', async () => {
+    const lk = new LazorKit(mockRpc as never, PROGRAM_ID_DEVNET);
+    await expect(
+      lk.createWallet({
+        payer: PAYER,
+        userSeed: new Uint8Array(32).fill(0x88),
+        owner: { type: 'ed25519', publicKey: ZERO_ADDRESS },
+      }),
+    ).rejects.toThrow('publicKey must not be all zero bytes');
+  });
+
+  it('rejects all-zero Secp256r1 owner identity bytes', async () => {
+    const lk = new LazorKit(mockRpc as never, PROGRAM_ID_DEVNET);
+    await expect(
+      lk.createWallet({
+        payer: PAYER,
+        userSeed: new Uint8Array(32).fill(0x99),
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: new Uint8Array(32),
+          compressedPubkey: new Uint8Array(33),
+          rpId: 'lazor.dev',
+        },
+      }),
+    ).rejects.toThrow('credentialIdHash must not be all zero bytes');
   });
 });

@@ -15,6 +15,7 @@ use crate::{
     },
     error::AuthError,
     state::{authority::AuthorityAccountHeader, AccountDiscriminator},
+    utils::is_all_zero,
 };
 
 /// Arguments for the `AddAuthority` instruction.
@@ -85,6 +86,9 @@ pub fn process_add_authority(
                 return Err(ProgramError::InvalidInstructionData);
             }
             let (pubkey, _) = rest.split_at(32);
+            if is_all_zero(pubkey) {
+                return Err(AuthError::InvalidPubkey.into());
+            }
             (pubkey, pubkey)
         },
         1 => {
@@ -93,6 +97,10 @@ pub fn process_add_authority(
                 return Err(ProgramError::InvalidInstructionData);
             }
             let (credential_id_hash, rest_after_cred) = rest.split_at(32);
+            let compressed_pubkey = &rest_after_cred[..33];
+            if is_all_zero(credential_id_hash) || is_all_zero(compressed_pubkey) {
+                return Err(AuthError::InvalidPubkey.into());
+            }
             let rp_id_len = rest_after_cred[33] as usize;
             if rp_id_len == 0 || rp_id_len > 253 {
                 return Err(ProgramError::InvalidInstructionData);
