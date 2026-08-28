@@ -53,13 +53,13 @@ pub fn process(
     // checks below. They'd then get direct lamport manipulation on the real
     // (LazorKit-owned) shard_pda — which Solana's runtime allows because
     // LazorKit owns the shard — draining all treasury shards to themselves.
-    if config_pda.owner() != program_id || shard_pda.owner() != program_id {
+    ProtocolConfig::load(program_id, config_pda)?;
+    if shard_pda.owner() != program_id {
         return Err(ProgramError::IllegalOwner);
     }
 
     // Read config, verify admin + treasury
     let config_data = config_pda.try_borrow_data()?;
-    ProtocolConfig::check(&config_data).map_err(|_| ProtocolError::InvalidProtocolAdmin)?;
     let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
     if admin.key() != &config.admin {
         return Err(ProtocolError::InvalidProtocolAdmin.into());

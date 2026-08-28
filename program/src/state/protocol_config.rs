@@ -89,4 +89,37 @@ impl ProtocolConfig {
             Self::MIN_LEN,
         )
     }
+
+    /// The one address a ProtocolConfig may live at.
+    #[inline]
+    pub fn pda(program_id: &Pubkey) -> Pubkey {
+        pinocchio::pubkey::find_program_address(&[crate::seeds::PROTOCOL_CONFIG], program_id).0
+    }
+
+    /// Pin the account to that address, confirm this program owns it, and
+    /// validate the header — in that order, before any field is read.
+    ///
+    /// M-3. Every caller already checked ownership, which in practice is enough:
+    /// the only ProtocolConfig that can exist is the one `initialize_protocol`
+    /// created at this address. But the config is where the fee ceiling, the
+    /// admin and the treasury live, so "in practice" is the wrong standard —
+    /// `try_collect_fee` already pins the shard and fee-record PDAs, and this
+    /// was the inconsistency.
+    #[inline]
+    pub fn load(
+        program_id: &Pubkey,
+        account: &pinocchio::account_info::AccountInfo,
+    ) -> Result<(), pinocchio::program_error::ProgramError> {
+        use pinocchio::program_error::ProgramError;
+
+        if account.key() != &Self::pda(program_id) {
+            return Err(crate::error::ProtocolError::InvalidProtocolAdmin.into());
+        }
+        if account.owner() != program_id {
+            return Err(ProgramError::IllegalOwner);
+        }
+        let data = account.try_borrow_data()?;
+        Self::check(&data)
+            .map_err(|_| ProgramError::from(crate::error::ProtocolError::InvalidProtocolAdmin))
+    }
 }

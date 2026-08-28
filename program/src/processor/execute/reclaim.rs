@@ -56,6 +56,16 @@ pub fn process(
         return Err(AuthError::DeferredAuthorizationNotExpired.into());
     }
 
+    // Guard: if refund_dest == deferred_pda the double-write below burns the
+    // lamports — the second store wins and the balance lands at zero — and the
+    // runtime's conservation check then aborts the whole transaction after the
+    // data has already been cleared. The other two closers in this program
+    // (`manage::process_remove_authority`, `transfer_ownership`) already had
+    // this; reclaim did not.
+    if refund_dest.key() == deferred_pda.key() {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     // Close the account — zero data and drain lamports
     for byte in deferred_data.iter_mut() {
         *byte = 0;

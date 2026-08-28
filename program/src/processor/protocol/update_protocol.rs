@@ -53,14 +53,11 @@ pub fn process(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Verify config_pda is owned by this program before reading its fields
-    // for authorization decisions. Defense-in-depth.
-    if config_pda.owner() != program_id {
-        return Err(ProgramError::IllegalOwner);
-    }
+    // Pin the address, the owner and the header before reading any field for an
+    // authorization decision.
+    ProtocolConfig::load(program_id, config_pda)?;
 
     let data = config_pda.try_borrow_data()?;
-    ProtocolConfig::check(&data).map_err(|_| ProtocolError::InvalidProtocolAdmin)?;
     let config = unsafe { &*(data.as_ptr() as *const ProtocolConfig) };
     if admin.key() != &config.admin {
         return Err(ProtocolError::InvalidProtocolAdmin.into());

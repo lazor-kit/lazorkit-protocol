@@ -88,6 +88,17 @@ impl Authenticator for Secp256r1Authenticator {
         };
 
         // --- Odometer validation ---
+        //
+        // The counter lives in the authority account, so removing an authority
+        // and re-adding the same key resets it to zero and makes that key's old
+        // signatures acceptable again. There is no cheaper durable fix: once the
+        // account is closed there is no state left to remember it by, and the
+        // wallet has no monotonic counter of its own to fold into the challenge.
+        //
+        // What bounds it is the slot check above. A replayed signature must
+        // still be inside MAX_SLOT_AGE, so the attacker has ~60 seconds to
+        // remove and re-add the authority — and removing one already requires
+        // Owner or Admin rank, which is enough privilege to do worse directly.
         let expected_counter = next_counter(header.counter)?;
         if submitted_counter != expected_counter {
             return Err(AuthError::SignatureReused.into());
