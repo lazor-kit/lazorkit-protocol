@@ -160,7 +160,8 @@ export function createAddAuthorityIx(params: {
 
   const keys = [
     { pubkey: params.payer, isSigner: true, isWritable: false },
-    { pubkey: params.walletPda, isSigner: false, isWritable: false },
+    // Writable: Add/RemoveAuthority maintain the wallet's owner_count.
+    { pubkey: params.walletPda, isSigner: false, isWritable: true },
     { pubkey: params.adminAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: params.newAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -205,7 +206,8 @@ export function createRemoveAuthorityIx(params: {
 
   const keys = [
     { pubkey: params.payer, isSigner: true, isWritable: false },
-    { pubkey: params.walletPda, isSigner: false, isWritable: false },
+    // Writable: Add/RemoveAuthority maintain the wallet's owner_count.
+    { pubkey: params.walletPda, isSigner: false, isWritable: true },
     { pubkey: params.adminAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: params.targetAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: params.refundDestination, isSigner: false, isWritable: true },

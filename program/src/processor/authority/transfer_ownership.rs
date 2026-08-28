@@ -22,6 +22,11 @@ use crate::{
 /// atomically transfers the "Owner" role from the current authority to a new one.
 /// The old owner is closed/removed, and the new one is created with `Role::Owner`.
 ///
+/// The wallet's `owner_count` is deliberately left alone: one Owner goes, one
+/// Owner arrives. That is also why this instruction survives multi-owner — it is
+/// the only way to hand ownership to a key that does not exist yet, and the only
+/// way for a sole Owner to stop being one without leaving the wallet ownerless.
+///
 /// # Logic:
 /// 1. **Authentication**: Verifies the `current_owner` matches the request logic.
 /// 2. **Authorization**: strictly enforced to only work if `current_owner` has `Role::Owner` (0).

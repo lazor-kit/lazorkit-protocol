@@ -15,6 +15,53 @@ pub const RANK_OWNER: u8 = 0;
 pub const RANK_ADMIN: u8 = 1;
 pub const RANK_DELEGATE: u8 = 2;
 
+/// Highest rank value that has a meaning. Anything above it is refused rather
+/// than stored — without this an Owner could mint a rank-255 authority that
+/// executes but that no rule below can ever revoke.
+pub const RANK_MAX: u8 = RANK_DELEGATE;
+
+/// May an authority of rank `actor` create one of rank `new_rank`?
+///
+/// Owner grants any rank, including Owner: a person with several devices holds
+/// several passkeys, and making each of them an Owner is what lets a surviving
+/// device revoke a lost one. Admin grants only Delegates. A Delegate grants
+/// nothing.
+///
+/// Rank alone is not the whole answer — a Delegate additionally requires a
+/// policy, and an authority that carries a policy itself may not grant at all.
+/// Both are enforced at the call site, where the policy bytes are in hand.
+#[inline]
+pub fn can_add(actor: u8, new_rank: u8) -> bool {
+    if new_rank > RANK_MAX {
+        return false;
+    }
+    match actor {
+        RANK_OWNER => true,
+        RANK_ADMIN => new_rank == RANK_DELEGATE,
+        _ => false,
+    }
+}
+
+/// May an authority of rank `actor` remove one of rank `target`, given how many
+/// Owners the wallet currently has?
+///
+/// The `owner_count > 1` condition is the whole reason the count exists. A
+/// wallet with no Owner is not frozen — its authorities keep spending — but
+/// nothing can ever be added or revoked again, so a lost device stays valid
+/// forever. Removing the last Owner is therefore refused, and losing ownership
+/// deliberately goes through TransferOwnership instead.
+///
+/// Self-removal is refused at the call site, where the two PDAs are in hand.
+#[inline]
+pub fn can_remove(actor: u8, target: u8, owner_count: u32) -> bool {
+    match (actor, target) {
+        (RANK_OWNER, RANK_OWNER) => owner_count > 1,
+        (RANK_OWNER, t) => t <= RANK_MAX,
+        (RANK_ADMIN, RANK_DELEGATE) => true,
+        _ => false,
+    }
+}
+
 /// Cap on an authority's policy buffer, matching the session cap in
 /// `session/create.rs` — the BPF heap is 32 KB, and 16 actions of ~128 bytes
 /// fit comfortably inside 2 KB.
@@ -255,14 +302,7 @@ pub fn process_add_authority(
     }
 
     // Authorization
-    // Rank must be a known non-Owner value (1 = Admin, 2 = Delegate). Without
-    // this an Owner could mint a rank-255 authority that executes but no Admin
-    // can revoke. Owner creation stays with TransferOwnership so there is only
-    // ever one active Owner.
-    if args.new_role == 0 || args.new_role > 2 {
-        return Err(AuthError::PermissionDenied.into());
-    }
-    if admin_header.role != 0 && (admin_header.role != 1 || args.new_role != 2) {
+    if !can_add(admin_header.role, args.new_role) {
         return Err(AuthError::PermissionDenied.into());
     }
 
@@ -321,6 +361,17 @@ pub fn process_add_authority(
         program_id,
         &seeds,
     )?;
+
+    // A new Owner changes the wallet's own state, which is why `wallet` is
+    // writable on this instruction. Done before the authority is written so a
+    // failure here leaves nothing behind.
+    if args.new_role == RANK_OWNER {
+        let wallet_data = unsafe { wallet_pda.borrow_mut_data_unchecked() };
+        let next = crate::state::wallet::WalletAccount::owner_count(wallet_data)
+            .checked_add(1)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        crate::state::wallet::WalletAccount::set_owner_count(wallet_data, next);
+    }
 
     let data = unsafe { new_auth_pda.borrow_mut_data_unchecked() };
     let header = AuthorityAccountHeader {
@@ -502,24 +553,28 @@ pub fn process_remove_authority(
         return Err(AuthError::PermissionDenied.into());
     }
 
-    // Prevent removing an Owner — ownership must be transferred, not removed.
-    // This prevents accidentally locking the wallet by removing the last owner.
-    if target_header.role == 0 {
+    // Role-based permission check, including the "not the last Owner" rule.
+    let owner_count = crate::state::wallet::WalletAccount::owner_count(unsafe {
+        wallet_pda.borrow_data_unchecked()
+    });
+    if !can_remove(admin_header.role, target_header.role, owner_count) {
         return Err(AuthError::PermissionDenied.into());
-    }
-
-    // Role-based permission check
-    if admin_header.role != 0 {
-        // Admin can only remove Spender
-        if admin_header.role != 1 || target_header.role != 2 {
-            return Err(AuthError::PermissionDenied.into());
-        }
     }
 
     // Guard: if target == refund_dest the double-write would burn lamports and
     // trigger a Solana lamport conservation error, aborting after doing work.
     if target_auth_pda.key() == refund_dest.key() {
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    if target_header.role == RANK_OWNER {
+        let wallet_data = unsafe { wallet_pda.borrow_mut_data_unchecked() };
+        // `can_remove` already refused a count of 1, so this cannot wrap. The
+        // checked form is here because a future caller might not.
+        let next = crate::state::wallet::WalletAccount::owner_count(wallet_data)
+            .checked_sub(1)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        crate::state::wallet::WalletAccount::set_owner_count(wallet_data, next);
     }
 
     let target_lamports = unsafe { *target_auth_pda.borrow_mut_lamports_unchecked() };
@@ -561,5 +616,95 @@ mod tests {
     fn test_add_authority_args_too_short() {
         let data = vec![0u8; 7]; // Need 8
         assert!(AddAuthorityArgs::from_bytes(&data).is_err());
+    }
+}
+
+#[cfg(test)]
+mod rank_rules {
+    use super::*;
+
+    /// Every (actor, target) pair, so a change to either rule has to be a
+    /// deliberate edit to this table rather than a silent widening.
+    #[test]
+    fn can_add_table() {
+        let expected = [
+            // (actor, new_rank, allowed)
+            (RANK_OWNER, RANK_OWNER, true),
+            (RANK_OWNER, RANK_ADMIN, true),
+            (RANK_OWNER, RANK_DELEGATE, true),
+            (RANK_ADMIN, RANK_OWNER, false),
+            (RANK_ADMIN, RANK_ADMIN, false),
+            (RANK_ADMIN, RANK_DELEGATE, true),
+            (RANK_DELEGATE, RANK_OWNER, false),
+            (RANK_DELEGATE, RANK_ADMIN, false),
+            (RANK_DELEGATE, RANK_DELEGATE, false),
+        ];
+        for (actor, new_rank, allowed) in expected {
+            assert_eq!(
+                can_add(actor, new_rank),
+                allowed,
+                "can_add(actor={actor}, new_rank={new_rank})"
+            );
+        }
+    }
+
+    /// An unknown rank is refused rather than stored. Storing one would create
+    /// an authority that executes but that no `can_remove` arm can revoke.
+    #[test]
+    fn can_add_refuses_ranks_that_have_no_meaning() {
+        for new_rank in [RANK_MAX + 1, 42, u8::MAX] {
+            for actor in [RANK_OWNER, RANK_ADMIN, RANK_DELEGATE] {
+                assert!(
+                    !can_add(actor, new_rank),
+                    "actor={actor} new_rank={new_rank}"
+                );
+            }
+        }
+        // And an actor whose stored rank is nonsense grants nothing.
+        for actor in [RANK_MAX + 1, 42, u8::MAX] {
+            assert!(!can_add(actor, RANK_DELEGATE));
+        }
+    }
+
+    #[test]
+    fn can_remove_table() {
+        let expected = [
+            // (actor, target, owner_count, allowed)
+            (RANK_OWNER, RANK_OWNER, 1, false), // the rule the count exists for
+            (RANK_OWNER, RANK_OWNER, 2, true),
+            (RANK_OWNER, RANK_OWNER, 9, true),
+            (RANK_OWNER, RANK_ADMIN, 1, true),
+            (RANK_OWNER, RANK_DELEGATE, 1, true),
+            (RANK_ADMIN, RANK_OWNER, 9, false),
+            (RANK_ADMIN, RANK_ADMIN, 9, false),
+            (RANK_ADMIN, RANK_DELEGATE, 1, true),
+            (RANK_DELEGATE, RANK_OWNER, 9, false),
+            (RANK_DELEGATE, RANK_ADMIN, 9, false),
+            (RANK_DELEGATE, RANK_DELEGATE, 9, false),
+        ];
+        for (actor, target, owner_count, allowed) in expected {
+            assert_eq!(
+                can_remove(actor, target, owner_count),
+                allowed,
+                "can_remove(actor={actor}, target={target}, owner_count={owner_count})"
+            );
+        }
+    }
+
+    /// A count of zero should be unreachable, but if it ever happened the answer
+    /// must still be "no" rather than an underflow.
+    #[test]
+    fn can_remove_owner_is_refused_at_zero() {
+        assert!(!can_remove(RANK_OWNER, RANK_OWNER, 0));
+    }
+
+    /// Removing an Owner is the only decision the count participates in.
+    #[test]
+    fn owner_count_does_not_affect_other_removals() {
+        for owner_count in [0, 1, 2, 7] {
+            assert!(can_remove(RANK_OWNER, RANK_ADMIN, owner_count));
+            assert!(can_remove(RANK_OWNER, RANK_DELEGATE, owner_count));
+            assert!(can_remove(RANK_ADMIN, RANK_DELEGATE, owner_count));
+        }
     }
 }

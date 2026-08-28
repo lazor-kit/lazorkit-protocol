@@ -33,7 +33,7 @@ pub enum ProgramIx {
         name = "payer",
         desc = "Payer and rent contributor"
     )]
-    #[account(1, name = "wallet", desc = "Wallet PDA")]
+    #[account(1, writable, name = "wallet", desc = "Wallet PDA (owner_count)")]
     #[account(
         2,
         writable,
@@ -64,7 +64,7 @@ pub enum ProgramIx {
 
     /// Remove an authority from the wallet
     #[account(0, signer, writable, name = "payer", desc = "Transaction payer")]
-    #[account(1, name = "wallet", desc = "Wallet PDA")]
+    #[account(1, writable, name = "wallet", desc = "Wallet PDA (owner_count)")]
     #[account(
         2,
         writable,

@@ -80,7 +80,8 @@ fn add_ed25519_authority(
         program_id: context.program_id,
         accounts: vec![
             AccountMeta::new(context.payer.pubkey(), true),
-            AccountMeta::new_readonly(wallet.wallet_pda, false),
+            // Writable: AddAuthority maintains the wallet's owner_count.
+            AccountMeta::new(wallet.wallet_pda, false),
             AccountMeta::new(authorizer_pda, false),
             AccountMeta::new(new_auth_pda, false),
             AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
