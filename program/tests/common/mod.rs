@@ -120,7 +120,12 @@ pub fn update_protocol_ix(
 }
 
 /// Build an `InitializeTreasuryShard` (discriminator 14) instruction.
-pub fn init_shard_ix(program_id: Pubkey, payer: Pubkey, admin: Pubkey, shard_id: u8) -> Instruction {
+pub fn init_shard_ix(
+    program_id: Pubkey,
+    payer: Pubkey,
+    admin: Pubkey,
+    shard_id: u8,
+) -> Instruction {
     let (config_pda, _) = Pubkey::find_program_address(&[b"protocol_config"], &program_id);
     let (shard_pda, _) =
         Pubkey::find_program_address(&[b"treasury_shard", &[shard_id]], &program_id);
@@ -167,6 +172,13 @@ pub fn advance(svm: &mut LiteSVM) {
 }
 
 /// Send one or more instructions, returning the result instead of panicking.
+///
+/// The error variant is large because it is litesvm's own
+/// `FailedTransactionMetadata`, which carries the full log buffer — exactly what
+/// a failing test needs to print. Boxing it here would ripple through every call
+/// site and every assertion helper to hide a cost that only materialises on a
+/// path that is about to abort the test anyway.
+#[allow(clippy::result_large_err)]
 pub fn try_send(
     svm: &mut LiteSVM,
     fee_payer: &Keypair,
@@ -341,8 +353,8 @@ pub fn ed25519_execute_accounts(
 pub fn vault_transfer_execute_data(lamports: u64) -> Vec<u8> {
     let mut data = vec![4u8]; // Execute
     data.extend_from_slice(&encode_compact(&[(
-        4,                            // program_id_index -> system program
-        vec![3, 5],                   // vault (from), recipient (to)
+        4,          // program_id_index -> system program
+        vec![3, 5], // vault (from), recipient (to)
         system_transfer_data(lamports),
     )]));
     data

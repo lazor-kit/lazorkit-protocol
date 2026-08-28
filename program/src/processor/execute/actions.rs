@@ -180,12 +180,24 @@ pub fn snapshot_token_balances(
 }
 
 /// Snapshot per-token-account authority fields for every vault-owned token
-/// account whose mint appears in a token action.
+/// account in the account list.
 ///
 /// Paired with `verify_token_authorities_unchanged` post-CPI. Together they
 /// prevent `SetAuthority` and `Approve`-style escapes where the session key
 /// would otherwise reassign control of vault-owned token accounts without
 /// moving any lamports (so the balance-based limits would miss it).
+///
+/// Coverage is deliberately mint-agnostic. An earlier version gathered the
+/// mints named by `TokenLimit` / `TokenRecurringLimit` / `TokenMaxPerTx` and
+/// returned early when there were none — which meant the most common session
+/// shape (a SOL allowance plus a program whitelist, no token action) got no
+/// protection at all. A session that never mentions a mint is not a session
+/// that consented to hand that mint's account away, so every vault-owned token
+/// account is frozen for the duration of the CPI loop.
+///
+/// Only `owner`, `delegate` and `close_authority` are frozen; `amount` is
+/// free to move, so ordinary transfers still work and remain governed by the
+/// balance-based limits.
 pub fn snapshot_token_authorities(
     session_data: &[u8],
     accounts: &[AccountInfo],
@@ -195,31 +207,7 @@ pub fn snapshot_token_authorities(
         return Ok(Vec::new());
     }
 
-    let actions_buf = &session_data[SESSION_HEADER_SIZE..];
-    let actions = parse_actions(actions_buf)?;
-
-    // Collect listed mints (same logic as snapshot_token_balances).
-    let mut mints: Vec<[u8; 32]> = Vec::new();
-    for action in &actions {
-        match action.action_type {
-            ActionType::TokenLimit
-            | ActionType::TokenRecurringLimit
-            | ActionType::TokenMaxPerTx => {
-                let mut mint = [0u8; 32];
-                mint.copy_from_slice(&actions_buf[action.data_offset..action.data_offset + 32]);
-                if !mints.iter().any(|m| m == &mint) {
-                    mints.push(mint);
-                }
-            },
-            _ => {},
-        }
-    }
-    if mints.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Scan all SPL-Token-owned accounts; snapshot each vault-owned one whose
-    // mint is listed in the session actions.
+    // Scan all SPL-Token-owned accounts; snapshot every vault-owned one.
     let mut out = Vec::new();
     for acc in accounts {
         let owner = acc.owner();
@@ -232,12 +220,6 @@ pub fn snapshot_token_authorities(
         }
         // vault must currently own it
         if &data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32] != vault_key.as_ref() {
-            continue;
-        }
-        // mint must be listed
-        let mut mint = [0u8; 32];
-        mint.copy_from_slice(&data[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32]);
-        if !mints.iter().any(|m| m == &mint) {
             continue;
         }
 

@@ -332,7 +332,7 @@ fn c1_e_stranger_wins_init_race_then_freezes_every_wallet() {
     try_send(
         &mut context.svm,
         &payer,
-        &[withdrawal.clone()],
+        std::slice::from_ref(&withdrawal),
         &[&payer, &wallet.owner],
     )
     .expect("users can transact");
