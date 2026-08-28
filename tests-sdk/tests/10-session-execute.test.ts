@@ -19,6 +19,7 @@ import {
   sendTx,
   sendTxExpectError,
   getSlot,
+  waitForSlot,
   type TestContext,
 } from './common';
 import { LazorKitClient, ed25519, session } from '../../sdk/sdk-legacy/src';
@@ -173,8 +174,9 @@ describe('Session Execute', () => {
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
-    // Wait for the session to expire (~4 seconds at ~2.5 slots/sec)
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // Wait on the chain's own clock, not the wall clock — slot rate on a local
+    // validator varies with load, so a fixed sleep is a coin flip.
+    await waitForSlot(ctx, expiresAt);
 
     const recipient = Keypair.generate().publicKey;
     const { instructions } = await client.execute({

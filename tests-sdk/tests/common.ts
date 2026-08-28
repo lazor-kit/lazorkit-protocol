@@ -234,9 +234,26 @@ export async function sendTxExpectError(
   try {
     const tx = new Transaction();
     for (const ix of instructions) tx.add(ix);
-    await sendAndConfirmTransaction(ctx.connection, tx, [ctx.payer, ...signers], {
-      commitment: 'confirmed',
-    });
+
+    // Sign and submit the raw transaction rather than going through
+    // `sendAndConfirmTransaction`. That path calls `Connection._recentBlockhash`,
+    // whose cache refuses to reuse a blockhash it has already spent and polls for
+    // a new one — throwing "Unable to obtain a new blockhash after ...ms" when
+    // two transactions land inside the same blockhash window. It also overwrites
+    // any blockhash set on the transaction, so it cannot be pre-empted. Here that
+    // surfaced as a wrong-error-code assertion, which reads like a program bug
+    // and is not one.
+    const { blockhash, lastValidBlockHeight } =
+      await ctx.connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = ctx.payer.publicKey;
+    tx.sign(ctx.payer, ...signers);
+
+    const signature = await ctx.connection.sendRawTransaction(tx.serialize());
+    await ctx.connection.confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight },
+      'confirmed',
+    );
     throw new Error('Transaction should have failed but succeeded');
   } catch (err: any) {
     const msg = String(err);
@@ -257,6 +274,30 @@ export async function getSlot(ctx: TestContext): Promise<bigint> {
   const slot = await ctx.connection.getSlot('confirmed');
   // Use current slot directly; Clock::get() validates slot age (< 150 slots).
   return BigInt(slot);
+}
+
+/**
+ * Block until the chain's confirmed slot is strictly past `target`.
+ *
+ * Expiry tests must not sleep on the wall clock. Slot rate on a local validator
+ * is not a constant — it depends on machine load and on what the suite did
+ * immediately before — so `setTimeout(5000)` for "~10 slots" is a coin flip that
+ * fails as a confusing wrong-error-code assertion rather than as a timeout.
+ */
+export async function waitForSlot(
+  ctx: TestContext,
+  target: bigint,
+  timeoutMs = 60_000,
+): Promise<bigint> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const slot = await getSlot(ctx);
+    if (slot > target) return slot;
+    if (Date.now() > deadline) {
+      throw new Error(`slot ${target} not reached within ${timeoutMs}ms (still at ${slot})`);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
 }
 
 /**
