@@ -65,7 +65,7 @@ validator running the foundation binary).
 
 ### Create a wallet
 
-The `owner` field accepts either of two auth types. A wallet can later hold any mix of Ed25519 and Secp256r1 authorities across its owner / admin / spender roles.
+The `owner` field accepts either of two auth types. A wallet can later hold any mix of Ed25519 and Secp256r1 authorities at any rank, and several of them may be Owners.
 
 **Passkey owner** (Secp256r1 — end-user WebAuthn flows):
 
@@ -109,10 +109,11 @@ const [wallet] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes()
 Any mix of auth types on the same wallet. Typical patterns:
 
 - Passkey owner + Ed25519 admin — user's phone is the owner, a backend bot manages sessions on their behalf.
-- Ed25519 owner + Secp256r1 spender — the backend creates and manages the wallet, the user's passkey does day-to-day spends.
+- Ed25519 owner + Secp256r1 delegate — the backend creates and manages the wallet, the user's passkey does day-to-day spends inside a policy.
+- Several passkey owners — one per device, so a surviving device can revoke a lost one.
 
 ```typescript
-import { ROLE_ADMIN, ROLE_SPENDER } from '@lazorkit/sdk-legacy';
+import { ROLE_OWNER, ROLE_ADMIN, ROLE_SPENDER, Actions, serializeActions } from '@lazorkit/sdk-legacy';
 
 // Ed25519 owner adds an Ed25519 admin
 const adminKp = Keypair.generate();
@@ -137,6 +138,21 @@ const { instructions: addPasskeyIxs } = await client.addAuthority({
     rpId: 'your-app.com',
   },
   role: ROLE_SPENDER,
+  // A Delegate must carry a policy. Rank says what an authority may manage;
+  // the policy says what it may spend, and the two are independent — without
+  // one, "spender" would name a tier with full control of the vault.
+  policy: serializeActions([Actions.solLimit(1_000_000_000n)]),
+});
+
+// A second device, as a full Owner. `allowOwner` is required: an Owner can
+// manage and revoke every authority on the wallet, including the one adding it.
+const { instructions: addOwnerIxs } = await client.addAuthority({
+  payer: payer.publicKey,
+  walletPda,
+  adminSigner: ed25519(ownerKp.publicKey),
+  newAuthority: { type: 'secp256r1', credentialIdHash, compressedPubkey, rpId: 'your-app.com' },
+  role: ROLE_OWNER,
+  allowOwner: true,
 });
 ```
 
@@ -498,11 +514,21 @@ DISC_REVOKE_SESSION = 9
 AUTH_TYPE_ED25519 = 0
 AUTH_TYPE_SECP256R1 = 1
 
-// Roles
-ROLE_OWNER = 0
-ROLE_ADMIN = 1
-ROLE_SPENDER = 2
+// Ranks — what an authority may *manage*. What it may *spend* is its policy.
+ROLE_OWNER = 0     // manages everything, including other Owners
+ROLE_ADMIN = 1     // manages Delegates
+ROLE_SPENDER = 2   // manages nothing; must carry a policy
 ```
+
+Rank rules:
+
+| Rank | May add | May remove |
+|---|---|---|
+| Owner | Owner, Admin, Delegate | Owner (not the last), Admin, Delegate |
+| Admin | Delegate | Delegate |
+| Delegate | nothing | nothing |
+
+An authority that carries a policy itself may not add authorities at all.
 
 ## Error codes
 

@@ -20,6 +20,16 @@ the [README](./README.md). If you need passkey-driven session UX or large
 transactions (Jupiter, bridges), see [Choosing the right role](#choosing-the-right-role)
 below — you'll want **Admin**, not Spender.
 
+> **Protocol v2.** "Spender" is now called **Delegate**, and it must carry a
+> spending policy — the constant is still `ROLE_SPENDER = 2`. That requirement
+> is the point of the tier: in v1 the rank was checked when *managing* the
+> wallet and never when *spending* from it, so a "Spender" passkey could empty
+> the vault. Everything this guide claims a Spender cannot do was aspirational
+> until the policy made it enforceable.
+>
+> Also new: a wallet may have **several Owners**, which changes the recovery
+> story at the end of this guide.
+
 ## End state
 
 ```mermaid
@@ -56,9 +66,11 @@ graph TD
     class ExecOnly execops
 ```
 
-- **Owner (EOA)** can: add/remove authorities, create/revoke sessions,
-  transfer ownership, execute, use deferred-execution flow.
-- **Spender (passkey)** can: execute immediate transactions only.
+- **Owner (EOA)** can: add/remove authorities (including other Owners),
+  create/revoke sessions, transfer ownership, execute, use the deferred flow.
+- **Delegate (passkey)** can: execute immediate transactions, **within its
+  policy** — a lifetime or per-window SOL/token cap, a per-transaction cap, and
+  an allow-list of programs it may call.
 
 ### Lifecycle in one picture
 
@@ -261,20 +273,27 @@ cited beside each row).
 If the passkey needs to do anything more than execute, give it **Admin**
 instead of Spender:
 
-| Need | Required role |
+| Need | Required rank |
 |---|---|
-| Transfer SOL/tokens, swap on Jupiter (under 574 B), CPI to your program | Spender |
+| Transfer SOL/tokens, swap on Jupiter (under 574 B), CPI to your program | Delegate |
+| Spend without a cap | Admin or Owner |
 | Create session keys for sub-second UX | Admin |
 | Use deferred execution (Jupiter swaps over 574 B, bridges, multi-step) | Admin |
-| Add a second device's passkey as a backup | Admin |
-| Take over as Owner if the EOA is lost | (impossible — see Recovery) |
+| Add a second device's passkey as a backup | Admin (Delegate) or Owner (Owner) |
+| Take over as Owner if the EOA is lost | Owner — see Recovery |
 
-Switching role just means passing `ROLE_ADMIN` instead of `ROLE_SPENDER` in
-step 2. Nothing else changes.
+Switching rank means passing `ROLE_ADMIN` instead of `ROLE_SPENDER` in step 2,
+and dropping the `policy` — Admin and Owner may carry one but are not required
+to. Note the trade: an Admin is unbounded unless you give it a policy, and an
+authority that carries a policy may not create authorities at all.
+
+The row worth pausing on is the last one. If losing the EOA should not mean
+losing the wallet, the passkey needs rank **Owner**, not Admin — an Admin cannot
+remove an Owner, so an Admin passkey cannot recover from a lost EOA.
 
 ## Recovery & revocation
 
-### Lost passkey (Spender)
+### Lost passkey (Delegate)
 
 The EOA Owner removes the lost passkey's authority:
 
@@ -297,27 +316,44 @@ Reference: [tests-sdk/tests/07-e2e.test.ts:215-234](../../tests-sdk/tests/07-e2e
 
 ### Lost EOA Owner key
 
-> ⚠️ **There is no Owner recovery path. If the user loses the EOA key, the
-> wallet is permanently locked.** Owner authorities cannot be removed and
-> ownership can only be transferred by signing with the current Owner.
+**In protocol v2 this is fixed at the source, and the fix is cheap: enroll a
+second Owner.** A wallet may hold several, and any Owner may remove any other so
+long as one remains. That is the whole recovery mechanism — no guardians, no
+timelock, no social recovery protocol. The wallet's own keys are the recovery.
 
-Mitigations to put in place **before** the user goes live:
+```typescript
+// At enrollment, alongside the EOA Owner. `allowOwner` is required and
+// deliberate: an Owner can revoke every other authority, including this one.
+await client.addAuthority({
+  payer: payer.publicKey,
+  walletPda,
+  adminSigner: ed25519(eoaKeypair.publicKey, ownerAuthPda),
+  newAuthority: { type: 'secp256r1', credentialIdHash, compressedPubkey, rpId },
+  role: ROLE_OWNER,
+  allowOwner: true,
+});
+```
+
+If the EOA is then lost, the passkey Owner removes it and enrolls a
+replacement. If the passkey is lost, the EOA does the same. Neither loss is
+terminal, and the last Owner standing cannot be removed — the program refuses,
+because a wallet with no Owner still spends but can never be changed again.
+
+**If you enroll only one Owner, losing it still loses the wallet.** The
+mitigations below remain valid for that shape:
 
 1. **Make the Owner a multi-sig.** Use a Squads (or similar) multi-sig
    pubkey as the Owner. Recovery becomes a matter of multi-sig governance
    rather than a single key.
 2. **Pre-register a backup Owner via TransferOwnership-able key.** Store a
-   second EOA key in cold storage (hardware wallet, paper backup). The user
-   can call `transferOwnership` with the live EOA to move control if the
-   primary is compromised, then move it back if recovered.
-3. **Document the consequences.** Make it explicit in your onboarding UI
-   that losing the EOA means losing the wallet — same as a hardware seed
-   phrase.
+   second EOA key in cold storage. The user can call `transferOwnership` with
+   the live EOA to move control if the primary is compromised.
+3. **Document the consequences** in your onboarding UI.
 
-For users who want passkey-based recovery, the right pattern is **Passkey
-as Owner** (passkey from day one, no EOA). The EOA-as-Owner shape in this
-guide deliberately concentrates the risk in the EOA so the EOA holder
-remains the ultimate authority.
+The EOA-as-Owner shape in this guide concentrates control in the EOA on
+purpose. Adding a second Owner relaxes that deliberately — decide which you
+want before onboarding users, because it is much easier to enroll a second
+Owner at signup than after a device is already gone.
 
 ## Protocol fee notes
 
@@ -414,11 +450,15 @@ so keep using legacy for those.
 
 ## Common pitfalls
 
-- **Owner key loss is unrecoverable.** Re-read the Recovery section
-  before going to mainnet. Multi-sig the Owner if at all uncertain.
-- **Spender role can't add a second device.** That's an Admin operation.
-  If your UX includes "add another phone," start the passkey at Admin from
-  day one.
+- **A single Owner is a single point of failure.** Enroll a second one at
+  signup — it costs one instruction then, and is impossible after the first is
+  gone. Re-read the Recovery section before mainnet.
+- **A Delegate can't add a second device.** That's an Admin operation, and
+  adding another *Owner* requires Owner. If your UX includes "add another
+  phone," decide the rank at day one.
+- **A Delegate without a policy is rejected**, and an authority *with* a policy
+  cannot create authorities. Those two rules together mean the passkey you use
+  for day-to-day spending is not the one you use to enroll devices.
 - **Vault PDA needs SOL.** The Vault PDA holds the user's funds — it must
   be funded before any Execute that transfers SOL. The Authority PDAs only
   hold rent for themselves; they don't hold user funds.

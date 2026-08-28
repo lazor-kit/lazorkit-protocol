@@ -3,7 +3,10 @@
 A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r1)** authentication for end-user flows and **Ed25519** authentication for bots / backends / programmatic signing — mixed freely on the same wallet. Built with [pinocchio](https://github.com/febo/pinocchio) for zero-copy serialization.
 
 - **Two auth types, one wallet** — passkeys (Apple Touch ID / Face ID, Windows Hello, Android biometrics, security keys) and Ed25519 (regular Solana keypairs). Any mix is supported: a passkey owner with an Ed25519 admin bot, or vice versa.
-- **RBAC** — Owner / Admin / Spender with strict role hierarchy.
+- **Rank and policy, kept separate** — rank (Owner / Admin / Delegate) says what an
+  authority may manage; an optional per-authority spending policy says what it may
+  spend. A wallet may have several Owners, which is how a second device revokes a
+  lost first one.
 - **Session keys with policies** — ephemeral signers restricted by per-tx / per-window / lifetime SOL + token caps, and program whitelists.
 - **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps).
 - **Wallet lookup** — find wallets by credential hash or public key; no need to store `walletPda` locally.
@@ -179,9 +182,14 @@ All paths fit comfortably within Solana's 200,000 CU default budget. The ~2,300 
 | Account | Size | Rent |
 |---|---|---|
 | Wallet PDA | 8 bytes | 0.000947 SOL |
-| Authority (Ed25519) | 80 bytes | 0.001448 SOL |
-| Authority (Secp256r1) | 145 bytes | 0.001900 SOL |
+| Authority (Ed25519) | 80 bytes + policy (0–2048) | 0.001448+ SOL |
+| Authority (Secp256r1) | 145 bytes + policy (0–2048) | 0.001900+ SOL |
 | Session | 80 bytes + actions (0–2048) | 0.001448+ SOL |
+
+A policy costs the same rent per byte as a session's action buffer, and buys the
+same limits. The choice between a policy-bearing authority and a session is about
+lifetime and key custody, not cost: a session key is ephemeral and held by
+software, an authority is durable and can be a passkey.
 
 **Total wallet creation cost**: ~0.0024 SOL (Ed25519) or ~0.0028 SOL (Secp256r1) — roughly $0.40 USD at $150/SOL.
 

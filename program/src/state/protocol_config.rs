@@ -123,3 +123,30 @@ impl ProtocolConfig {
             .map_err(|_| ProgramError::from(crate::error::ProtocolError::InvalidProtocolAdmin))
     }
 }
+
+#[cfg(test)]
+mod layout {
+    use super::*;
+
+    /// The byte counts quoted in `docs/Architecture.md` and the CHANGELOG.
+    /// Cheap to assert, and the alternative is documentation that drifts.
+    #[test]
+    fn sizes_match_the_documented_layout() {
+        assert_eq!(core::mem::size_of::<ProtocolConfig>(), 120);
+        assert_eq!(
+            core::mem::size_of::<crate::state::wallet::WalletAccount>(),
+            8
+        );
+        assert_eq!(
+            core::mem::size_of::<crate::state::authority::AuthorityAccountHeader>(),
+            48
+        );
+    }
+
+    /// 0.01 SOL. The number appears in the docs as the reason an unpayable fee
+    /// cannot stand in for the freeze C-1 removed.
+    #[test]
+    fn the_fee_ceiling_is_a_hundredth_of_a_sol() {
+        assert_eq!(MAX_PROTOCOL_FEE_LAMPORTS, 10_000_000);
+    }
+}

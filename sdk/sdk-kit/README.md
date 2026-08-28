@@ -31,6 +31,28 @@ const [walletPda, bump] = await findWalletPda(userSeed, PROGRAM_ID_DEVNET);
 console.log(walletPda); // address(...)
 ```
 
+## Protocol v2
+
+This SDK targets protocol v2, which is **not wire-compatible with v1**:
+
+- PDA seeds are namespaced `lk2:`, and account discriminators carry the version
+  in their high nibble (`0x2N`). v2 addresses are disjoint from v1's.
+- Account index bytes in the compact instruction format use bit 7 as a
+  forward-signer request, capping the account list at 128. An index of 128 or
+  above is rejected rather than masked.
+- The accounts hash binds each referenced account's `is_signer`/`is_writable`
+  alongside its key, so v1 signatures no longer verify.
+- `AddAuthority` carries a rank and an optional spending policy. A Delegate must
+  have one; creating an Owner requires `allowOwner: true`.
+- `AddAuthority`/`RemoveAuthority` need the wallet account **writable**.
+- Serialized `DeferredPayload`s carry a version and are rejected across the
+  boundary — re-authorize rather than replaying one.
+
+Both SDKs implement this identically, and a parity suite asserts it: see
+`tests/packing.test.ts`, which also checks both against the golden vectors in
+[`test-vectors/accounts-hash.json`](../../test-vectors/accounts-hash.json) that
+the on-chain program asserts against.
+
 ## Package layout
 
 ```
