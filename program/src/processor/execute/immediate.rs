@@ -42,6 +42,16 @@ pub fn process(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    // Anti-CPI guard for every authentication branch, not just two of them.
+    // The Secp256r1 authenticator and the session branch each carried their
+    // own copy of this check; the Ed25519 branch did not, so any program the
+    // authority signed a transaction for could re-enter Execute and drive the
+    // vault PDA. Hoisting it above the discriminator match closes that gap and
+    // makes the per-branch copies redundant.
+    if get_stack_height() > 1 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
     // Parse accounts
     let account_info_iter = &mut accounts.iter();
     let _payer = account_info_iter

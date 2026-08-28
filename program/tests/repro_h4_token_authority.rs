@@ -2,21 +2,25 @@
 //! covers mints that appear in a token action, so the common session shape
 //! (`SolLimit` + `ProgramWhitelist`, no token action) has no protection at all.
 //!
-//! `actions.rs:196-207`
+//! The removed early return:
 //! ```ignore
 //! if mints.is_empty() {
 //!     return Ok(Vec::new());   // <- nothing snapshotted, nothing verified
 //! }
 //! ```
 //!
-//! `snapshot_token_authorities` collects mints from `TokenLimit`,
-//! `TokenRecurringLimit` and `TokenMaxPerTx`. With none present it returns
-//! early, `verify_token_authorities_unchanged` iterates an empty slice, and a
-//! session can `SetAuthority(AccountOwner)` on any vault-owned token account.
-//! No lamports move, so `SolLimit` never fires either.
+//! `snapshot_token_authorities` collected mints from `TokenLimit`,
+//! `TokenRecurringLimit` and `TokenMaxPerTx`. With none present it returned
+//! early, `verify_token_authorities_unchanged` iterated an empty slice, and a
+//! session could `SetAuthority(AccountOwner)` on any vault-owned token account.
+//! No lamports move, so `SolLimit` never fired either.
 //!
-//! `h4_a` is the control: list the mint and the identical instruction is
-//! rejected with 3032. The guard exists; it is simply gated on the wrong thing.
+//!   `h4_a` mint listed     -> rejected 3032 (the guard that already worked)
+//!   `h4_b` mint not listed -> takeover succeeds. **The hole.** `#[ignore]`d now
+//!                             that the snapshot is mint-agnostic.
+//!   `h4_c` mint not listed -> rejected 3032. Live.
+//!
+//! `h4_a` is the control: the guard existed all along, gated on the wrong thing.
 //!
 //! Run:  cargo test --features devnet -p lazorkit-program --test repro_h4_token_authority
 
@@ -89,8 +93,8 @@ fn token_execute_accounts(
 fn set_authority_execute_data(new_owner: Pubkey) -> Vec<u8> {
     let mut data = vec![4u8]; // Execute
     data.extend_from_slice(&encode_compact(&[(
-        4,          // program_id_index -> SPL Token
-        vec![5, 3], // [account_to_change, current_authority]
+        4,                                    // program_id_index -> SPL Token
+        vec![5, 3],                           // [account_to_change, current_authority]
         spl_set_authority_data(2, new_owner), // 2 = AccountOwner
     )]));
     data
@@ -145,7 +149,10 @@ fn h4_a_control_listed_mint_blocks_set_authority() {
 // H-4b — drop the token action and the guard disappears
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Kept as the record of what the hole actually did, and runnable against a
+/// pre-fix binary with `--ignored`. `h4_c` below is the live assertion.
 #[test]
+#[ignore = "reproduces pre-fix behaviour; only passes with the mints.is_empty() early return"]
 fn h4_b_unlisted_mint_allows_token_account_takeover() {
     let mut context = setup_test();
     let wallet = create_ed25519_wallet(&mut context, 100_000_000);
@@ -211,11 +218,10 @@ fn h4_b_unlisted_mint_allows_token_account_takeover() {
 // H-4c — the fix, stated as a test
 // ─────────────────────────────────────────────────────────────────────────
 
-/// After `snapshot_token_authorities` stops early-returning on
-/// `mints.is_empty()` and instead snapshots every vault-owned token account in
-/// the account list, `h4_b` is rejected the same way `h4_a` is.
+/// `snapshot_token_authorities` no longer early-returns on `mints.is_empty()`
+/// and no longer filters by listed mint: it snapshots every vault-owned token
+/// account in the list, so an unlisted mint is refused exactly as `h4_a` is.
 #[test]
-#[ignore = "enable together with the snapshot_token_authorities fix; fails until then"]
 fn h4_c_unlisted_mint_should_also_be_protected() {
     let mut context = setup_test();
     let wallet = create_ed25519_wallet(&mut context, 100_000_000);

@@ -28,6 +28,10 @@ use solana_sdk::{
 const ERR_PERMISSION_DENIED: u32 = 3002;
 
 /// Add an Ed25519 authority with the given role, authorized by the wallet owner.
+///
+/// Large `Err` variant is litesvm's `FailedTransactionMetadata` — see the note
+/// on `common::try_send`.
+#[allow(clippy::result_large_err)]
 fn add_ed25519_authority(
     context: &mut TestContext,
     wallet: &WalletFixture,
@@ -96,7 +100,11 @@ fn execute_as(
 }
 
 fn lamports_of(context: &TestContext, key: &Pubkey) -> u64 {
-    context.svm.get_account(key).map(|a| a.lamports).unwrap_or(0)
+    context
+        .svm
+        .get_account(key)
+        .map(|a| a.lamports)
+        .unwrap_or(0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -109,8 +117,8 @@ fn h2_a_control_spender_is_blocked_from_privileged_instructions() {
     let wallet = create_ed25519_wallet(&mut context, 500_000_000);
 
     let spender = Keypair::new();
-    let spender_auth = add_ed25519_authority(&mut context, &wallet, &spender, 2)
-        .expect("Owner may add a Spender");
+    let spender_auth =
+        add_ed25519_authority(&mut context, &wallet, &spender, 2).expect("Owner may add a Spender");
 
     let payer = context.payer.insecure_clone();
 
@@ -203,8 +211,8 @@ fn h2_b_spender_can_drain_the_whole_vault() {
     let wallet = create_ed25519_wallet(&mut context, vault_funding);
 
     let spender = Keypair::new();
-    let spender_auth = add_ed25519_authority(&mut context, &wallet, &spender, 2)
-        .expect("Owner may add a Spender");
+    let spender_auth =
+        add_ed25519_authority(&mut context, &wallet, &spender, 2).expect("Owner may add a Spender");
 
     // Confirm the account really was created with role = Spender and not
     // silently downgraded — byte 2 of AuthorityAccountHeader is `role`.
@@ -275,7 +283,14 @@ fn h2_c_spender_should_not_be_able_to_execute() {
     let recipient = Pubkey::new_unique();
     let payer = context.payer.insecure_clone();
 
-    let spender_ix = execute_as(&context, &wallet, spender_auth, &spender, recipient, 1_000_000);
+    let spender_ix = execute_as(
+        &context,
+        &wallet,
+        spender_auth,
+        &spender,
+        recipient,
+        1_000_000,
+    );
     assert_custom_error(
         try_send(&mut context.svm, &payer, &[spender_ix], &[&payer, &spender]),
         ERR_PERMISSION_DENIED,
@@ -299,8 +314,13 @@ fn h2_c_spender_should_not_be_able_to_execute() {
         recipient,
         1_000_000,
     );
-    try_send(&mut context.svm, &payer, &[owner_ix], &[&payer, &wallet.owner])
-        .expect("H-2c: Owner must still be able to Execute");
+    try_send(
+        &mut context.svm,
+        &payer,
+        &[owner_ix],
+        &[&payer, &wallet.owner],
+    )
+    .expect("H-2c: Owner must still be able to Execute");
 
     assert_eq!(lamports_of(&context, &recipient), 2_000_000);
 }

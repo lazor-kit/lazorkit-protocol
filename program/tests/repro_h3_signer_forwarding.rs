@@ -73,7 +73,11 @@ fn transfer_from_index(from_idx: u8, lamports: u64) -> Vec<u8> {
 }
 
 fn lamports_of(context: &TestContext, key: &Pubkey) -> u64 {
-    context.svm.get_account(key).map(|a| a.lamports).unwrap_or(0)
+    context
+        .svm
+        .get_account(key)
+        .map(|a| a.lamports)
+        .unwrap_or(0)
 }
 
 /// A session locked down as tightly as the action model allows: it may only

@@ -10,11 +10,14 @@
 //! into CPI, so any program the user signs a transaction for can re-enter
 //! `Execute` and drive the vault PDA.
 //!
-//! The two tests are an A/B on the same wallet, the same wrapper program and
-//! the same inner transfer — only the authenticating account differs:
+//! The tests are an A/B on the same wallet, the same wrapper program and the
+//! same inner transfer — only the authenticating account differs:
 //!
-//!   `h1_a` session authority  -> CPI rejected, funds stay put (guard present)
-//!   `h1_b` Ed25519 authority  -> CPI accepted, vault drained (guard missing)
+//!   `h1_a` session authority  -> CPI rejected (the guard that already existed)
+//!   `h1_b` Ed25519 authority  -> CPI accepted, vault drained. **The hole.**
+//!                                `#[ignore]`d now that the guard is hoisted;
+//!                                run with `--ignored` against a pre-fix binary.
+//!   `h1_c` Ed25519 authority  -> CPI rejected, top-level still works. Live.
 //!
 //! `h1_a` is the control. Without it a passing `h1_b` would not distinguish
 //! "the guard is missing" from "the CPI never reached the program".
@@ -138,7 +141,11 @@ fn session_execute_ix(
 }
 
 fn lamports_of(context: &TestContext, key: &Pubkey) -> u64 {
-    context.svm.get_account(key).map(|a| a.lamports).unwrap_or(0)
+    context
+        .svm
+        .get_account(key)
+        .map(|a| a.lamports)
+        .unwrap_or(0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -190,7 +197,10 @@ fn h1_a_control_session_execute_is_rejected_through_cpi() {
 // H-1b — the Ed25519 branch has no such guard
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Kept as the record of what the hole actually did, and runnable against a
+/// pre-fix binary with `--ignored`. `h1_c` below is the live assertion.
 #[test]
+#[ignore = "reproduces pre-fix behaviour; only passes without the stack-height guard"]
 fn h1_b_ed25519_execute_drains_vault_through_cpi() {
     let mut context = setup_test();
     let wrapper = load_fixture_program(&mut context.svm, "malicious-cpi");
@@ -227,7 +237,10 @@ fn h1_b_ed25519_execute_drains_vault_through_cpi() {
             failed.meta.pretty_logs()
         ),
         Ok(meta) => {
-            println!("H-1b reproduced. CU consumed: {}", meta.compute_units_consumed);
+            println!(
+                "H-1b reproduced. CU consumed: {}",
+                meta.compute_units_consumed
+            );
         },
     }
 
@@ -248,7 +261,8 @@ fn h1_b_ed25519_execute_drains_vault_through_cpi() {
 // H-1c — the fix, stated as a test
 // ─────────────────────────────────────────────────────────────────────────
 
-/// After adding
+/// The guard, hoisted above the discriminator match in
+/// `execute::immediate::process` so it covers all three branches:
 ///
 /// ```ignore
 /// if get_stack_height() > 1 {
@@ -256,11 +270,9 @@ fn h1_b_ed25519_execute_drains_vault_through_cpi() {
 /// }
 /// ```
 ///
-/// at the top of `execute::immediate::process` — before the discriminator
-/// match, so it covers all three branches — this test should pass and
-/// `h1_b` should be inverted to expect rejection.
+/// Asserts both halves: the CPI is refused, and the ordinary top-level path
+/// still works.
 #[test]
-#[ignore = "enable together with the immediate.rs stack-height guard; fails until then"]
 fn h1_c_ed25519_execute_should_be_rejected_through_cpi() {
     let mut context = setup_test();
     let wrapper = load_fixture_program(&mut context.svm, "malicious-cpi");
