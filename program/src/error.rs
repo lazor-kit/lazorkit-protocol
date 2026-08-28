@@ -83,6 +83,18 @@ pub enum ProtocolError {
     /// operator can tell "wrong account" from "account written by a different
     /// build" — the latter means a deploy or a migration went wrong.
     AccountVersionMismatch = 4013,
+    /// A fee above `MAX_PROTOCOL_FEE_LAMPORTS` was written to the config. An
+    /// unbounded fee is a freeze in disguise, so the ceiling is enforced at
+    /// write time rather than left to the admin's discretion.
+    FeeExceedsMaximum = 4014,
+    /// `initialize_protocol` was called by something other than the init
+    /// authority compiled into this binary. The protocol config is the root of
+    /// the fee system and has no prior on-chain trust anchor, so the anchor is
+    /// the binary itself.
+    UnauthorizedInitializer = 4015,
+    /// `accept_protocol_admin` was called by an account that is not the pending
+    /// admin, or no rotation is pending.
+    NoPendingAdmin = 4016,
 }
 
 impl From<ProtocolError> for ProgramError {

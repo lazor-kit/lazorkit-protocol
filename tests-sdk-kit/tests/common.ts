@@ -13,6 +13,7 @@ import {
   createSolanaRpc,
   createSolanaRpcSubscriptions,
   createTransactionMessage,
+  createKeyPairSignerFromBytes,
   generateKeyPairSigner,
   getSignatureFromTransaction,
   lamports,
@@ -27,6 +28,7 @@ import {
   type SolanaRpcSubscriptionsApi,
   type TransactionSigner,
 } from '@solana/kit';
+import { readFileSync } from 'fs';
 import { LazorKit, PROGRAM_ID_DEVNET, type LazorKitRpc } from '@lazorkit/sdk';
 
 export const RPC_URL = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
@@ -40,6 +42,23 @@ export const PROGRAM_ID: Address = PROGRAM_ID_DEVNET;
 /** Construct a LazorKit client wired to the local validator. */
 export function makeClient(rpc: LazorKitRpc): LazorKit {
   return new LazorKit(rpc, PROGRAM_ID);
+}
+
+/**
+ * The keypair `initialize_protocol` now requires.
+ *
+ * ProtocolConfig is the root of the fee system and has no earlier on-chain
+ * account to anchor trust to, so the anchor is a pubkey compiled into the
+ * program (`PROTOCOL_INIT_AUTHORITY`). The devnet value is this committed test
+ * key — devnet carries no value, and a shared secret would make the local
+ * suites unrunnable.
+ */
+export async function initAuthority() {
+  // vitest runs with cwd at the package root.
+  const bytes = JSON.parse(
+    readFileSync('../keys/devnet-init-authority.json', 'utf8'),
+  ) as number[];
+  return createKeyPairSignerFromBytes(Uint8Array.from(bytes));
 }
 
 export interface TestContext {
@@ -195,15 +214,25 @@ async function ensureProtocolInitialized(ctx: TestContext): Promise<void> {
   }
 
   // Fresh validator — initialize protocol + shards.
+  //
+  // initialize_protocol is gated on PROTOCOL_INIT_AUTHORITY, so the random
+  // per-run payer cannot do it. Fund the authority and let it pay its own rent.
+  const authority = await initAuthority();
+  await airdrop({
+    recipientAddress: authority.address,
+    lamports: lamports(1n * 1_000_000_000n),
+    commitment: 'confirmed',
+  });
+
   const init = await client.initializeProtocol({
-    payer: ctx.payer.address,
+    payer: authority.address,
     admin: _adminSigner.address,
     treasury: _treasurySigner.address,
     creationFee: CREATION_FEE,
     executionFee: EXECUTION_FEE,
     numShards: NUM_SHARDS,
   });
-  await sendTx(ctx, init.instructions);
+  await sendTx(ctx, init.instructions, [authority]);
 
   for (let i = 0; i < NUM_SHARDS; i++) {
     const shard = await client.initializeTreasuryShard({

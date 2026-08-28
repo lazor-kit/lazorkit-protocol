@@ -56,6 +56,8 @@ pub fn process_instruction(
         14 => crate::processor::protocol::initialize_treasury_shard::process(
             program_id, accounts, data,
         ),
+        15 => crate::processor::protocol::rotate_admin::process_propose(program_id, accounts, data),
+        16 => crate::processor::protocol::rotate_admin::process_accept(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -74,19 +76,21 @@ pub fn process_instruction(
 /// Behaviour summary:
 ///   1. Reject (4008) if fewer than 5 accounts or sentinel `system_program`
 ///      missing.
-///   2. Reject (4009) if `ProtocolConfig` PDA is system-owned, has the
-///      wrong discriminator, or is too small. This covers the "deployed
-///      but admin hasn't run `initialize_protocol` yet" bootstrap state.
-///   3. Reject (4003) if `ProtocolConfig.enabled == 0`.
-///   4. Reject (4012) if the resolved fee for this discriminator is 0.
-///   5. Reject (4010) if `TreasuryShard` PDA is invalid.
-///   6. **Auto-initialize** `FeeRecord` PDA inline if it's system-owned
+///   2. Reject (4009) if the supplied `ProtocolConfig` is not the canonical
+///      PDA, or is program-owned but malformed.
+///   3. **Skip collection** — charge nothing, strip the suffix, continue — when
+///      the protocol is not initialised, is disabled, or resolves a zero fee
+///      for this discriminator. v1 reverted in all three cases, which meant an
+///      admin flipping `enabled` could strand every user's funds; see the
+///      inline note at the skip branch.
+///   4. Reject (4010) if `TreasuryShard` PDA is invalid.
+///   5. **Auto-initialize** `FeeRecord` PDA inline if it's system-owned
 ///      (first-time payer). Reject (4011) if the address doesn't match
 ///      the canonical `[crate::seeds::FEE_RECORD, payer]` PDA, or is owned by
 ///      another program.
-///   7. Transfer `fee` lamports from `payer` (signer at index 0) to
+///   6. Transfer `fee` lamports from `payer` (signer at index 0) to
 ///      `treasury_shard`.
-///   8. Bump `FeeRecord.total_fees_paid + wallet_count` (disc 0) or
+///   7. Bump `FeeRecord.total_fees_paid + wallet_count` (disc 0) or
 ///      `+ tx_count` (disc 4/7).
 ///
 /// Returns `&accounts[..n-4]` on success — the inner processor sees only
@@ -114,34 +118,53 @@ fn try_collect_fee<'a>(
         return Err(ProtocolError::FeeAccountsRequired.into());
     }
 
-    // ProtocolConfig must be program-owned + correct discriminator + sized.
-    // The pre-init bootstrap state (system-owned PDA) is rejected here —
-    // admin must run `initialize_protocol` before any fee-eligible ix.
-    if maybe_config.owner() != program_id {
+    // Pin the ProtocolConfig address before reading a single byte of it.
+    //
+    // This is load-bearing rather than defence in depth. Everything below treats
+    // an unconfigured protocol as "charge nothing and continue", so a caller who
+    // could substitute a different account for the config would be able to skip
+    // the fee at will. The shard and fee-record addresses were already pinned;
+    // the config was the one that was not.
+    let (expected_config_key, _) =
+        find_program_address(&[crate::seeds::PROTOCOL_CONFIG], program_id);
+    if maybe_config.key() != &expected_config_key {
         return Err(ProtocolError::ProtocolNotInitialized.into());
     }
-    let (creation_fee, execution_fee, enabled) = {
+
+    // Read the config if there is one. A protocol that has not been initialised
+    // yet leaves this PDA system-owned; that is the bootstrap window, not an
+    // error.
+    let configured = if maybe_config.owner() == program_id {
         let config_data = maybe_config.try_borrow_data()?;
         ProtocolConfig::check(&config_data).map_err(|_| ProtocolError::ProtocolNotInitialized)?;
         let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
-        (config.creation_fee, config.execution_fee, config.enabled)
+        Some((config.creation_fee, config.execution_fee, config.enabled))
+    } else {
+        None
     };
 
-    if enabled == 0 {
-        return Err(ProtocolError::ProtocolDisabled.into());
-    }
-
-    let fee = match discriminator {
-        0 => creation_fee,
-        4 | 7 => execution_fee,
-        // The entrypoint dispatcher (caller) restricts us to {0, 4, 7}.
-        _ => unreachable!("try_collect_fee called with non-fee-eligible discriminator"),
+    let fee = match configured {
+        Some((creation_fee, execution_fee, 1)) => match discriminator {
+            0 => creation_fee,
+            4 | 7 => execution_fee,
+            // The entrypoint dispatcher (caller) restricts us to {0, 4, 7}.
+            _ => return Err(ProgramError::InvalidInstructionData),
+        },
+        // Uninitialised, or `enabled` set to anything but 1.
+        _ => 0,
     };
 
-    // Strict mode rejects zero-fee config to prevent silent degradation
-    // back to the pre-strict opt-in behaviour.
+    // Nothing to charge — skip collection and hand the processor its accounts.
+    //
+    // This branch is the fix for the freeze. Discriminators 4 and 7 are the only
+    // paths that CPI with the vault PDA as signer, so when this function
+    // reverted on `enabled == 0` or a zero fee, an admin flipping one byte left
+    // every user unable to move their own funds, with no instruction able to
+    // recover them. A fee is revenue; a revert is custody. Losing revenue while
+    // the protocol is misconfigured is the correct trade against holding user
+    // funds hostage to a config flag.
     if fee == 0 {
-        return Err(ProtocolError::FeeNotConfigured.into());
+        return Ok(&accounts[..n - 4]);
     }
 
     // TreasuryShard validation (admin must have called
