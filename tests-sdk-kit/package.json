@@ -7,7 +7,9 @@
   "scripts": {
     "test": "vitest run --fileParallelism=false",
     "test:watch": "vitest --fileParallelism=false",
-    "validator:start": "cd ../program && cargo build-sbf --features devnet && cd - && solana-test-validator --ledger \"$HOME/test-ledger\" --bpf-program $(solana-keygen pubkey ../target/deploy/lazorkit_program-keypair.json) ../target/deploy/lazorkit_program.so --reset",
+    "test:local": "npm run validator:start; npm run validator:wait && npm test; npm run validator:stop",
+    "validator:start": "cd ../program && cargo build-sbf --features devnet && cd - && solana-test-validator --ledger \"$HOME/test-ledger\" --bpf-program 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS ../target/deploy/lazorkit_program.so --reset --quiet &",
+    "validator:wait": "for i in $(seq 1 60); do solana cluster-version -u localhost >/dev/null 2>&1 && exit 0; sleep 1; done; echo 'solana-test-validator never became healthy' >&2; exit 1",
     "validator:stop": "pkill -f solana-test-validator || true"
   },
   "dependencies": {

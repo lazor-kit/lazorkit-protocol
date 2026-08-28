@@ -85,6 +85,9 @@ export interface TestContext {
 
 export async function setupTest(): Promise<TestContext> {
   const connection = new Connection(RPC_URL, 'confirmed');
+
+  await assertProgramDeployed(connection);
+
   const payer = Keypair.generate();
 
   const sig = await connection.requestAirdrop(payer.publicKey, 10 * LAMPORTS_PER_SOL);
@@ -93,6 +96,34 @@ export async function setupTest(): Promise<TestContext> {
   await ensureProtocolInitialized(connection, payer);
 
   return { connection, payer };
+}
+
+let _preflightDone = false;
+
+/**
+ * Fail loudly and early if the program is not where the SDK expects it.
+ *
+ * `validator:start` loads the .so at the devnet vanity address, the same one
+ * `PROGRAM_ID_DEVNET` holds. When those disagree — a stale validator, a forgotten
+ * `--reset`, a hand-rolled deploy — every downstream failure surfaces as a
+ * confusing error deep inside a PDA derivation or a simulate call. Check once.
+ */
+async function assertProgramDeployed(connection: Connection): Promise<void> {
+  if (_preflightDone) return;
+  _preflightDone = true;
+
+  const info = await connection.getAccountInfo(PROGRAM_ID);
+  if (!info) {
+    throw new Error(
+      `LazorKit program not found at ${PROGRAM_ID.toBase58()} on ${RPC_URL}.\n` +
+        `Start the validator first:  npm run validator:start && npm run validator:wait`,
+    );
+  }
+  if (!info.executable) {
+    throw new Error(
+      `Account ${PROGRAM_ID.toBase58()} on ${RPC_URL} exists but is not executable.`,
+    );
+  }
 }
 
 /**

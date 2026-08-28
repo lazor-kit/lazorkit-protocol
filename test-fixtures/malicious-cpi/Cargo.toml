@@ -1,0 +1,16 @@
+# Standalone workspace: this fixture is deliberately NOT a member of the root
+# workspace so `cargo build-sbf` at the repo root never picks it up. It exists
+# only to reproduce H-1 (missing anti-CPI guard on the Ed25519 Execute path).
+[workspace]
+
+[package]
+name = "malicious-cpi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pinocchio = { version = "0.9", features = ["std"] }
