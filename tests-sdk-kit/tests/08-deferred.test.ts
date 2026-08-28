@@ -43,6 +43,7 @@ import {
   makeClient,
 } from './common.js';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils.js';
+import { ACCOUNT_DISCRIMINATOR } from '@lazorkit/sdk';
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
 
@@ -104,7 +105,7 @@ describe('Deferred Execution', () => {
         .send();
       expect(info.value).not.toBeNull();
       const data = new Uint8Array(Buffer.from(info.value!.data[0], 'base64'));
-      expect(data[0]).toBe(4); // DeferredExec discriminator
+      expect(data[0]).toBe(ACCOUNT_DISCRIMINATOR.DEFERRED_EXEC); // DeferredExec discriminator
       expect(data.length).toBe(176);
 
       // TX2: ExecuteDeferred.

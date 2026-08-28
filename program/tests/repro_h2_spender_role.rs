@@ -40,7 +40,7 @@ fn add_ed25519_authority(
 ) -> Result<Pubkey, litesvm::types::FailedTransactionMetadata> {
     let (new_auth_pda, _) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet.wallet_pda.as_ref(),
             new_key.pubkey().as_ref(),
         ],
@@ -127,7 +127,7 @@ fn h2_a_control_spender_is_blocked_from_privileged_instructions() {
         let victim = Keypair::new();
         let (victim_pda, _) = Pubkey::find_program_address(
             &[
-                b"authority",
+                lazorkit_program::seeds::AUTHORITY,
                 wallet.wallet_pda.as_ref(),
                 victim.pubkey().as_ref(),
             ],
@@ -165,7 +165,7 @@ fn h2_a_control_spender_is_blocked_from_privileged_instructions() {
         let session = Keypair::new();
         let (session_pda, _) = Pubkey::find_program_address(
             &[
-                b"session",
+                lazorkit_program::seeds::SESSION,
                 wallet.wallet_pda.as_ref(),
                 session.pubkey().as_ref(),
             ],

@@ -141,9 +141,7 @@ pub fn process(
     }
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     if !current_owner.is_writable() {
         return Err(ProgramError::InvalidAccountData);
@@ -156,11 +154,9 @@ pub fn process(
             return Err(ProgramError::InvalidAccountData);
         }
         // SAFETY: Use read_unaligned for safety
+        AuthorityAccountHeader::check(data)?;
         let auth =
             unsafe { std::ptr::read_unaligned(data.as_ptr() as *const AuthorityAccountHeader) };
-        if auth.discriminator != AccountDiscriminator::Authority as u8 {
-            return Err(ProgramError::InvalidAccountData);
-        }
         if auth.wallet != *wallet_pda.key() {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -212,7 +208,7 @@ pub fn process(
     }
 
     let (new_key, bump) = find_program_address(
-        &[b"authority", wallet_pda.key().as_ref(), id_seed],
+        &[crate::seeds::AUTHORITY, wallet_pda.key().as_ref(), id_seed],
         program_id,
     );
     if !sol_assert_bytes_eq(new_owner.key().as_ref(), new_key.as_ref(), 32) {
@@ -232,7 +228,7 @@ pub fn process(
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
     let bump_arr = [bump];
     let seeds = [
-        Seed::from(b"authority"),
+        Seed::from(crate::seeds::AUTHORITY),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(id_seed),
         Seed::from(&bump_arr),

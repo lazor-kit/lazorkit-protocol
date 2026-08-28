@@ -19,15 +19,19 @@ fn test_create_wallet_ed25519() {
     let owner_keypair = Keypair::new();
 
     // Derive PDAs
-    let (wallet_pda, _wallet_bump) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
+    let (wallet_pda, _wallet_bump) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
 
-    let (vault_pda, _vault_bump) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (vault_pda, _vault_bump) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
 
     let (auth_pda, auth_bump) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             owner_keypair.pubkey().as_ref(),
         ],
@@ -136,15 +140,19 @@ fn test_authority_lifecycle() {
     let user_seed = rand::random::<[u8; 32]>();
     let owner_keypair = Keypair::new();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
 
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
 
     let (owner_auth_pda, owner_bump) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             owner_keypair.pubkey().as_ref(), // seed for Ed25519 is pubkey
         ],
@@ -202,7 +210,7 @@ fn test_authority_lifecycle() {
     let admin_keypair = Keypair::new();
     let (admin_auth_pda, _) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             admin_keypair.pubkey().as_ref(),
         ],
@@ -349,13 +357,17 @@ fn test_execute_with_compact_instructions() {
     let user_seed = rand::random::<[u8; 32]>();
     let owner_keypair = Keypair::new();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     let (owner_auth_pda, owner_bump) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             owner_keypair.pubkey().as_ref(),
         ],

@@ -82,7 +82,7 @@ pub fn process_instruction(
 ///   5. Reject (4010) if `TreasuryShard` PDA is invalid.
 ///   6. **Auto-initialize** `FeeRecord` PDA inline if it's system-owned
 ///      (first-time payer). Reject (4011) if the address doesn't match
-///      the canonical `[b"fee_record", payer]` PDA, or is owned by
+///      the canonical `[crate::seeds::FEE_RECORD, payer]` PDA, or is owned by
 ///      another program.
 ///   7. Transfer `fee` lamports from `payer` (signer at index 0) to
 ///      `treasury_shard`.
@@ -122,12 +122,7 @@ fn try_collect_fee<'a>(
     }
     let (creation_fee, execution_fee, enabled) = {
         let config_data = maybe_config.try_borrow_data()?;
-        if config_data.is_empty()
-            || config_data[0] != AccountDiscriminator::ProtocolConfig as u8
-            || config_data.len() < core::mem::size_of::<ProtocolConfig>()
-        {
-            return Err(ProtocolError::ProtocolNotInitialized.into());
-        }
+        ProtocolConfig::check(&config_data).map_err(|_| ProtocolError::ProtocolNotInitialized)?;
         let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
         (config.creation_fee, config.execution_fee, config.enabled)
     };
@@ -158,18 +153,13 @@ fn try_collect_fee<'a>(
     }
     let shard_id = {
         let shard_data = maybe_shard.try_borrow_data()?;
-        if shard_data.is_empty()
-            || shard_data[0] != AccountDiscriminator::TreasuryShard as u8
-            || shard_data.len() < core::mem::size_of::<TreasuryShard>()
-        {
-            return Err(ProtocolError::InvalidTreasuryShard.into());
-        }
+        TreasuryShard::check(&shard_data).map_err(|_| ProtocolError::InvalidTreasuryShard)?;
         let shard = unsafe { &*(shard_data.as_ptr() as *const TreasuryShard) };
         shard.shard_id
     };
     let shard_id_arr = [shard_id];
     let (expected_shard_key, _) =
-        find_program_address(&[b"treasury_shard", &shard_id_arr], program_id);
+        find_program_address(&[crate::seeds::TREASURY_SHARD, &shard_id_arr], program_id);
     if maybe_shard.key() != &expected_shard_key {
         return Err(ProtocolError::InvalidTreasuryShard.into());
     }
@@ -187,7 +177,7 @@ fn try_collect_fee<'a>(
     // seed for this payer BEFORE any state mutation.
     let target_payer: &[u8; 32] = payer.key();
     let (expected_record_key, record_bump) =
-        find_program_address(&[b"fee_record", target_payer], program_id);
+        find_program_address(&[crate::seeds::FEE_RECORD, target_payer], program_id);
     if maybe_record.key() != &expected_record_key {
         return Err(ProtocolError::InvalidFeeRecord.into());
     }
@@ -202,7 +192,7 @@ fn try_collect_fee<'a>(
 
         let bump_arr = [record_bump];
         let seeds = [
-            Seed::from(b"fee_record"),
+            Seed::from(crate::seeds::FEE_RECORD),
             Seed::from(target_payer.as_ref()),
             Seed::from(&bump_arr),
         ];
@@ -240,12 +230,7 @@ fn try_collect_fee<'a>(
         // Owned by us — verify it's a valid FeeRecord, not some other
         // account that happens to live at the canonical seed.
         let rec = maybe_record.try_borrow_data()?;
-        if rec.is_empty()
-            || rec[0] != AccountDiscriminator::FeeRecord as u8
-            || rec.len() < core::mem::size_of::<FeeRecord>()
-        {
-            return Err(ProtocolError::InvalidFeeRecord.into());
-        }
+        FeeRecord::check(&rec).map_err(|_| ProtocolError::InvalidFeeRecord)?;
     }
 
     // Transfer fee: payer → treasury_shard.

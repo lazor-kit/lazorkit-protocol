@@ -1,7 +1,7 @@
 use crate::{
     compact::{parse_compact_instructions_ref_with_len, CompactInstructionRef},
     error::AuthError,
-    state::{deferred::DeferredExecAccount, AccountDiscriminator},
+    state::deferred::DeferredExecAccount,
 };
 use pinocchio::{
     account_info::AccountInfo,
@@ -52,26 +52,15 @@ pub fn process(
 
     // Validate Wallet discriminator
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     // Read DeferredExec account (read-only borrow for validation)
-    {
-        let deferred_check = unsafe { deferred_pda.borrow_data_unchecked() };
-        if deferred_check.len() < std::mem::size_of::<DeferredExecAccount>() {
-            return Err(ProgramError::InvalidAccountData);
-        }
-    }
+    DeferredExecAccount::check(unsafe { deferred_pda.borrow_data_unchecked() })?;
 
     let deferred = unsafe {
         let data = deferred_pda.borrow_data_unchecked();
         std::ptr::read_unaligned(data.as_ptr() as *const DeferredExecAccount)
     };
-
-    if deferred.discriminator != AccountDiscriminator::DeferredExec as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
 
     // Verify wallet matches
     if deferred.wallet != *wallet_pda.key() {
@@ -108,8 +97,10 @@ pub fn process(
     }
 
     // Derive vault PDA and verify
-    let (vault_key, vault_bump) =
-        find_program_address(&[b"vault", wallet_pda.key().as_ref()], program_id);
+    let (vault_key, vault_bump) = find_program_address(
+        &[crate::seeds::VAULT, wallet_pda.key().as_ref()],
+        program_id,
+    );
 
     if vault_pda.key() != &vault_key {
         return Err(ProgramError::InvalidSeeds);
@@ -138,7 +129,7 @@ pub fn process(
 
     let vault_bump_arr = [vault_bump];
     let seeds = [
-        Seed::from(b"vault"),
+        Seed::from(crate::seeds::VAULT),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(&vault_bump_arr),
     ];

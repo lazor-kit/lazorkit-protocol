@@ -78,6 +78,11 @@ pub enum ProtocolError {
     /// Strict mode rejects zero-fee config to prevent silent
     /// degradation to the pre-strict opt-in behaviour.
     FeeNotConfigured = 4012,
+    /// An account carries the right discriminator but a `version` byte this
+    /// binary does not implement. Distinct from `InvalidAccountData` so an
+    /// operator can tell "wrong account" from "account written by a different
+    /// build" — the latter means a deploy or a migration went wrong.
+    AccountVersionMismatch = 4013,
 }
 
 impl From<ProtocolError> for ProgramError {

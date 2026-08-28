@@ -63,7 +63,7 @@ fn create_session(context: &mut TestContext, wallet: &WalletFixture) -> Keypair 
     let session = Keypair::new();
     let (session_pda, _) = Pubkey::find_program_address(
         &[
-            b"session",
+            lazorkit_program::seeds::SESSION,
             wallet.wallet_pda.as_ref(),
             session.pubkey().as_ref(),
         ],
@@ -115,7 +115,7 @@ fn session_execute_ix(
 ) -> Instruction {
     let (session_pda, _) = Pubkey::find_program_address(
         &[
-            b"session",
+            lazorkit_program::seeds::SESSION,
             wallet.wallet_pda.as_ref(),
             session.pubkey().as_ref(),
         ],

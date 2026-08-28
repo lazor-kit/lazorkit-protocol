@@ -71,11 +71,7 @@ pub fn process(
 
     // Read config and verify admin + shard_id in range
     let config_data = config_pda.try_borrow_data()?;
-    if config_data.len() < core::mem::size_of::<ProtocolConfig>()
-        || config_data[0] != AccountDiscriminator::ProtocolConfig as u8
-    {
-        return Err(ProtocolError::InvalidProtocolAdmin.into());
-    }
+    ProtocolConfig::check(&config_data).map_err(|_| ProtocolError::InvalidProtocolAdmin)?;
     let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
     if admin.key() != &config.admin {
         return Err(ProtocolError::InvalidProtocolAdmin.into());
@@ -88,7 +84,7 @@ pub fn process(
     // Verify PDA
     let shard_id_arr = [shard_id];
     let (shard_key, shard_bump) =
-        find_program_address(&[b"treasury_shard", &shard_id_arr], program_id);
+        find_program_address(&[crate::seeds::TREASURY_SHARD, &shard_id_arr], program_id);
     if shard_pda.key() != &shard_key {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -101,7 +97,7 @@ pub fn process(
 
     let bump_arr = [shard_bump];
     let seeds = [
-        Seed::from(b"treasury_shard"),
+        Seed::from(crate::seeds::TREASURY_SHARD),
         Seed::from(shard_id_arr.as_ref()),
         Seed::from(&bump_arr),
     ];

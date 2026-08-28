@@ -5,7 +5,7 @@ use pinocchio::{
 
 use crate::{
     error::ProtocolError,
-    state::{protocol_config::ProtocolConfig, treasury_shard::TreasuryShard, AccountDiscriminator},
+    state::{protocol_config::ProtocolConfig, treasury_shard::TreasuryShard},
 };
 
 /// Processes the `WithdrawTreasury` instruction.
@@ -59,11 +59,7 @@ pub fn process(
 
     // Read config, verify admin + treasury
     let config_data = config_pda.try_borrow_data()?;
-    if config_data.len() < core::mem::size_of::<ProtocolConfig>()
-        || config_data[0] != AccountDiscriminator::ProtocolConfig as u8
-    {
-        return Err(ProtocolError::InvalidProtocolAdmin.into());
-    }
+    ProtocolConfig::check(&config_data).map_err(|_| ProtocolError::InvalidProtocolAdmin)?;
     let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
     if admin.key() != &config.admin {
         return Err(ProtocolError::InvalidProtocolAdmin.into());
@@ -75,11 +71,7 @@ pub fn process(
 
     // Verify shard
     let shard_data = shard_pda.try_borrow_data()?;
-    if shard_data.len() < core::mem::size_of::<TreasuryShard>()
-        || shard_data[0] != AccountDiscriminator::TreasuryShard as u8
-    {
-        return Err(ProtocolError::InvalidIntegratorRecord.into());
-    }
+    TreasuryShard::check(&shard_data).map_err(|_| ProtocolError::InvalidIntegratorRecord)?;
     drop(shard_data);
 
     // Sweep: keep rent-exempt minimum in shard

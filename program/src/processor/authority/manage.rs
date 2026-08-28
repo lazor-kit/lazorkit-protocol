@@ -148,9 +148,7 @@ pub fn process_add_authority(
     }
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     let rent_sysvar_info = account_info_iter
         .next()
@@ -163,17 +161,12 @@ pub fn process_add_authority(
     // }
 
     let admin_data = unsafe { admin_auth_pda.borrow_mut_data_unchecked() };
-    if admin_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(admin_data)?;
 
     // Safe Copy of Header using read_unaligned
     let admin_header =
         unsafe { std::ptr::read_unaligned(admin_data.as_ptr() as *const AuthorityAccountHeader) };
 
-    if admin_header.discriminator != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
     if admin_header.wallet != *wallet_pda.key() {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -233,7 +226,7 @@ pub fn process_add_authority(
 
     // Logic
     let (new_auth_key, bump) = find_program_address(
-        &[b"authority", wallet_pda.key().as_ref(), id_seed],
+        &[crate::seeds::AUTHORITY, wallet_pda.key().as_ref(), id_seed],
         program_id,
     );
     if !sol_assert_bytes_eq(new_auth_pda.key().as_ref(), new_auth_key.as_ref(), 32) {
@@ -253,7 +246,7 @@ pub fn process_add_authority(
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
     let bump_arr = [bump];
     let seeds = [
-        Seed::from(b"authority"),
+        Seed::from(crate::seeds::AUTHORITY),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(id_seed),
         Seed::from(&bump_arr),
@@ -372,9 +365,7 @@ pub fn process_remove_authority(
 
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     if !admin_auth_pda.is_writable() {
         return Err(ProgramError::InvalidAccountData);
@@ -382,15 +373,9 @@ pub fn process_remove_authority(
 
     // Safe copy header using read_unaligned
     let admin_data = unsafe { admin_auth_pda.borrow_mut_data_unchecked() };
-    if admin_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(admin_data)?;
     let admin_header =
         unsafe { std::ptr::read_unaligned(admin_data.as_ptr() as *const AuthorityAccountHeader) };
-
-    if admin_header.discriminator != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
     if admin_header.wallet != *wallet_pda.key() {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -429,17 +414,12 @@ pub fn process_remove_authority(
 
     // Authorization - ALWAYS validate target authority
     let target_data = unsafe { target_auth_pda.borrow_data_unchecked() };
-    if target_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(target_data)?;
     // Safe copy target header using read_unaligned
     let target_header =
         unsafe { std::ptr::read_unaligned(target_data.as_ptr() as *const AuthorityAccountHeader) };
 
     // ALWAYS verify discriminator
-    if target_header.discriminator != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
 
     // ALWAYS verify target belongs to THIS wallet (CRITICAL SECURITY CHECK)
     if target_header.wallet != *wallet_pda.key() {

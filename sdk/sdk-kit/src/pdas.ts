@@ -20,13 +20,33 @@ import {
 const utf8 = getUtf8Encoder();
 const addressEncoder = getAddressEncoder();
 
+// ─── PDA seeds ────────────────────────────────────────────────────────────
+//
+// Namespaced by protocol major version, byte-identical with
+// program/src/seeds.rs. The program keeps its address across major versions, so
+// PDA addresses are a pure function of the seeds; without the namespace a v2
+// binary would inherit v1's accounts at the addresses it wants for its own, and
+// for the singletons — protocol_config, treasury_shard — that collision is
+// certain rather than theoretical. Bump the prefix whenever
+// PROTOCOL_VERSION does.
+export const SEED_PREFIX = 'lk2:';
+export const SEED_WALLET = `${SEED_PREFIX}wallet`;
+export const SEED_VAULT = `${SEED_PREFIX}vault`;
+export const SEED_AUTHORITY = `${SEED_PREFIX}authority`;
+export const SEED_SESSION = `${SEED_PREFIX}session`;
+export const SEED_DEFERRED = `${SEED_PREFIX}deferred`;
+export const SEED_PROTOCOL_CONFIG = `${SEED_PREFIX}protocol_config`;
+export const SEED_TREASURY_SHARD = `${SEED_PREFIX}treasury_shard`;
+export const SEED_FEE_RECORD = `${SEED_PREFIX}fee_record`;
+
+
 export async function findWalletPda(
   userSeed: Uint8Array,
   programId: Address,
 ): Promise<ProgramDerivedAddress> {
   return getProgramDerivedAddress({
     programAddress: programId,
-    seeds: [utf8.encode('wallet'), userSeed],
+    seeds: [utf8.encode(SEED_WALLET), userSeed],
   });
 }
 
@@ -36,7 +56,7 @@ export async function findVaultPda(
 ): Promise<ProgramDerivedAddress> {
   return getProgramDerivedAddress({
     programAddress: programId,
-    seeds: [utf8.encode('vault'), addressEncoder.encode(walletPda)],
+    seeds: [utf8.encode(SEED_VAULT), addressEncoder.encode(walletPda)],
   });
 }
 
@@ -48,7 +68,7 @@ export async function findAuthorityPda(
   return getProgramDerivedAddress({
     programAddress: programId,
     seeds: [
-      utf8.encode('authority'),
+      utf8.encode(SEED_AUTHORITY),
       addressEncoder.encode(walletPda),
       credentialIdHash,
     ],
@@ -63,7 +83,7 @@ export async function findSessionPda(
   return getProgramDerivedAddress({
     programAddress: programId,
     seeds: [
-      utf8.encode('session'),
+      utf8.encode(SEED_SESSION),
       addressEncoder.encode(walletPda),
       sessionKey,
     ],
@@ -75,7 +95,7 @@ export async function findProtocolConfigPda(
 ): Promise<ProgramDerivedAddress> {
   return getProgramDerivedAddress({
     programAddress: programId,
-    seeds: [utf8.encode('protocol_config')],
+    seeds: [utf8.encode(SEED_PROTOCOL_CONFIG)],
   });
 }
 
@@ -85,7 +105,7 @@ export async function findFeeRecordPda(
 ): Promise<ProgramDerivedAddress> {
   return getProgramDerivedAddress({
     programAddress: programId,
-    seeds: [utf8.encode('fee_record'), addressEncoder.encode(payerPubkey)],
+    seeds: [utf8.encode(SEED_FEE_RECORD), addressEncoder.encode(payerPubkey)],
   });
 }
 
@@ -95,7 +115,7 @@ export async function findTreasuryShardPda(
 ): Promise<ProgramDerivedAddress> {
   return getProgramDerivedAddress({
     programAddress: programId,
-    seeds: [utf8.encode('treasury_shard'), new Uint8Array([shardId])],
+    seeds: [utf8.encode(SEED_TREASURY_SHARD), new Uint8Array([shardId])],
   });
 }
 
@@ -110,7 +130,7 @@ export async function findDeferredExecPda(
   return getProgramDerivedAddress({
     programAddress: programId,
     seeds: [
-      utf8.encode('deferred'),
+      utf8.encode(SEED_DEFERRED),
       addressEncoder.encode(walletPda),
       addressEncoder.encode(authorityPda),
       counterBuf,
