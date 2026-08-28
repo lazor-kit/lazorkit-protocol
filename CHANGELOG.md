@@ -6,6 +6,149 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## Protocol v2 (program 2.0.0)
+
+An audit of `program/src` produced 26 findings, five proven by reproduction
+tests. The audit that already existed (Accretion / Solana Foundation, A26SFR1,
+Feb 2026) covered `program-v2`, **not this repo** — this is a fork that added an
+entire fee layer nobody had reviewed, and the heaviest findings all lived in that
+delta.
+
+Underneath the individual bugs was a structural problem: `role` answered two
+independent questions — what may you *manage* and what may you *spend* — while
+gating only the first. That is why "Spender" named a tier with full control of
+the vault.
+
+v2 ships every fix and the new permission model as one in-place upgrade at the
+existing program ID. **v1 accounts are abandoned, not migrated.**
+
+### Critical and high
+
+- **C-1 — an admin could freeze every user's funds.** The entrypoint reverted
+  every `CreateWallet`/`Execute`/`ExecuteDeferred` when the protocol config was
+  disabled or its fee was zero, and those are the only paths that move funds out
+  of a vault. One admin write, permanent, unrecoverable. Fee collection is now
+  *skipped* rather than reverting, the config PDA address is pinned so "not
+  configured" cannot be spoofed, and both fees are capped at 0.01 SOL so an
+  unpayable fee cannot be a freeze in disguise.
+- **H-1 — authentication could be driven from another program.** Both the
+  Secp256r1 authenticator and `Execute` now refuse to run below the top level.
+- **H-2 — rank governed management and nothing else.** `Execute` never read
+  `role`, so a "Spender" spent exactly like an Owner. Rank and policy are now
+  separate fields answering separate questions; a Delegate must carry a policy,
+  and an authority that carries one may not create authorities at all.
+- **H-3 — `Execute` conscripted the paymaster.** Every outer signer was forwarded
+  into every inner CPI, so a session limited to 0.001 SOL could move 2 SOL out of
+  the fee payer's own wallet. Forwarding is now opt-in per account, never covers
+  the fee payer, and on the session path covers only the session's own key.
+- **H-4 — token authority escapes** are caught by the pre/post snapshot, which
+  now runs for policy-bearing authorities as well as sessions.
+
+### Medium
+
+- **M-2** — the program refuses to run at any address other than the one
+  compiled into it.
+- **M-3** — the ProtocolConfig PDA address is verified at every read site, not
+  just its owner.
+- **M-4** — the accounts hash binds each referenced account's
+  `is_signer`/`is_writable`, not only its key. A relayer could previously take an
+  account approved as read-only and submit it writable.
+- **M-5** — an all-zero Secp256r1 pubkey is rejected in `TransferOwnership`.
+- **M-6** — `payer.is_signer()` is explicit in the six processors that relied on
+  the System Program enforcing it during a CPI that is skipped for a pre-funded
+  PDA.
+- **M-1, M-7** — documented rather than changed, with the reasoning: an Ed25519
+  authority's transaction signature already binds strictly more than a payload
+  signature would, and a program whitelist constrains one level of CPI while the
+  value limits constrain the whole call graph.
+
+### Added
+
+- **Several Owners per wallet.** Each device holds its own passkey and passkeys
+  cannot be copied, so multi-device means multi-authority — and only if they are
+  all Owners can a surviving device revoke a lost one. `WalletAccount.owner_count`
+  refuses the removal of the last Owner.
+- **Per-authority spending policies.** The action buffer that bounded sessions
+  now bounds authorities too, on the same engine.
+- **Two-step protocol admin rotation** (propose / accept). `UpdateProtocol` could
+  not write `admin` at all, and a one-step write would make a typo permanent.
+- **Version discipline.** PDA seeds namespaced by protocol major version, account
+  discriminators carrying it in their high nibble, and a validated `version` byte
+  that is finally read rather than only written. See
+  [`docs/upgrade-procedure.md`](docs/upgrade-procedure.md).
+- **Golden vectors** for the accounts-hash wire format
+  ([`test-vectors/accounts-hash.json`](test-vectors/accounts-hash.json)),
+  asserted against by the program and both SDKs.
+
+### Breaking — protocol v2
+
+- **Every PDA address changes.** Seeds are namespaced `lk2:`. v1 wallets, vaults,
+  authorities, sessions and the protocol singletons are unreachable from v2 code.
+  This is deliberate: the singleton seeds would otherwise collide with accounts
+  that already exist, and `initialize_protocol` requires a zero-length account, so
+  the protocol would have been permanently un-initialisable.
+- **Account discriminators renumbered** to `0x21`–`0x27`. A v1 account fails
+  immediately rather than being reinterpreted under a moved layout.
+- **Account index bytes cap at 127.** Bit 7 is now the forward-signer flag. An
+  index of 128 or above is rejected, not masked.
+- **v1 signatures no longer verify.** The accounts hash covers privilege.
+- **`AddAuthority` payload gained `[policy_len u16][policy]`** between the key
+  material and the auth payload, inside the signed region.
+- **`AddAuthority` and `RemoveAuthority` need the wallet account writable.** The
+  instruction data is unchanged, so this fails at runtime rather than at compile
+  time — and only on the paths that touch an Owner.
+- **Serialized `DeferredPayload`s do not cross the version boundary.** They carry
+  a version and are rejected on mismatch; re-authorize instead of replaying.
+
+### Migration
+
+There is no account migration path, and none is needed: the protocol had one
+integrator running minimal traffic and no finished product, so mainnet was in
+practice a test deployment.
+
+**Before upgrading mainnet**, in this order:
+
+1. Run `scripts/survey-v1.ts` and commit the report.
+2. Sweep any v1 vault still holding SOL through the legitimate Owner path **on
+   the current binary**. After the upgrade those vaults are unreachable.
+3. Confirm `PROTOCOL_INIT_AUTHORITY` for the mainnet build. It defaults to the
+   existing deployer key and gates `InitializeProtocol` permanently.
+4. Rehearse locally: load the old `.so` into a validator as upgradeable,
+   smoke-test, upgrade in place, re-run. Record both SBF SHA-256 hashes.
+
+For clients:
+
+```diff
+- const [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
++ // Same call — the seed prefix is internal to the SDK. The address it
++ // returns is different, and any v1 address you cached is stale.
++ const [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
+```
+
+```diff
+  await client.addAuthority({
+    payer, walletPda, adminSigner,
+    newAuthority: { type: 'ed25519', publicKey: delegate.publicKey },
+    role: ROLE_SPENDER,
++   // A Delegate must carry a policy — this is what makes the name true.
++   policy: serializeActions([Actions.solLimit(1_000_000_000n)]),
+  });
+```
+
+```diff
++ // Creating an Owner is now possible, and deliberately explicit.
++ await client.addAuthority({
++   payer, walletPda, adminSigner,
++   newAuthority: { type: 'secp256r1', credentialIdHash, compressedPubkey, rpId },
++   role: ROLE_OWNER,
++   allowOwner: true,
++ });
+```
+
+If you build instructions with the low-level builders rather than the client,
+make the wallet account writable on `AddAuthority` and `RemoveAuthority`.
+
+
 ### Added — foundation devnet support (SDK 0.3.0)
 
 The single source of truth for both LazorKit on-chain builds. `@lazorkit/sdk-legacy`
