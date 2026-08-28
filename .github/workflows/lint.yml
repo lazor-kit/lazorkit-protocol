@@ -54,6 +54,45 @@ jobs:
       - name: cargo test (program lib)
         run: cargo test --features devnet -p lazorkit-program --lib
 
+  # The litesvm integration suite under program/tests/ has never run in CI:
+  # the `rust` job above uses `--lib`, which skips every integration target, and
+  # nothing built the SBF artifact those tests load. Clippy's `--all-targets`
+  # compiles them, so they were type-checked but never executed — which is how a
+  # red test (secp256r1_tests::test_add_multiple_secp256r1_authorities) sat on
+  # develop unnoticed. This job actually runs them.
+  program-integration:
+    name: program litesvm integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.89.0
+
+      - name: Install Solana toolchain
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            test-fixtures/malicious-cpi/target
+          key: sbf-tests-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      # Builds both the program and the malicious-cpi wrapper that
+      # repro_h1_cpi_bypass loads as a second .so.
+      - name: Build SBF artifacts
+        run: ./scripts/build-repro-fixtures.sh
+
+      - name: cargo test (integration)
+        run: cargo test --features devnet -p lazorkit-program --tests
+
   sdk:
     name: sdk build/test
     runs-on: ubuntu-latest

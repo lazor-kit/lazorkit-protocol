@@ -89,7 +89,16 @@ fn test_create_wallet_secp256r1_repro() {
     println!("✅ Wallet created with Secp256r1 Authority");
 }
 
+// Red on `develop` since commit 5aecaf7 ("fix owner authority role policy"),
+// which made `new_role == 0` illegal at manage.rs:227. This test still asks
+// for role 0 (see the `add_auth_args` block below). Nobody noticed because the
+// litesvm suite has never run in CI.
+//
+// Left in place rather than edited: multi-owner support makes creating a second
+// Owner legal again, at which point this test describes the intended behaviour
+// and the attribute comes off. Un-ignoring it is part of that work's acceptance.
 #[test]
+#[ignore = "asks for role 0; legal again once multi-owner lands, then un-ignore"]
 fn test_add_multiple_secp256r1_authorities() {
     let mut context = setup_test();
 

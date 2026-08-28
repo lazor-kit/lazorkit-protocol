@@ -100,9 +100,38 @@ export function getProtocolTreasury(): KeyPairSigner {
   return _treasurySigner;
 }
 
+let _preflightDone = false;
+
+/**
+ * Fail loudly and early if the program is not where the SDK expects it.
+ *
+ * `validator:start` loads the .so at the devnet vanity address, the same one
+ * `PROGRAM_ID_DEVNET` holds. When those disagree — a stale validator, a forgotten
+ * `--reset`, a hand-rolled deploy — every downstream failure surfaces as a
+ * confusing error deep inside a PDA derivation or a simulate call. Check once.
+ */
+async function assertProgramDeployed(rpc: LazorKitRpc): Promise<void> {
+  if (_preflightDone) return;
+  _preflightDone = true;
+
+  const { value } = await rpc.getAccountInfo(PROGRAM_ID, { encoding: 'base64' }).send();
+  if (!value) {
+    throw new Error(
+      `LazorKit program not found at ${PROGRAM_ID} on ${RPC_URL}.\n` +
+        `Start the validator first:  npm run validator:start && npm run validator:wait`,
+    );
+  }
+  if (!value.executable) {
+    throw new Error(`Account ${PROGRAM_ID} on ${RPC_URL} exists but is not executable.`);
+  }
+}
+
 export async function setupTest(): Promise<TestContext> {
   const rpc = createSolanaRpc(RPC_URL);
   const rpcSubscriptions = createSolanaRpcSubscriptions(RPC_WS_URL);
+
+  await assertProgramDeployed(rpc);
+
   const payer = await generateKeyPairSigner();
 
   // Airdrop 10 SOL.
