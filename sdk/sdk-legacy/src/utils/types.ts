@@ -66,7 +66,21 @@ export interface DeferredPayload {
 }
 
 /** Wire-serializable form of a `DeferredPayload` (all fields are plain JSON types). */
+/**
+ * Wire version of the serialized deferred payload.
+ *
+ * `accountIndexes` crosses a transaction boundary — tx1 authorizes, tx2
+ * executes, often in a different process at a different SDK version — and since
+ * v2 those bytes carry the forward-signer flag in their high bit. A v1 payload
+ * replayed through a v2 client would mean something different, and the failure
+ * would surface as an unexplained instructions-hash mismatch rather than as a
+ * version error. So the version is explicit and mismatches are refused.
+ */
+export const DEFERRED_PAYLOAD_VERSION = 2;
+
 export interface DeferredPayloadJson {
+  /** See DEFERRED_PAYLOAD_VERSION. Absent on payloads written before v2. */
+  version?: number;
   walletPda: string;        // base58
   deferredExecPda: string;  // base58
   compactInstructions: {
@@ -88,6 +102,7 @@ export interface DeferredPayloadJson {
  */
 export function serializeDeferredPayload(payload: DeferredPayload): string {
   const json: DeferredPayloadJson = {
+    version: DEFERRED_PAYLOAD_VERSION,
     walletPda: payload.walletPda.toBase58(),
     deferredExecPda: payload.deferredExecPda.toBase58(),
     compactInstructions: payload.compactInstructions.map((ix) => ({
@@ -119,6 +134,13 @@ export function deserializeDeferredPayload(serialized: string): DeferredPayload 
     !Array.isArray(json.remainingAccounts)
   ) {
     throw new Error('Invalid DeferredPayload JSON shape');
+  }
+  if (json.version !== DEFERRED_PAYLOAD_VERSION) {
+    throw new Error(
+      `DeferredPayload is version ${json.version ?? 1}, this SDK writes and reads ` +
+        `version ${DEFERRED_PAYLOAD_VERSION}. Account index bytes changed meaning ` +
+        `between them; re-authorize rather than replaying this payload.`,
+    );
   }
   return {
     walletPda: new PublicKey(json.walletPda),

@@ -28,6 +28,52 @@ export interface CompactInstruction {
  *     [account_indexes: u8[num_accounts]]
  *     [data_len: u16 LE] [data: u8[data_len]]
  */
+/**
+ * Account index encoding.
+ *
+ * The high bit of an index byte opts that account into signer forwarding.
+ * Forwarding used to be implicit — every outer signer became a signer of every
+ * inner instruction referencing it, with nobody having said so — which let a
+ * session limited to 0.001 SOL move 2 SOL out of the paymaster's wallet. Making
+ * it a bit inside the compact bytes puts the request inside the signed payload
+ * for a Secp256r1 authority, so the passkey holder signs the elevation.
+ *
+ * Costs one bit: indices are capped at 127.
+ */
+export const ACCOUNT_INDEX_MASK = 0x7f;
+export const ACCOUNT_INDEX_FORWARD_SIGNER = 0x80;
+export const MAX_ACCOUNT_INDEX = ACCOUNT_INDEX_MASK;
+
+/** Encode an index plus its forward-signer request into one byte. */
+export function encodeAccountIndex(index: number, forwardSigner: boolean): number {
+  if (index < 0 || index > MAX_ACCOUNT_INDEX) {
+    throw new Error(
+      `account index ${index} exceeds the ${MAX_ACCOUNT_INDEX} ceiling imposed by the ` +
+        `forward-signer flag bit; reduce the number of accounts in this transaction`,
+    );
+  }
+  return forwardSigner ? index | ACCOUNT_INDEX_FORWARD_SIGNER : index;
+}
+
+/** Strip the flag bit back off an index byte. */
+export function decodeAccountIndex(byte: number): { index: number; forwardSigner: boolean } {
+  return {
+    index: byte & ACCOUNT_INDEX_MASK,
+    forwardSigner: (byte & ACCOUNT_INDEX_FORWARD_SIGNER) !== 0,
+  };
+}
+
+/**
+ * Privilege byte hashed after each account key.
+ *
+ * The *runtime* flags, not the requested ones: these are what authorise the
+ * inner CPI, so they are what the signature must cover. Must match
+ * `compact::account_flags` on-chain.
+ */
+export function accountFlags(isSigner: boolean, isWritable: boolean): number {
+  return (isSigner ? 1 : 0) | (isWritable ? 2 : 0);
+}
+
 export function packCompactInstructions(
   instructions: ReadonlyArray<CompactInstruction>,
 ): Uint8Array {
@@ -52,6 +98,12 @@ export function packCompactInstructions(
  *
  * Must match the on-chain `compute_accounts_hash`.
  */
+function flagsOf(meta: AccountMeta): number {
+  // kit encodes privilege as an AccountRole enum: bit 0 = writable, bit 1 = signer.
+  const role = meta.role as number;
+  return accountFlags((role & 0b10) !== 0, (role & 0b01) !== 0);
+}
+
 export function computeAccountsHash(
   accountMetas: ReadonlyArray<AccountMeta>,
   instructions: ReadonlyArray<CompactInstruction>,
@@ -65,14 +117,17 @@ export function computeAccountsHash(
       );
     }
     parts.push(addressEncoder.encode(program.address) as Uint8Array);
-    for (const idx of ix.accountIndexes) {
-      const a = accountMetas[idx];
+    parts.push(new Uint8Array([flagsOf(program)]));
+    for (const byte of ix.accountIndexes) {
+      const { index } = decodeAccountIndex(byte);
+      const a = accountMetas[index];
       if (!a) {
         throw new Error(
-          `compact ix references account_index ${idx} but only ${accountMetas.length} accounts were supplied`,
+          `compact ix references account_index ${index} but only ${accountMetas.length} accounts were supplied`,
         );
       }
       parts.push(addressEncoder.encode(a.address) as Uint8Array);
+      parts.push(new Uint8Array([flagsOf(a)]));
     }
   }
   const data = concatBytes(parts);

@@ -1664,6 +1664,7 @@ dependencies = [
  "pinocchio-pubkey",
  "pinocchio-system",
  "rand 0.8.5",
+ "serde_json",
  "sha2 0.10.9",
  "shank",
  "shank_idl",
