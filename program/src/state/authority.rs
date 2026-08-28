@@ -28,3 +28,22 @@ pub struct AuthorityAccountHeader {
     pub wallet: Pubkey,
 }
 // 1+1+1+1+1+3+4+4+32 = 48. Divisible by 8. wallet stays at offset 16.
+
+impl AuthorityAccountHeader {
+    /// Minimum byte length for this account to be readable.
+    pub const MIN_LEN: usize = core::mem::size_of::<Self>();
+
+    /// Validate discriminator, length and layout version before trusting any
+    /// field. Every read path calls this instead of comparing `data[0]` by
+    /// hand, so a future version gate is one edit rather than a hunt through
+    /// every processor.
+    #[inline]
+    pub fn check(data: &[u8]) -> Result<(), pinocchio::program_error::ProgramError> {
+        crate::state::check_header(
+            data,
+            crate::state::AccountDiscriminator::Authority,
+            crate::state::version_offset::AUTHORITY,
+            Self::MIN_LEN,
+        )
+    }
+}

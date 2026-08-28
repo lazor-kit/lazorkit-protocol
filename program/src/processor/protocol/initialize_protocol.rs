@@ -60,7 +60,8 @@ pub fn process(
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
 
     // Verify PDA
-    let (config_key, config_bump) = find_program_address(&[b"protocol_config"], program_id);
+    let (config_key, config_bump) =
+        find_program_address(&[crate::seeds::PROTOCOL_CONFIG], program_id);
     if config_pda.key() != &config_key {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -76,7 +77,10 @@ pub fn process(
     let rent_lamports = rent.minimum_balance(space);
 
     let bump_arr = [config_bump];
-    let seeds = [Seed::from(b"protocol_config"), Seed::from(&bump_arr)];
+    let seeds = [
+        Seed::from(crate::seeds::PROTOCOL_CONFIG),
+        Seed::from(&bump_arr),
+    ];
 
     initialize_pda_account(
         payer,

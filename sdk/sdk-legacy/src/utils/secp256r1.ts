@@ -1,5 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { createHash } from 'crypto';
+import { ACCOUNT_DISCRIMINATOR } from '../constants';
 
 /**
  * Generates WebAuthn authenticator data for a given RP ID.
@@ -87,8 +88,9 @@ export async function readAuthorityPubkey(
   // Header is 48 bytes, credential_id_hash is 32 bytes, pubkey is 33 bytes.
   // Min size = 48 + 32 + 33 = 113 bytes for a Secp256r1 authority.
   if (info.data.length < 113) throw new Error('Authority account too small for Secp256r1');
-  // Byte 0 is the account discriminator: Authority = 2.
-  if (info.data[0] !== 2) throw new Error('Not an Authority account');
+  // Byte 0 is the account discriminator.
+  if (info.data[0] !== ACCOUNT_DISCRIMINATOR.AUTHORITY)
+    throw new Error('Not an Authority account');
   // Byte 1 is the authority_type: Secp256r1 = 1.
   if (info.data[1] !== 1) throw new Error('Authority is not Secp256r1');
   // Pubkey at offset 48 + 32 = 80, length 33.

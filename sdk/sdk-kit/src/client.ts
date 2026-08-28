@@ -26,6 +26,7 @@ import {
   type Instruction,
   type Rpc,
 } from '@solana/kit';
+import { ACCOUNT_DISCRIMINATOR } from './constants.js';
 import bs58 from 'bs58';
 
 const bs58Encode = (b: Uint8Array): string => bs58.encode(b);
@@ -377,7 +378,7 @@ export class LazorKit {
       return null;
     }
     const data = new Uint8Array(Buffer.from(info.value.data[0], 'base64'));
-    if (data.length < 88 || data[0] !== 5) {
+    if (data.length < 88 || data[0] !== ACCOUNT_DISCRIMINATOR.PROTOCOL_CONFIG) {
       this._protocolConfig = null;
       return null;
     }
@@ -421,7 +422,7 @@ export class LazorKit {
     let exists = false;
     if (info.value) {
       const data = new Uint8Array(Buffer.from(info.value.data[0], 'base64'));
-      exists = data.length > 0 && data[0] === 6;
+      exists = data.length > 0 && data[0] === ACCOUNT_DISCRIMINATOR.FEE_RECORD;
     }
     if (exists) {
       this._registeredPayers.add(payer);
@@ -536,7 +537,7 @@ export class LazorKit {
   ): Promise<WalletAuthorityRecord[]> {
     assertByteLength(credential, 32, 'credential');
     const typeValue = authorityType === 'ed25519' ? AUTH_TYPE_ED25519 : AUTH_TYPE_SECP256R1;
-    const discAndType = Buffer.from([2, typeValue]);
+    const discAndType = Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY, typeValue]);
 
     const accounts = await this.rpc
       .getProgramAccounts(this.programId, {

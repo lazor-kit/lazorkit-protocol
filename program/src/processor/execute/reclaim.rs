@@ -1,7 +1,4 @@
-use crate::{
-    error::AuthError,
-    state::{deferred::DeferredExecAccount, AccountDiscriminator},
-};
+use crate::{error::AuthError, state::deferred::DeferredExecAccount};
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
@@ -43,16 +40,10 @@ pub fn process(
 
     // Read DeferredExec account
     let deferred_data = unsafe { deferred_pda.borrow_mut_data_unchecked() };
-    if deferred_data.len() < std::mem::size_of::<DeferredExecAccount>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    DeferredExecAccount::check(deferred_data)?;
 
     let deferred =
         unsafe { std::ptr::read_unaligned(deferred_data.as_ptr() as *const DeferredExecAccount) };
-
-    if deferred.discriminator != AccountDiscriminator::DeferredExec as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
 
     // Only the original payer can reclaim
     if deferred.payer != *payer.key() {

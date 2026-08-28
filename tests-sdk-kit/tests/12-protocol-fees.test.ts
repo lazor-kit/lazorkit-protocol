@@ -46,6 +46,7 @@ import {
   type TestContext,
   makeClient,
 } from './common.js';
+import { ACCOUNT_DISCRIMINATOR } from '@lazorkit/sdk';
 
 const NUM_SHARDS = 4;
 const LAMPORTS_PER_SOL = 1_000_000_000n;
@@ -137,7 +138,7 @@ describe('Protocol Fees', () => {
       .send();
     expect(info.value).not.toBeNull();
     const data = new Uint8Array(Buffer.from(info.value!.data[0], 'base64'));
-    expect(data[0]).toBe(5); // ProtocolConfig discriminator
+    expect(data[0]).toBe(ACCOUNT_DISCRIMINATOR.PROTOCOL_CONFIG); // ProtocolConfig discriminator
     expect(data[3]).toBe(1); // enabled
     expect(data[4]).toBe(NUM_SHARDS);
   });
@@ -150,7 +151,7 @@ describe('Protocol Fees', () => {
         .send();
       expect(info.value).not.toBeNull();
       const data = new Uint8Array(Buffer.from(info.value!.data[0], 'base64'));
-      expect(data[0]).toBe(7); // TreasuryShard discriminator
+      expect(data[0]).toBe(ACCOUNT_DISCRIMINATOR.TREASURY_SHARD); // TreasuryShard discriminator
       expect(data[2]).toBe(i);
     }
   });
@@ -341,7 +342,7 @@ describe('Protocol Fees', () => {
       .send();
     expect(info.value).not.toBeNull();
     const data = new Uint8Array(Buffer.from(info.value!.data[0], 'base64'));
-    expect(data[0]).toBe(6); // FeeRecord discriminator
+    expect(data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD); // FeeRecord discriminator
   });
 
   it('rejects duplicate payer registration', async () => {
@@ -428,7 +429,7 @@ describe('Protocol Fees', () => {
     expect(infoAfter.value).not.toBeNull();
     const data = new Uint8Array(Buffer.from(infoAfter.value!.data[0], 'base64'));
     const view = new DataView(data.buffer, data.byteOffset);
-    expect(data[0]).toBe(6);
+    expect(data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD);
     expect(view.getBigUint64(8, true)).toBe(CREATION_FEE);
     expect(view.getUint32(20, true)).toBe(1);
   });
@@ -504,7 +505,7 @@ describe('Protocol Fees', () => {
     expect(infoAfter.value).not.toBeNull();
     const data = new Uint8Array(Buffer.from(infoAfter.value!.data[0], 'base64'));
     const view = new DataView(data.buffer, data.byteOffset);
-    expect(data[0]).toBe(6);
+    expect(data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD);
     expect(view.getBigUint64(8, true)).toBe(EXECUTION_FEE);
     expect(view.getUint32(16, true)).toBe(1);
     expect(view.getUint32(20, true)).toBe(0);
@@ -568,7 +569,7 @@ describe('Protocol Fees', () => {
     const recBytes = new Uint8Array(
       Buffer.from(feeRecordInfoAfter.value!.data[0], 'base64'),
     );
-    expect(recBytes[0]).toBe(6); // FeeRecord discriminator
+    expect(recBytes[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD); // FeeRecord discriminator
     const walletCount = new DataView(recBytes.buffer, recBytes.byteOffset).getUint32(20, true);
     expect(walletCount).toBe(1);
   });

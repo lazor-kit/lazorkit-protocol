@@ -77,9 +77,7 @@ pub fn process(
     }
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     if !authority_pda.is_writable() {
         return Err(ProgramError::InvalidAccountData);
@@ -107,19 +105,20 @@ pub fn process(
     let mut is_session = false;
     let mut session_slot: u64 = 0;
 
+    // Bound to the enum rather than to numeric literals. The v1 code matched on
+    // bare `2` and `3`, which silently stopped matching anything the moment the
+    // discriminators were renumbered — every Execute failed with a flat
+    // InvalidAccountData and no indication of why.
+    const DISC_AUTHORITY: u8 = AccountDiscriminator::Authority as u8;
+    const DISC_SESSION: u8 = AccountDiscriminator::Session as u8;
+
     match discriminator {
-        2 => {
+        DISC_AUTHORITY => {
             // Authority
-            if authority_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-                return Err(ProgramError::InvalidAccountData);
-            }
+            AuthorityAccountHeader::check(authority_data)?;
             let authority_header = unsafe {
                 std::ptr::read_unaligned(authority_data.as_ptr() as *const AuthorityAccountHeader)
             };
-
-            if authority_header.discriminator != AccountDiscriminator::Authority as u8 {
-                return Err(ProgramError::InvalidAccountData);
-            }
 
             if authority_header.wallet != *wallet_pda.key() {
                 return Err(ProgramError::InvalidAccountData);
@@ -157,7 +156,7 @@ pub fn process(
                 _ => return Err(AuthError::InvalidAuthenticationKind.into()),
             }
         },
-        3 => {
+        DISC_SESSION => {
             // Session — reuse the existing `authority_data` borrow; no re-borrow needed.
 
             // L5: anti-CPI guard, mirroring the Secp256r1 authenticator check.
@@ -220,8 +219,10 @@ pub fn process(
     }
 
     // Get vault bump for signing
-    let (vault_key, vault_bump) =
-        find_program_address(&[b"vault", wallet_pda.key().as_ref()], program_id);
+    let (vault_key, vault_bump) = find_program_address(
+        &[crate::seeds::VAULT, wallet_pda.key().as_ref()],
+        program_id,
+    );
 
     // Verify vault PDA.
     if vault_pda.key() != &vault_key {
@@ -277,7 +278,7 @@ pub fn process(
     // PDA signer seeds (constant across the loop)
     let vault_bump_arr = [vault_bump];
     let seeds = [
-        Seed::from(b"vault"),
+        Seed::from(crate::seeds::VAULT),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(&vault_bump_arr),
     ];

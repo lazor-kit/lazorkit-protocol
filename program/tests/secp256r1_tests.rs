@@ -25,13 +25,21 @@ fn test_create_wallet_secp256r1_repro() {
 
     let user_seed = rand::random::<[u8; 32]>();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     // Authority seed for Secp256r1 is the credential_id_hash
     let (auth_pda, auth_bump) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), &credential_id_hash],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            &credential_id_hash,
+        ],
         &context.program_id,
     );
 
@@ -107,12 +115,20 @@ fn test_add_multiple_secp256r1_authorities() {
     let owner_keypair = solana_sdk::signature::Keypair::new();
     let owner_pubkey = owner_keypair.pubkey();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     let (owner_pda, owner_bump) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), owner_pubkey.as_ref()],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            owner_pubkey.as_ref(),
+        ],
         &context.program_id,
     );
 
@@ -171,7 +187,11 @@ fn test_add_multiple_secp256r1_authorities() {
         .as_bytes()
         .to_vec();
     let (auth_pda1, _auth_bump1) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), &credential_id_hash1],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            &credential_id_hash1,
+        ],
         &context.program_id,
     );
 
@@ -246,7 +266,11 @@ fn test_add_multiple_secp256r1_authorities() {
         .as_bytes()
         .to_vec();
     let (auth_pda2, _auth_bump2) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), &credential_id_hash2],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            &credential_id_hash2,
+        ],
         &context.program_id,
     );
 

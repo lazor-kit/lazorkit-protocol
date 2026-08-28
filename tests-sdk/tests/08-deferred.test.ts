@@ -38,6 +38,7 @@ import {
   createExecuteDeferredIx,
   createReclaimDeferredIx,
 } from '../../sdk/sdk-legacy/src/utils/instructions';
+import { ACCOUNT_DISCRIMINATOR } from '../../sdk/sdk-legacy/src';
 
 describe('Deferred Execution', () => {
   let ctx: TestContext;
@@ -172,7 +173,7 @@ describe('Deferred Execution', () => {
         await ctx.connection.getAccountInfo(deferredExecPda);
       expect(deferredAccount).not.toBeNull();
       expect(deferredAccount!.data.length).toBe(176);
-      expect(deferredAccount!.data[0]).toBe(4); // DeferredExec discriminator
+      expect(deferredAccount!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.DEFERRED_EXEC); // DeferredExec discriminator
 
       // === TX2: ExecuteDeferred ===
       const packed = packCompactInstructions(compactIxs);

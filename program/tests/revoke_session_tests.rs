@@ -25,13 +25,17 @@ fn setup_wallet_with_session(
     let user_seed = rand::random::<[u8; 32]>();
     let owner_keypair = Keypair::new();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     let (owner_auth_pda, owner_bump) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             owner_keypair.pubkey().as_ref(),
         ],
@@ -107,7 +111,7 @@ fn setup_wallet_with_session(
 
     let (session_pda, _) = Pubkey::find_program_address(
         &[
-            b"session",
+            lazorkit_program::seeds::SESSION,
             wallet_pda.as_ref(),
             session_keypair.pubkey().as_ref(),
         ],
@@ -247,7 +251,7 @@ fn test_revoke_session_by_admin() {
     let admin_kp = Keypair::new();
     let (admin_auth_pda, _) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             admin_kp.pubkey().as_ref(),
         ],
@@ -338,7 +342,7 @@ fn test_revoke_session_spender_fails() {
     let spender_kp = Keypair::new();
     let (spender_auth_pda, _) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             spender_kp.pubkey().as_ref(),
         ],

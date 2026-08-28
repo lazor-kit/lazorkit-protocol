@@ -6,7 +6,11 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js';
 import { randomFillSync } from 'crypto';
-import { PROGRAM_ID_DEVNET, PROGRAM_ID_MAINNET } from '../constants';
+import {
+  ACCOUNT_DISCRIMINATOR,
+  PROGRAM_ID_DEVNET,
+  PROGRAM_ID_MAINNET,
+} from '../constants';
 import {
   findWalletPda,
   findVaultPda,
@@ -425,7 +429,7 @@ export class LazorKitClient {
     if (this._protocolConfig !== undefined) return this._protocolConfig;
     const [configPda] = this.findProtocolConfig();
     const info = await this.connection.getAccountInfo(configPda);
-    if (!info || info.data.length < 88 || info.data[0] !== 5) {
+    if (!info || info.data.length < 88 || info.data[0] !== ACCOUNT_DISCRIMINATOR.PROTOCOL_CONFIG) {
       this._protocolConfig = null;
       return null;
     }
@@ -507,7 +511,7 @@ export class LazorKitClient {
 
     const info = await this.connection.getAccountInfo(accounts.feeRecordPda);
     const exists =
-      !!info && info.data.length > 0 && info.data[0] === 6; // FeeRecord discriminator
+      !!info && info.data.length > 0 && info.data[0] === ACCOUNT_DISCRIMINATOR.FEE_RECORD;
     if (exists) {
       this._registeredPayers.add(key);
       return { accounts };
@@ -1254,10 +1258,10 @@ export class LazorKitClient {
       authorityType === 'ed25519' ? AUTH_TYPE_ED25519 : AUTH_TYPE_SECP256R1;
 
     // Filters:
-    //   offset 0: discriminator == 2 (Authority)
+    //   offset 0: discriminator == ACCOUNT_DISCRIMINATOR.AUTHORITY
     //   offset 1: authority_type == typeValue
     //   offset 48: credential bytes match
-    const discAndType = Buffer.from([2, typeValue]);
+    const discAndType = Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY, typeValue]);
 
     const accounts = await this.connection.getProgramAccounts(this.programId, {
       encoding: 'base64',

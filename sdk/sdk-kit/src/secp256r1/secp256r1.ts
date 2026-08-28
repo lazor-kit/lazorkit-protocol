@@ -13,6 +13,7 @@ import {
   type Rpc,
   type GetAccountInfoApi,
 } from '@solana/kit';
+import { ACCOUNT_DISCRIMINATOR } from '../constants.js';
 
 const addressEncoder = getAddressEncoder();
 
@@ -108,7 +109,8 @@ export async function readAuthorityPubkey(
   // Min size = 48 (header) + 32 (credential_id_hash) + 33 (pubkey) = 113.
   if (bytes.length < 113)
     throw new Error('Authority account too small for Secp256r1');
-  if (bytes[0] !== 2) throw new Error('Not an Authority account');
+  if (bytes[0] !== ACCOUNT_DISCRIMINATOR.AUTHORITY)
+    throw new Error('Not an Authority account');
   if (bytes[1] !== 1) throw new Error('Authority is not Secp256r1');
   return bytes.slice(80, 80 + 33);
 }

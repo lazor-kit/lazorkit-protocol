@@ -22,6 +22,7 @@ import {
   createWithdrawTreasuryIx,
   createUpdateProtocolIx,
 } from '../../sdk/sdk-legacy/src/utils/instructions';
+import { ACCOUNT_DISCRIMINATOR } from '../../sdk/sdk-legacy/src';
 
 // These values match what `setupTest()` uses for the global init.
 // If the constants in `common.ts` ever change, this test file's
@@ -107,7 +108,7 @@ describe('Protocol Fees', () => {
     const [protocolConfigPda] = client.findProtocolConfig();
     const info = await ctx.connection.getAccountInfo(protocolConfigPda);
     expect(info).not.toBeNull();
-    expect(info!.data[0]).toBe(5);
+    expect(info!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.PROTOCOL_CONFIG);
     expect(info!.data[3]).toBe(1); // enabled
     expect(info!.data[4]).toBe(NUM_SHARDS);
   });
@@ -117,7 +118,7 @@ describe('Protocol Fees', () => {
       const [shardPda] = client.findTreasuryShard(i);
       const info = await ctx.connection.getAccountInfo(shardPda);
       expect(info).not.toBeNull();
-      expect(info!.data[0]).toBe(7);
+      expect(info!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.TREASURY_SHARD);
       expect(info!.data[2]).toBe(i);
     }
   });
@@ -316,7 +317,7 @@ describe('Protocol Fees', () => {
 
     const info = await ctx.connection.getAccountInfo(feeRecordPda);
     expect(info).not.toBeNull();
-    expect(info!.data[0]).toBe(6);
+    expect(info!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD);
   });
 
   it('rejects duplicate payer registration', async () => {
@@ -398,7 +399,7 @@ describe('Protocol Fees', () => {
 
     const record = await ctx.connection.getAccountInfo(feeRecordPda);
     expect(record).not.toBeNull();
-    expect(record!.data[0]).toBe(6);
+    expect(record!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD);
     expect(record!.data.readBigUInt64LE(8)).toBe(CREATION_FEE);
     expect(record!.data.readUInt32LE(20)).toBe(1);
   });
@@ -500,7 +501,7 @@ describe('Protocol Fees', () => {
 
     const record = await ctx.connection.getAccountInfo(feeRecordPda);
     expect(record).not.toBeNull();
-    expect(record!.data[0]).toBe(6);
+    expect(record!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD);
     expect(record!.data.readBigUInt64LE(8)).toBe(EXECUTION_FEE);
     expect(record!.data.readUInt32LE(16)).toBe(1);
     expect(record!.data.readUInt32LE(20)).toBe(0);
@@ -579,7 +580,7 @@ describe('Protocol Fees', () => {
       protocolFee!.feeRecordPda,
     );
     expect(feeRecordAfter).not.toBeNull();
-    expect(feeRecordAfter!.data[0]).toBe(6); // FeeRecord discriminator
+    expect(feeRecordAfter!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD); // FeeRecord discriminator
     const walletCount = feeRecordAfter!.data.readUInt32LE(20);
     expect(walletCount).toBe(1);
   });

@@ -66,7 +66,7 @@ function buildSessionHeader(opts: {
 describe('Authority decoder parity', () => {
   it('matches sdk-legacy on representative fixture', () => {
     const fixture = buildAuthorityHeader({
-      discriminator: 2,
+      discriminator: 0x22, // Authority
       authorityType: 1, // secp256r1
       role: 0, // owner
       bump: 254,
@@ -87,7 +87,7 @@ describe('Authority decoder parity', () => {
 
   it('decodes counter as u32 little-endian (high 24 bits non-zero)', () => {
     const fixture = buildAuthorityHeader({
-      discriminator: 2,
+      discriminator: 0x22, // Authority
       authorityType: 0,
       role: 1,
       bump: 255,
@@ -108,7 +108,7 @@ describe('Authority decoder parity', () => {
 describe('Session decoder parity', () => {
   it('matches sdk-legacy on representative fixture', () => {
     const fixture = buildSessionHeader({
-      discriminator: 3,
+      discriminator: 0x23, // Session
       bump: 250,
       version: 1,
       wallet: WALLET_PK,

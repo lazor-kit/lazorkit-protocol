@@ -67,7 +67,8 @@ pub fn initialize_protocol_ix(
     execution_fee: u64,
     num_shards: u8,
 ) -> Instruction {
-    let (config_pda, _) = Pubkey::find_program_address(&[b"protocol_config"], &program_id);
+    let (config_pda, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
 
     let mut data = vec![10u8];
     data.extend_from_slice(admin.as_ref());
@@ -100,7 +101,8 @@ pub fn update_protocol_ix(
     enabled: u8,
     new_treasury: Pubkey,
 ) -> Instruction {
-    let (config_pda, _) = Pubkey::find_program_address(&[b"protocol_config"], &program_id);
+    let (config_pda, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
 
     let mut data = vec![11u8];
     data.extend_from_slice(&creation_fee.to_le_bytes());
@@ -126,9 +128,12 @@ pub fn init_shard_ix(
     admin: Pubkey,
     shard_id: u8,
 ) -> Instruction {
-    let (config_pda, _) = Pubkey::find_program_address(&[b"protocol_config"], &program_id);
-    let (shard_pda, _) =
-        Pubkey::find_program_address(&[b"treasury_shard", &[shard_id]], &program_id);
+    let (config_pda, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
+    let (shard_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::TREASURY_SHARD, &[shard_id]],
+        &program_id,
+    );
 
     Instruction {
         program_id,
@@ -147,10 +152,16 @@ pub fn init_shard_ix(
 /// The four accounts `try_collect_fee` requires as a suffix, keyed to an
 /// arbitrary fee payer (not necessarily `context.payer`).
 pub fn fee_suffix_for(program_id: Pubkey, fee_payer: Pubkey) -> Vec<AccountMeta> {
-    let (config_pda, _) = Pubkey::find_program_address(&[b"protocol_config"], &program_id);
-    let (record_pda, _) =
-        Pubkey::find_program_address(&[b"fee_record", fee_payer.as_ref()], &program_id);
-    let (shard_pda, _) = Pubkey::find_program_address(&[b"treasury_shard", &[0u8]], &program_id);
+    let (config_pda, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
+    let (record_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::FEE_RECORD, fee_payer.as_ref()],
+        &program_id,
+    );
+    let (shard_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::TREASURY_SHARD, &[0u8]],
+        &program_id,
+    );
 
     vec![
         AccountMeta::new_readonly(config_pda, false),
@@ -222,7 +233,8 @@ pub fn assert_custom_error(
 
 /// Read the raw `ProtocolConfig` bytes.
 pub fn read_config(svm: &LiteSVM, program_id: Pubkey) -> Vec<u8> {
-    let (config_pda, _) = Pubkey::find_program_address(&[b"protocol_config"], &program_id);
+    let (config_pda, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
     svm.get_account(&config_pda)
         .expect("ProtocolConfig account missing")
         .data
@@ -272,12 +284,20 @@ pub fn create_ed25519_wallet(context: &mut TestContext, vault_lamports: u64) -> 
     let user_seed = rand::random::<[u8; 32]>();
     let owner = Keypair::new();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     let (owner_auth_pda, owner_bump) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), owner.pubkey().as_ref()],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            owner.pubkey().as_ref(),
+        ],
         &context.program_id,
     );
 
@@ -407,7 +427,7 @@ pub fn create_session_with_actions(
 pub fn session_pda_for(program_id: Pubkey, wallet: &WalletFixture, session: &Keypair) -> Pubkey {
     Pubkey::find_program_address(
         &[
-            b"session",
+            lazorkit_program::seeds::SESSION,
             wallet.wallet_pda.as_ref(),
             session.pubkey().as_ref(),
         ],
@@ -613,9 +633,13 @@ fn load_program(svm: &mut LiteSVM) -> Pubkey {
 }
 
 fn initialize_protocol(svm: &mut LiteSVM, payer: &Keypair, program_id: Pubkey) {
-    let (config_pda, _) = Pubkey::find_program_address(&[b"protocol_config"], &program_id);
+    let (config_pda, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
     let shard_id = [0u8];
-    let (shard_pda, _) = Pubkey::find_program_address(&[b"treasury_shard", &shard_id], &program_id);
+    let (shard_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::TREASURY_SHARD, &shard_id],
+        &program_id,
+    );
 
     let mut init_data = vec![10u8];
     init_data.extend_from_slice(payer.pubkey().as_ref()); // admin
@@ -661,14 +685,22 @@ fn send_single_ix(svm: &mut LiteSVM, payer: &Keypair, ix: Instruction, signers: 
 }
 
 pub fn protocol_fee_account_metas(context: &TestContext) -> Vec<AccountMeta> {
-    let (config_pda, _) = Pubkey::find_program_address(&[b"protocol_config"], &context.program_id);
+    let (config_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::PROTOCOL_CONFIG],
+        &context.program_id,
+    );
     let (record_pda, _) = Pubkey::find_program_address(
-        &[b"fee_record", context.payer.pubkey().as_ref()],
+        &[
+            lazorkit_program::seeds::FEE_RECORD,
+            context.payer.pubkey().as_ref(),
+        ],
         &context.program_id,
     );
     let shard_id = [0u8];
-    let (shard_pda, _) =
-        Pubkey::find_program_address(&[b"treasury_shard", &shard_id], &context.program_id);
+    let (shard_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::TREASURY_SHARD, &shard_id],
+        &context.program_id,
+    );
 
     vec![
         AccountMeta::new_readonly(config_pda, false),

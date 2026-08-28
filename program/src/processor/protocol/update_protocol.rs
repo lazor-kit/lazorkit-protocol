@@ -2,10 +2,7 @@ use pinocchio::{
     account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
 };
 
-use crate::{
-    error::ProtocolError,
-    state::{protocol_config::ProtocolConfig, AccountDiscriminator},
-};
+use crate::{error::ProtocolError, state::protocol_config::ProtocolConfig};
 
 /// Processes the `UpdateProtocol` instruction.
 ///
@@ -51,11 +48,7 @@ pub fn process(
     }
 
     let data = config_pda.try_borrow_data()?;
-    if data.len() < core::mem::size_of::<ProtocolConfig>()
-        || data[0] != AccountDiscriminator::ProtocolConfig as u8
-    {
-        return Err(ProtocolError::InvalidProtocolAdmin.into());
-    }
+    ProtocolConfig::check(&data).map_err(|_| ProtocolError::InvalidProtocolAdmin)?;
     let config = unsafe { &*(data.as_ptr() as *const ProtocolConfig) };
     if admin.key() != &config.admin {
         return Err(ProtocolError::InvalidProtocolAdmin.into());
