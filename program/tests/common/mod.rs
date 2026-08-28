@@ -675,14 +675,16 @@ pub fn setup_test() -> TestContext {
     }
 }
 
-fn load_program(svm: &mut LiteSVM) -> Pubkey {
-    // LazorKit program ID (deterministic for tests)
-    let program_id = Pubkey::new_unique();
+/// The devnet id compiled into the `devnet`-featured binary. The program now
+/// refuses to run anywhere else (M-2), so tests cannot load it at a random
+/// address the way they used to.
+pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS");
 
-    svm.add_program_from_file(program_id, sbf_artifact())
+fn load_program(svm: &mut LiteSVM) -> Pubkey {
+    svm.add_program_from_file(PROGRAM_ID, sbf_artifact())
         .expect("Failed to load program");
 
-    program_id
+    PROGRAM_ID
 }
 
 /// Locate the SBF artifact and refuse to run against a stale one.
@@ -695,6 +697,10 @@ fn load_program(svm: &mut LiteSVM) -> Pubkey {
 /// old assertions and fails the new ones for reasons invisible in the diff. That
 /// has cost real debugging time three times in this branch, once presenting as a
 /// permission error and once as an unexplained zero field.
+pub fn sbf_artifact_path() -> std::path::PathBuf {
+    sbf_artifact()
+}
+
 fn sbf_artifact() -> std::path::PathBuf {
     use std::{path::PathBuf, time::SystemTime};
 

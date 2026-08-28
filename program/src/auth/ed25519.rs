@@ -3,6 +3,20 @@ use crate::state::authority::AuthorityAccountHeader;
 use assertions::sol_assert_bytes_eq;
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
 
+/// Authentication for an Ed25519 authority: the key must be among the
+/// transaction's signers.
+///
+/// M-1 flagged `auth_payload` and `signed_payload` as ignored here, which reads
+/// like a control that does nothing. It is the opposite: the runtime has already
+/// verified an Ed25519 signature over the entire transaction message — every
+/// instruction, every account key, and the privileges in the header — before
+/// this program ran. A signature over `signed_payload` would cover a strict
+/// subset of that. Verifying one would cost a precompile round trip to learn
+/// less than is already known, so the parameters are ignored deliberately.
+///
+/// The asymmetry with Secp256r1 is real and load-bearing: a passkey signs
+/// nothing at the transaction level, so for that path the payload is the *only*
+/// binding and every byte of it matters.
 pub struct Ed25519Authenticator;
 
 impl Authenticator for Ed25519Authenticator {

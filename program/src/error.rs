@@ -105,6 +105,12 @@ pub enum ProtocolError {
     /// `accept_protocol_admin` was called by an account that is not the pending
     /// admin, or no rotation is pending.
     NoPendingAdmin = 4016,
+    /// The binary is executing at an address other than the one compiled into
+    /// it. Every PDA this program derives uses its own id as the program id, so
+    /// a copy deployed elsewhere derives a disjoint address space — it cannot
+    /// touch real accounts, but it can mint look-alike ones at addresses a
+    /// client that trusts the wrong id would resolve.
+    WrongProgramAddress = 4017,
 }
 
 impl From<ProtocolError> for ProgramError {

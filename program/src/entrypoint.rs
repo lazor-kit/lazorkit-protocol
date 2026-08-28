@@ -26,6 +26,15 @@ pub fn process_instruction(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    // M-2. The cluster ID is compiled in (see `assertions`), but nothing checked
+    // that the binary is actually running at it. A copy deployed at another
+    // address derives an entirely separate PDA space, so it cannot reach real
+    // accounts — what it can do is mint look-alike wallets and authorities at
+    // addresses that look right to a client pointed at the wrong id.
+    if program_id != &assertions::ID {
+        return Err(ProtocolError::WrongProgramAddress.into());
+    }
+
     if instruction_data.is_empty() {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -301,7 +310,11 @@ fn try_collect_fee<'a>(
                     .checked_add(1)
                     .ok_or(ProgramError::ArithmeticOverflow)?;
             },
-            _ => unreachable!(),
+            // Unreachable: the caller already refused anything outside {0,4,7}
+            // when it picked the fee. A `unreachable!()` here would compile to a
+            // panic that costs code size to say nothing useful, and in BPF a
+            // panic and an error land in the same place anyway.
+            _ => return Err(ProgramError::InvalidInstructionData),
         }
     }
 

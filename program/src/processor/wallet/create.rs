@@ -122,6 +122,13 @@ pub fn process(
     let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. The payer's signature was only ever enforced as a side effect: the
+    // System Program demands it during the funding CPI. `initialize_pda_account`
+    // skips that CPI when the PDA already holds enough lamports — anyone can
+    // pre-fund a PDA — so on that path nothing checked it at all.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -298,7 +305,10 @@ pub fn process(
                 auth_account_data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
             }
         },
-        _ => unreachable!(),
+        // Validated to 0 or 1 well before here. An error rather than
+        // `unreachable!()` so a future edit that widens the parse cannot turn a
+        // missed arm into a BPF panic — which costs code size to report less.
+        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
 
     Ok(())

@@ -25,19 +25,10 @@ use crate::{error::ProtocolError, state::protocol_config::ProtocolConfig};
 /// decision from `config.admin`, so a substituted account is a substituted
 /// authorisation.
 fn load_config(program_id: &Pubkey, config_pda: &AccountInfo) -> Result<(), ProgramError> {
-    let (expected, _) =
-        pinocchio::pubkey::find_program_address(&[crate::seeds::PROTOCOL_CONFIG], program_id);
-    if config_pda.key() != &expected {
-        return Err(ProtocolError::InvalidProtocolAdmin.into());
-    }
-    if config_pda.owner() != program_id {
-        return Err(ProgramError::IllegalOwner);
-    }
+    ProtocolConfig::load(program_id, config_pda)?;
     if !config_pda.is_writable() {
         return Err(ProgramError::InvalidAccountData);
     }
-    let data = config_pda.try_borrow_data()?;
-    ProtocolConfig::check(&data).map_err(|_| ProtocolError::InvalidProtocolAdmin)?;
     Ok(())
 }
 

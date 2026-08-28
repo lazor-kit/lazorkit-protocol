@@ -36,8 +36,28 @@ pub enum ActionType {
     /// Maximum tokens per single execute per mint. Data: {mint: [u8;32], max: u64}
     TokenMaxPerTx = 6,
     /// Allow CPI only to this program. Repeatable. Data: {program_id: [u8;32]}
+    ///
+    /// M-7. This constrains the programs *this* instruction calls, and only
+    /// those. It says nothing about what those programs go on to call: a
+    /// whitelisted router that CPIs onward reaches every program the router can
+    /// reach, and the policy engine never sees those hops.
+    ///
+    /// That is a limit of where the check can stand, not an oversight — the
+    /// program list is read from the compact instructions, which describe one
+    /// level. What actually bounds a nested call is the value side of the
+    /// policy: the SOL and token limits are measured as vault deltas across the
+    /// whole Execute, so however deep the call graph goes, the amount that
+    /// leaves is still capped. Treat a program whitelist as "which entry points
+    /// may be used", never as "which programs may run".
+    ///
+    /// A `(program, discriminator)` pair would narrow the entry point further
+    /// but would not change any of the above.
     ProgramWhitelist = 10,
     /// Block CPI to this program. Repeatable. Data: {program_id: [u8;32]}
+    ///
+    /// Same one-level limit as [`Self::ProgramWhitelist`] — and more sharply, a
+    /// blacklist is trivially routed around by any whitelisted program that
+    /// forwards. Prefer a whitelist wherever the choice exists.
     ProgramBlacklist = 11,
 }
 

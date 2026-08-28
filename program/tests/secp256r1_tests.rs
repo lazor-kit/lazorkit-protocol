@@ -198,20 +198,10 @@ fn test_add_multiple_secp256r1_authorities() {
         args
     };
 
-    let data_payload = {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&add_auth_args);
-        payload.extend_from_slice(&credential_id_hash1);
-        payload.extend_from_slice(&pubkey_bytes1);
-        payload.push(rp_id.len() as u8);
-        payload.extend_from_slice(rp_id);
-        // `[policy_len u16][policy]`, inside the signed region. Empty here: an
-        // Owner is unbounded, and only a Delegate is required to carry one.
-        payload.extend_from_slice(&0u16.to_le_bytes());
-        payload
-    };
-
-    let signature = owner_keypair.sign_message(&data_payload);
+    // No trailing signature: the authorizer here is Ed25519, and an Ed25519
+    // authority authenticates by being among the transaction's signers. A
+    // detached signature over the payload would be transmitted and never read
+    // (M-1).
     let mut add_auth_ix_data = vec![1]; // AddAuthority (discriminator 1)
     add_auth_ix_data.extend_from_slice(&add_auth_args);
     add_auth_ix_data.extend_from_slice(&credential_id_hash1);
@@ -219,7 +209,6 @@ fn test_add_multiple_secp256r1_authorities() {
     add_auth_ix_data.push(rp_id.len() as u8);
     add_auth_ix_data.extend_from_slice(rp_id);
     add_auth_ix_data.extend_from_slice(&0u16.to_le_bytes());
-    add_auth_ix_data.extend_from_slice(signature.as_ref());
 
     let add_auth_ix1 = Instruction {
         program_id: context.program_id,
@@ -273,20 +262,10 @@ fn test_add_multiple_secp256r1_authorities() {
         &context.program_id,
     );
 
-    let data_payload = {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&add_auth_args);
-        payload.extend_from_slice(&credential_id_hash2);
-        payload.extend_from_slice(&pubkey_bytes2);
-        payload.push(rp_id.len() as u8);
-        payload.extend_from_slice(rp_id);
-        // `[policy_len u16][policy]`, inside the signed region. Empty here: an
-        // Owner is unbounded, and only a Delegate is required to carry one.
-        payload.extend_from_slice(&0u16.to_le_bytes());
-        payload
-    };
-
-    let signature = owner_keypair.sign_message(&data_payload);
+    // No trailing signature: the authorizer here is Ed25519, and an Ed25519
+    // authority authenticates by being among the transaction's signers. A
+    // detached signature over the payload would be transmitted and never read
+    // (M-1).
     let mut add_auth_ix_data = vec![1]; // AddAuthority (discriminator 1)
     add_auth_ix_data.extend_from_slice(&add_auth_args);
     add_auth_ix_data.extend_from_slice(&credential_id_hash2);
@@ -294,7 +273,6 @@ fn test_add_multiple_secp256r1_authorities() {
     add_auth_ix_data.push(rp_id.len() as u8);
     add_auth_ix_data.extend_from_slice(rp_id);
     add_auth_ix_data.extend_from_slice(&0u16.to_le_bytes());
-    add_auth_ix_data.extend_from_slice(signature.as_ref());
 
     let add_auth_ix2 = Instruction {
         program_id: context.program_id,

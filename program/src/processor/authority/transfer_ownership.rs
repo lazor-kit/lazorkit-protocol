@@ -15,6 +15,7 @@ use crate::{
     },
     error::AuthError,
     state::{authority::AuthorityAccountHeader, AccountDiscriminator},
+    utils::is_all_zero,
 };
 
 /// Processes the `TransferOwnership` instruction.
@@ -86,6 +87,15 @@ pub fn process(
                 return Err(ProgramError::InvalidInstructionData);
             }
             let (hash, rest_after_hash) = rest.split_at(32);
+            // M-5. `id_seed` is checked non-zero below, which for Ed25519 *is*
+            // the pubkey — but for Secp256r1 the seed is the credential hash and
+            // the 33-byte compressed key rides along unchecked. An all-zero key
+            // is not a valid curve point, so it would be stored as an authority
+            // that can never authenticate: a rank slot nobody can use and, if it
+            // were the Owner, a wallet nobody can manage.
+            if is_all_zero(&rest_after_hash[..33]) {
+                return Err(ProgramError::InvalidAccountData);
+            }
             let rp_id_len = rest_after_hash[33] as usize;
             if rp_id_len == 0 || rp_id_len > 253 {
                 return Err(ProgramError::InvalidInstructionData);
@@ -116,6 +126,13 @@ pub fn process(
     let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. The payer's signature was only ever enforced as a side effect: the
+    // System Program demands it during the funding CPI. `initialize_pda_account`
+    // skips that CPI when the PDA already holds enough lamports — anyone can
+    // pre-fund a PDA — so on that path nothing checked it at all.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -296,7 +313,10 @@ pub fn process(
                 data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
             }
         },
-        _ => unreachable!(),
+        // Validated to 0 or 1 well before here. An error rather than
+        // `unreachable!()` so a future edit that widens the parse cannot turn a
+        // missed arm into a BPF panic — which costs code size to report less.
+        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
 
     let current_lamports = unsafe { *current_owner.borrow_mut_lamports_unchecked() };

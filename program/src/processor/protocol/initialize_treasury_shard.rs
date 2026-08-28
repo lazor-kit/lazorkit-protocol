@@ -43,6 +43,13 @@ pub fn process(
     let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. The payer's signature was only ever enforced as a side effect: the
+    // System Program demands it during the funding CPI. `initialize_pda_account`
+    // skips that CPI when the PDA already holds enough lamports — anyone can
+    // pre-fund a PDA — so on that path nothing checked it at all.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     let config_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -63,15 +70,12 @@ pub fn process(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Verify config_pda is owned by this program before reading admin
-    // and num_shards from its data for authorization. Defense-in-depth.
-    if config_pda.owner() != program_id {
-        return Err(ProgramError::IllegalOwner);
-    }
+    // Pin the address, the owner and the header before reading admin and
+    // num_shards for an authorization decision.
+    ProtocolConfig::load(program_id, config_pda)?;
 
     // Read config and verify admin + shard_id in range
     let config_data = config_pda.try_borrow_data()?;
-    ProtocolConfig::check(&config_data).map_err(|_| ProtocolError::InvalidProtocolAdmin)?;
     let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
     if admin.key() != &config.admin {
         return Err(ProtocolError::InvalidProtocolAdmin.into());
