@@ -355,6 +355,12 @@ fn test_revoke_session_spender_fails() {
         add_data.push(2); // Spender role
         add_data.extend_from_slice(&[0; 6]);
         add_data.extend_from_slice(spender_kp.pubkey().as_ref());
+        // A Delegate must carry a policy — rank says what it may manage, the
+        // policy says what it may spend, and a Delegate manages nothing. The
+        // limit is irrelevant here; the test only needs the authority to exist.
+        let policy = action_sol_limit(1_000_000);
+        add_data.extend_from_slice(&(policy.len() as u16).to_le_bytes());
+        add_data.extend_from_slice(&policy);
 
         let ix = Instruction {
             program_id: context.program_id,

@@ -1,16 +1,22 @@
-//! Reproduction for finding H-2 — `Execute` never reads the authority's
-//! `role`, so a Spender has exactly the same power over the vault as an Owner.
+//! H-2 — `Execute` never read the authority's `role`, so a "Spender" had
+//! exactly the same power over the vault as an Owner.
 //!
-//! The permission model advertises three tiers (Owner 0, Admin 1, Spender 2).
-//! `role` is checked in `AddAuthority`, `RemoveAuthority`, `CreateSession`,
-//! `Authorize` and `RevokeSession` — but the Authority branch of
-//! `execute::immediate::process` reads `discriminator`, `wallet` and
-//! `authority_type` and then authenticates. `role` is never consulted, and no
-//! spending limit is attached to it either; limits only exist on sessions.
+//! The reproduction showed a Spender emptying a vault in two instructions while
+//! still being correctly blocked from `AddAuthority` and `CreateSession`. That
+//! asymmetry was the finding: `role` gated five management instructions and
+//! nothing else, because a spending limit for an authority did not exist. It
+//! only existed for sessions, as an action buffer.
 //!
-//! `h2_a` is the control: it shows `role` genuinely gates the other
-//! instructions, so the gap is specific to Execute rather than the role field
-//! being ignored everywhere.
+//! So the fix is not an `if` in Execute. It is splitting the one field that was
+//! doing two jobs:
+//!
+//!   - **rank** — Owner / Admin / Delegate — governs management only
+//!   - **policy** — an action buffer — governs spending, and any authority may
+//!     carry one
+//!
+//! A Delegate must now carry a policy (3033), which makes the tier's name true:
+//! it manages nothing and spends only what its policy allows. The same engine
+//! that has always bounded sessions bounds it, through the same code path.
 //!
 //! Run:  cargo test --features devnet -p lazorkit-program --test repro_h2_spender_role
 
@@ -26,8 +32,17 @@ use solana_sdk::{
 
 /// `AuthError::PermissionDenied`
 const ERR_PERMISSION_DENIED: u32 = 3002;
+/// `AuthError::ActionSolLimitExceeded`
+const ERR_SOL_LIMIT_EXCEEDED: u32 = 3024;
+/// `AuthError::DelegateRequiresPolicy`
+const ERR_DELEGATE_REQUIRES_POLICY: u32 = 3033;
+/// `AuthError::PolicyBearingAuthorityCannotDelegate`
+const ERR_POLICY_BEARING_CANNOT_DELEGATE: u32 = 3034;
 
-/// Add an Ed25519 authority with the given role, authorized by the wallet owner.
+const RANK_ADMIN: u8 = 1;
+const RANK_DELEGATE: u8 = 2;
+
+/// Add an Ed25519 authority, optionally carrying a policy.
 ///
 /// Large `Err` variant is litesvm's `FailedTransactionMetadata` — see the note
 /// on `common::try_send`.
@@ -35,8 +50,11 @@ const ERR_PERMISSION_DENIED: u32 = 3002;
 fn add_ed25519_authority(
     context: &mut TestContext,
     wallet: &WalletFixture,
+    authorizer_pda: Pubkey,
+    authorizer_key: &Keypair,
     new_key: &Keypair,
-    new_role: u8,
+    rank: u8,
+    policy: &[u8],
 ) -> Result<Pubkey, litesvm::types::FailedTransactionMetadata> {
     let (new_auth_pda, _) = Pubkey::find_program_address(
         &[
@@ -49,27 +67,48 @@ fn add_ed25519_authority(
 
     let mut data = vec![1u8]; // AddAuthority
     data.push(0); // authority_type = Ed25519
-    data.push(new_role);
+    data.push(rank);
     data.extend_from_slice(&[0u8; 6]); // padding
     data.extend_from_slice(new_key.pubkey().as_ref());
+    // `[policy_len u16][policy]` sits between the key material and the auth
+    // payload — the same shape CreateSession uses for its actions, and inside
+    // the signed region for the same reason.
+    data.extend_from_slice(&(policy.len() as u16).to_le_bytes());
+    data.extend_from_slice(policy);
 
     let ix = Instruction {
         program_id: context.program_id,
         accounts: vec![
             AccountMeta::new(context.payer.pubkey(), true),
             AccountMeta::new_readonly(wallet.wallet_pda, false),
-            AccountMeta::new(wallet.owner_auth_pda, false),
+            AccountMeta::new(authorizer_pda, false),
             AccountMeta::new(new_auth_pda, false),
             AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
             AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-            AccountMeta::new_readonly(wallet.owner.pubkey(), true),
+            AccountMeta::new_readonly(authorizer_key.pubkey(), true),
         ],
         data,
     };
 
     let payer = context.payer.insecure_clone();
-    try_send(&mut context.svm, &payer, &[ix], &[&payer, &wallet.owner])?;
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, authorizer_key])?;
     Ok(new_auth_pda)
+}
+
+/// Convenience: add an authority authorized by the wallet's Owner.
+#[allow(clippy::result_large_err)]
+fn owner_adds(
+    context: &mut TestContext,
+    wallet: &WalletFixture,
+    new_key: &Keypair,
+    rank: u8,
+    policy: &[u8],
+) -> Result<Pubkey, litesvm::types::FailedTransactionMetadata> {
+    let owner_pda = wallet.owner_auth_pda;
+    let owner_key = wallet.owner.insecure_clone();
+    add_ed25519_authority(
+        context, wallet, owner_pda, &owner_key, new_key, rank, policy,
+    )
 }
 
 /// `Execute` authorized by an arbitrary authority PDA + its Ed25519 signer.
@@ -107,59 +146,55 @@ fn lamports_of(context: &TestContext, key: &Pubkey) -> u64 {
         .unwrap_or(0)
 }
 
+/// A policy allowing SOL spending up to `limit`, through the System Program.
+fn spend_limit_policy(limit: u64) -> Vec<u8> {
+    let mut policy = action_sol_limit(limit);
+    policy.extend_from_slice(&action_program_whitelist(solana_sdk::system_program::id()));
+    policy
+}
+
 // ─────────────────────────────────────────────────────────────────────────
-// H-2a — CONTROL: `role` is enforced everywhere except Execute
+// H-2a — CONTROL: rank still gates the management instructions
 // ─────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn h2_a_control_spender_is_blocked_from_privileged_instructions() {
+fn h2_a_control_delegate_is_blocked_from_privileged_instructions() {
     let mut context = setup_test();
     let wallet = create_ed25519_wallet(&mut context, 500_000_000);
 
-    let spender = Keypair::new();
-    let spender_auth =
-        add_ed25519_authority(&mut context, &wallet, &spender, 2).expect("Owner may add a Spender");
+    let delegate = Keypair::new();
+    let delegate_auth = owner_adds(
+        &mut context,
+        &wallet,
+        &delegate,
+        RANK_DELEGATE,
+        &spend_limit_policy(1_000_000),
+    )
+    .expect("Owner may add a Delegate that carries a policy");
 
     let payer = context.payer.insecure_clone();
 
-    // A Spender cannot add authorities.
+    // A Delegate cannot add authorities — blocked on rank, before the
+    // policy-bearing rule is even reached.
     {
         let victim = Keypair::new();
-        let (victim_pda, _) = Pubkey::find_program_address(
-            &[
-                lazorkit_program::seeds::AUTHORITY,
-                wallet.wallet_pda.as_ref(),
-                victim.pubkey().as_ref(),
-            ],
-            &context.program_id,
+        let result = add_ed25519_authority(
+            &mut context,
+            &wallet,
+            delegate_auth,
+            &delegate,
+            &victim,
+            RANK_DELEGATE,
+            &spend_limit_policy(1_000_000),
         );
-
-        let mut data = vec![1u8, 0, 2];
-        data.extend_from_slice(&[0u8; 6]);
-        data.extend_from_slice(victim.pubkey().as_ref());
-
-        let ix = Instruction {
-            program_id: context.program_id,
-            accounts: vec![
-                AccountMeta::new(payer.pubkey(), true),
-                AccountMeta::new_readonly(wallet.wallet_pda, false),
-                AccountMeta::new(spender_auth, false), // Spender as the authorizer
-                AccountMeta::new(victim_pda, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-                AccountMeta::new_readonly(spender.pubkey(), true),
-            ],
-            data,
-        };
-
         assert_custom_error(
-            try_send(&mut context.svm, &payer, &[ix], &[&payer, &spender]),
+            result.map(|_| unreachable!()),
             ERR_PERMISSION_DENIED,
-            "H-2a: Spender must not be able to add authorities (manage.rs:230)",
+            "H-2a: a Delegate must not be able to add authorities",
         );
     }
 
-    // A Spender cannot create sessions.
+    // A Delegate cannot create sessions.
     {
         advance(&mut context.svm);
         let session = Keypair::new();
@@ -183,144 +218,291 @@ fn h2_a_control_spender_is_blocked_from_privileged_instructions() {
             accounts: vec![
                 AccountMeta::new(payer.pubkey(), true),
                 AccountMeta::new_readonly(wallet.wallet_pda, false),
-                AccountMeta::new(spender_auth, false),
+                AccountMeta::new(delegate_auth, false),
                 AccountMeta::new(session_pda, false),
                 AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
                 AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
-                AccountMeta::new_readonly(spender.pubkey(), true),
+                AccountMeta::new_readonly(delegate.pubkey(), true),
             ],
             data,
         };
 
         assert_custom_error(
-            try_send(&mut context.svm, &payer, &[ix], &[&payer, &spender]),
+            try_send(&mut context.svm, &payer, &[ix], &[&payer, &delegate]),
             ERR_PERMISSION_DENIED,
-            "H-2a: Spender must not be able to create sessions (session/create.rs:199)",
+            "H-2a: a Delegate must not be able to create sessions",
         );
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// H-2b — but Execute does not look at `role` at all
-// ─────────────────────────────────────────────────────────────────────────
-
+/// The escalation rule exists for a bounded **Admin**, not for a Delegate — a
+/// Delegate is already stopped by rank. Without it, an Admin capped at 0.001 SOL
+/// could mint a Delegate capped at 100, and the cap on the Admin would mean
+/// nothing.
 #[test]
-fn h2_b_spender_can_drain_the_whole_vault() {
+fn h2_a_a_bounded_admin_cannot_mint_authorities() {
     let mut context = setup_test();
-    let vault_funding = 500_000_000; // 0.5 SOL
-    let wallet = create_ed25519_wallet(&mut context, vault_funding);
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
 
-    let spender = Keypair::new();
-    let spender_auth =
-        add_ed25519_authority(&mut context, &wallet, &spender, 2).expect("Owner may add a Spender");
+    // An Admin that is itself bounded. Rank alone would let it add a Delegate.
+    let admin = Keypair::new();
+    let admin_auth = owner_adds(
+        &mut context,
+        &wallet,
+        &admin,
+        RANK_ADMIN,
+        &spend_limit_policy(1_000_000),
+    )
+    .expect("an Admin may carry a policy");
 
-    // Confirm the account really was created with role = Spender and not
-    // silently downgraded — byte 2 of AuthorityAccountHeader is `role`.
-    let header = context
-        .svm
-        .get_account(&spender_auth)
-        .expect("spender authority exists")
-        .data;
-    assert_eq!(header[2], 2, "authority was stored with role = Spender");
-
-    let recipient = Pubkey::new_unique();
-    let payer = context.payer.insecure_clone();
-
-    // "Spender" implies a bounded allowance. There is none: this moves 80% of
-    // the vault in a single instruction, and nothing in Execute objects.
-    let stolen = 400_000_000;
-    let ix = execute_as(&context, &wallet, spender_auth, &spender, recipient, stolen);
-
-    try_send(&mut context.svm, &payer, &[ix], &[&payer, &spender])
-        .expect("H-2b: Execute accepted a Spender authority with no limit at all");
-
-    assert_eq!(
-        lamports_of(&context, &recipient),
-        stolen,
-        "H-2b: a Spender moved {stolen} lamports with no cap, no session, no action buffer"
-    );
-    assert_eq!(
-        lamports_of(&context, &wallet.vault_pda),
-        vault_funding - stolen,
-        "H-2b: straight out of the vault"
-    );
-
-    // And it can keep going until the vault is empty.
     advance(&mut context.svm);
-    let rest = lamports_of(&context, &wallet.vault_pda);
-    let ix = execute_as(&context, &wallet, spender_auth, &spender, recipient, rest);
-    try_send(&mut context.svm, &payer, &[ix], &[&payer, &spender])
-        .expect("H-2b: nothing rate-limits a Spender");
-
-    assert_eq!(
-        lamports_of(&context, &wallet.vault_pda),
-        0,
-        "H-2b: vault emptied by an authority the model calls 'Spender'"
+    let victim = Keypair::new();
+    let result = add_ed25519_authority(
+        &mut context,
+        &wallet,
+        admin_auth,
+        &admin,
+        &victim,
+        RANK_DELEGATE,
+        &spend_limit_policy(100_000_000_000),
     );
+    assert_custom_error(
+        result.map(|_| unreachable!()),
+        ERR_POLICY_BEARING_CANNOT_DELEGATE,
+        "H-2a: a bounded Admin must not be able to grant a larger allowance",
+    );
+
+    // An unbounded Admin still may — the rule is about the granter carrying a
+    // policy, not about rank.
+    advance(&mut context.svm);
+    let plain_admin = Keypair::new();
+    let plain_admin_auth = owner_adds(&mut context, &wallet, &plain_admin, RANK_ADMIN, &[])
+        .expect("add unbounded Admin");
+    advance(&mut context.svm);
+    let ok = Keypair::new();
+    add_ed25519_authority(
+        &mut context,
+        &wallet,
+        plain_admin_auth,
+        &plain_admin,
+        &ok,
+        RANK_DELEGATE,
+        &spend_limit_policy(1_000_000),
+    )
+    .expect("H-2a: an unbounded Admin may still mint a Delegate");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// H-2c — the fix, stated as a test
+// H-2b — the hole: Execute ignored rank entirely
 // ─────────────────────────────────────────────────────────────────────────
 
-/// After the Authority branch of `execute::immediate::process` rejects
-/// `authority_header.role > 1`, a Spender can no longer execute. Owner and
-/// Admin still can.
+/// Kept as the record of what the hole actually did, and runnable against a
+/// pre-fix binary with `--ignored`. It cannot pass now: a Delegate without a
+/// policy no longer exists to be created.
 #[test]
-#[ignore = "enable together with the Execute role check; fails until then"]
-fn h2_c_spender_should_not_be_able_to_execute() {
+#[ignore = "reproduces pre-fix behaviour; a policy-less Delegate is now rejected at creation"]
+fn h2_b_spender_can_drain_the_whole_vault() {
     let mut context = setup_test();
-    let vault_funding = 500_000_000;
-    let wallet = create_ed25519_wallet(&mut context, vault_funding);
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
 
     let spender = Keypair::new();
-    let spender_auth =
-        add_ed25519_authority(&mut context, &wallet, &spender, 2).expect("add Spender");
-
-    let admin = Keypair::new();
-    let admin_auth = add_ed25519_authority(&mut context, &wallet, &admin, 1).expect("add Admin");
+    let spender_auth = owner_adds(&mut context, &wallet, &spender, RANK_DELEGATE, &[])
+        .expect("pre-fix: an unbounded Spender could be created");
 
     let recipient = Pubkey::new_unique();
     let payer = context.payer.insecure_clone();
-
-    let spender_ix = execute_as(
+    let ix = execute_as(
         &context,
         &wallet,
         spender_auth,
         &spender,
         recipient,
-        1_000_000,
+        400_000_000,
+    );
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, &spender])
+        .expect("pre-fix: Execute accepted a Spender with no limit at all");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// H-2c — a Delegate is bounded exactly as an equivalent session is
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn h2_c_a_policy_less_delegate_cannot_be_created() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
+
+    let spender = Keypair::new();
+    let result = owner_adds(&mut context, &wallet, &spender, RANK_DELEGATE, &[]);
+    assert_custom_error(
+        result.map(|_| unreachable!()),
+        ERR_DELEGATE_REQUIRES_POLICY,
+        "H-2c: the unbounded Spender of the reproduction can no longer be minted",
+    );
+
+    // Admin is unaffected — it is a management tier, and an unbounded Admin is
+    // a deliberate choice rather than a misleading name.
+    advance(&mut context.svm);
+    let admin = Keypair::new();
+    owner_adds(&mut context, &wallet, &admin, RANK_ADMIN, &[])
+        .expect("H-2c: an Admin without a policy is still legal");
+}
+
+#[test]
+fn h2_c_a_delegate_is_bounded_by_its_policy() {
+    let mut context = setup_test();
+    let vault_funding = 500_000_000;
+    let wallet = create_ed25519_wallet(&mut context, vault_funding);
+
+    let allowance = 1_000_000u64;
+    let delegate = Keypair::new();
+    let delegate_auth = owner_adds(
+        &mut context,
+        &wallet,
+        &delegate,
+        RANK_DELEGATE,
+        &spend_limit_policy(allowance),
+    )
+    .expect("add Delegate");
+
+    // The policy is stored on the authority, after its key material.
+    let stored = context
+        .svm
+        .get_account(&delegate_auth)
+        .expect("delegate authority exists")
+        .data;
+    assert_eq!(stored[2], RANK_DELEGATE, "stored with rank Delegate");
+    let policy_len = u16::from_le_bytes(stored[12..14].try_into().unwrap()) as usize;
+    assert!(policy_len > 0, "policy_len recorded in the header");
+    assert_eq!(
+        stored.len(),
+        80 + policy_len,
+        "an Ed25519 authority is 80 bytes plus its policy"
+    );
+
+    let recipient = Pubkey::new_unique();
+    let payer = context.payer.insecure_clone();
+
+    // Inside the allowance: permitted.
+    let ix = execute_as(
+        &context,
+        &wallet,
+        delegate_auth,
+        &delegate,
+        recipient,
+        500_000,
+    );
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, &delegate])
+        .expect("H-2c: spending inside the allowance must work");
+    assert_eq!(lamports_of(&context, &recipient), 500_000);
+
+    // Beyond it: refused, with the same error a session would raise. This is the
+    // property the whole change exists to establish — the drain in the
+    // reproduction is now bounded by the number the wallet owner chose.
+    advance(&mut context.svm);
+    let ix = execute_as(
+        &context,
+        &wallet,
+        delegate_auth,
+        &delegate,
+        recipient,
+        400_000_000,
     );
     assert_custom_error(
-        try_send(&mut context.svm, &payer, &[spender_ix], &[&payer, &spender]),
-        ERR_PERMISSION_DENIED,
-        "H-2c: Spender must not be able to Execute",
+        try_send(&mut context.svm, &payer, &[ix], &[&payer, &delegate]),
+        ERR_SOL_LIMIT_EXCEEDED,
+        "H-2c: a Delegate cannot spend past its policy",
     );
-    assert_eq!(lamports_of(&context, &recipient), 0, "H-2c: nothing moved");
 
-    // Admin must still work — the fix must not break the tier above.
-    advance(&mut context.svm);
-    let admin_ix = execute_as(&context, &wallet, admin_auth, &admin, recipient, 1_000_000);
-    try_send(&mut context.svm, &payer, &[admin_ix], &[&payer, &admin])
-        .expect("H-2c: Admin must still be able to Execute");
+    assert_eq!(
+        lamports_of(&context, &wallet.vault_pda),
+        vault_funding - 500_000,
+        "H-2c: only the permitted amount ever left the vault"
+    );
+}
 
-    // And so must Owner.
+/// The limit is cumulative across transactions, not per transaction — the same
+/// semantics `SolLimit` has always had for sessions, now reached through the
+/// authority path.
+#[test]
+fn h2_c_a_delegate_policy_depletes_across_transactions() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
+
+    let delegate = Keypair::new();
+    let delegate_auth = owner_adds(
+        &mut context,
+        &wallet,
+        &delegate,
+        RANK_DELEGATE,
+        &spend_limit_policy(1_000_000),
+    )
+    .expect("add Delegate");
+
+    let recipient = Pubkey::new_unique();
+    let payer = context.payer.insecure_clone();
+
+    for _ in 0..2 {
+        advance(&mut context.svm);
+        let ix = execute_as(
+            &context,
+            &wallet,
+            delegate_auth,
+            &delegate,
+            recipient,
+            500_000,
+        );
+        try_send(&mut context.svm, &payer, &[ix], &[&payer, &delegate])
+            .expect("two withdrawals exactly exhaust the allowance");
+    }
+    assert_eq!(lamports_of(&context, &recipient), 1_000_000);
+
+    // The third exceeds what is left, not what a single transaction may spend.
     advance(&mut context.svm);
-    let owner_ix = execute_as(
+    let ix = execute_as(&context, &wallet, delegate_auth, &delegate, recipient, 1);
+    assert_custom_error(
+        try_send(&mut context.svm, &payer, &[ix], &[&payer, &delegate]),
+        ERR_SOL_LIMIT_EXCEEDED,
+        "H-2c: the allowance is cumulative and now spent",
+    );
+}
+
+/// Owner and Admin keep unbounded Execute — the fix bounds the tier that was
+/// misnamed, it does not demote the tiers above it.
+#[test]
+fn h2_c_owner_and_admin_still_execute_without_a_policy() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
+
+    let admin = Keypair::new();
+    let admin_auth = owner_adds(&mut context, &wallet, &admin, RANK_ADMIN, &[]).expect("add Admin");
+
+    let recipient = Pubkey::new_unique();
+    let payer = context.payer.insecure_clone();
+
+    advance(&mut context.svm);
+    let ix = execute_as(
+        &context,
+        &wallet,
+        admin_auth,
+        &admin,
+        recipient,
+        100_000_000,
+    );
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, &admin])
+        .expect("H-2c: an Admin executes without a policy");
+
+    advance(&mut context.svm);
+    let ix = execute_as(
         &context,
         &wallet,
         wallet.owner_auth_pda,
         &wallet.owner,
         recipient,
-        1_000_000,
+        100_000_000,
     );
-    try_send(
-        &mut context.svm,
-        &payer,
-        &[owner_ix],
-        &[&payer, &wallet.owner],
-    )
-    .expect("H-2c: Owner must still be able to Execute");
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, &wallet.owner])
+        .expect("H-2c: so does the Owner");
 
-    assert_eq!(lamports_of(&context, &recipient), 2_000_000);
+    assert_eq!(lamports_of(&context, &recipient), 200_000_000);
 }

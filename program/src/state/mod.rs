@@ -2,6 +2,7 @@ pub mod action;
 pub mod authority;
 pub mod deferred;
 pub mod integrator_record;
+pub mod policy;
 pub mod protocol_config;
 pub mod session;
 pub mod treasury_shard;

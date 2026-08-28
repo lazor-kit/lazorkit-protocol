@@ -144,6 +144,7 @@ export interface PreparedAddAuthority extends PreparedBase {
     newAuthorityPda: Address;
     newType: number;
     newRole: number;
+    policy?: Uint8Array;
     credentialOrPubkey: Uint8Array;
     secp256r1Pubkey?: Uint8Array;
     rpId?: string;
@@ -628,6 +629,9 @@ export class LazorKit {
     adminSigner: AdminSigner;
     newAuthority: CreateWalletOwner;
     role: number;
+    /** Action buffer bounding what this authority may spend. Required for
+     *  ROLE_DELEGATE; optional for Admin. */
+    policy?: Uint8Array;
   }): Promise<{ instructions: Instruction[]; newAuthorityPda: Address }> {
     assertAddAuthorityRole(params.role);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
@@ -639,6 +643,7 @@ export class LazorKit {
     if (s.type === 'ed25519') {
       const adminAuthorityPda = await this.resolveEd25519AuthorityPda(s, params.walletPda);
       const ix = createAddAuthorityIx({
+      policy: params.policy,
         payer: params.payer,
         walletPda: params.walletPda,
         adminAuthorityPda,
@@ -671,6 +676,9 @@ export class LazorKit {
     secp256r1: Secp256r1Params;
     newAuthority: CreateWalletOwner;
     role: number;
+    /** Action buffer bounding what this authority may spend. Required for
+     *  ROLE_DELEGATE; optional for Admin. */
+    policy?: Uint8Array;
   }): Promise<PreparedAddAuthority> {
     assertAddAuthorityRole(params.role);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
@@ -688,6 +696,7 @@ export class LazorKit {
       credentialOrPubkey,
       secp256r1Pubkey,
       rpId,
+      params.policy,
     );
     const signedPayload = concatBytes([
       dataPayload,
@@ -715,6 +724,7 @@ export class LazorKit {
         newAuthorityPda,
         newType,
         newRole: params.role,
+        policy: params.policy,
         credentialOrPubkey,
         secp256r1Pubkey,
         rpId,
@@ -730,6 +740,7 @@ export class LazorKit {
     const i = prepared._internal;
     const { authPayload, precompileIx } = finalizeSecp256r1(i.signing, response);
     const ix = createAddAuthorityIx({
+      policy: i.policy,
       payer: i.payer,
       walletPda: i.walletPda,
       adminAuthorityPda: i.adminAuthorityPda,

@@ -23,6 +23,7 @@ import {
   ed25519,
 } from '@lazorkit/sdk';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -82,6 +83,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(adminSigner.address, adminAuthPda),
       newAuthority: { type: 'ed25519', publicKey: spenderSigner.address },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     spenderAuthPda = addSpenderResult.newAuthorityPda;
     await sendTx(ctx, addSpenderResult.instructions, [adminSigner]);
@@ -95,6 +97,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderSigner.address, spenderAuthPda),
       newAuthority: { type: 'ed25519', publicKey: newSigner.address },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     await sendTxExpectError(ctx, instructions, [spenderSigner], 3002);
   });
@@ -243,6 +246,7 @@ describe('Permission Boundaries', () => {
           rpId: secpSpenderKey.rpId,
         },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
       const addResult = client.finalizeAddAuthority(prepared, response);
@@ -262,6 +266,7 @@ describe('Permission Boundaries', () => {
         },
         newAuthority: { type: 'ed25519', publicKey: newSigner.address },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(secpSpenderKey, prepared.challenge);
       const { instructions } = client.finalizeAddAuthority(prepared, response);

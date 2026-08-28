@@ -29,6 +29,7 @@ import {
   ed25519,
 } from '@lazorkit/sdk';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   airdrop,
@@ -137,6 +138,7 @@ describe('E2E Company Workflow', () => {
         rpId: spenderKey.rpId,
       },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     spenderAuthPda = newAuthorityPda;
 

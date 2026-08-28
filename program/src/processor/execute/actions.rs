@@ -19,7 +19,7 @@ use crate::{
     error::AuthError,
     state::{
         action::{parse_actions, read_u64, write_u64, ActionType, ActionView},
-        session::{has_actions, SESSION_HEADER_SIZE},
+        policy::PolicyLocation,
     },
 };
 
@@ -67,15 +67,16 @@ pub struct TokenAuthoritySnapshot {
 /// Returns early with Ok(()) if no actions exist.
 pub fn evaluate_pre_actions(
     session_data: &[u8],
+    loc: PolicyLocation,
     compact_instructions: &[CompactInstructionRef<'_>],
     accounts: &[AccountInfo],
     current_slot: u64,
 ) -> Result<(), ProgramError> {
-    if !has_actions(session_data) {
+    if !loc.is_present(session_data) {
         return Ok(());
     }
 
-    let actions_buf = &session_data[SESSION_HEADER_SIZE..];
+    let actions_buf = loc.slice(session_data);
     let actions = parse_actions(actions_buf)?;
 
     // Collect whitelist/blacklist program IDs.
@@ -136,14 +137,15 @@ pub fn evaluate_pre_actions(
 /// Snapshot token balances for mints referenced in token actions.
 pub fn snapshot_token_balances(
     session_data: &[u8],
+    loc: PolicyLocation,
     accounts: &[AccountInfo],
     vault_key: &Pubkey,
 ) -> Result<Vec<TokenSnapshot>, ProgramError> {
-    if !has_actions(session_data) {
+    if !loc.is_present(session_data) {
         return Ok(Vec::new());
     }
 
-    let actions_buf = &session_data[SESSION_HEADER_SIZE..];
+    let actions_buf = loc.slice(session_data);
     let actions = parse_actions(actions_buf)?;
 
     let mut mints: Vec<[u8; 32]> = Vec::new();
@@ -200,10 +202,11 @@ pub fn snapshot_token_balances(
 /// balance-based limits.
 pub fn snapshot_token_authorities(
     session_data: &[u8],
+    loc: PolicyLocation,
     accounts: &[AccountInfo],
     vault_key: &Pubkey,
 ) -> Result<Vec<TokenAuthoritySnapshot>, ProgramError> {
-    if !has_actions(session_data) {
+    if !loc.is_present(session_data) {
         return Ok(Vec::new());
     }
 
@@ -304,6 +307,7 @@ pub fn verify_token_authorities_unchanged(
 /// if a later check fails.
 pub fn evaluate_post_actions(
     session_data: &mut [u8],
+    loc: PolicyLocation,
     accounts: &[AccountInfo],
     vault_key: &Pubkey,
     vault_lamports_before: u64,
@@ -312,7 +316,7 @@ pub fn evaluate_post_actions(
     token_snapshots_before: &[TokenSnapshot],
     current_slot: u64,
 ) -> Result<(), ProgramError> {
-    if !has_actions(session_data) {
+    if !loc.is_present(session_data) {
         return Ok(());
     }
 
@@ -323,7 +327,7 @@ pub fn evaluate_post_actions(
     // If nothing was spent, skip all checks (no state mutation needed for SOL).
     // Token checks still need to run.
 
-    let actions_buf_readonly = &session_data[SESSION_HEADER_SIZE..];
+    let actions_buf_readonly = loc.slice(session_data);
     let actions = parse_actions(actions_buf_readonly)?;
 
     // ── Phase 1: Validate all SOL limits (read-only check) ──────────
@@ -332,7 +336,7 @@ pub fn evaluate_post_actions(
     // This prevents a session with expired limits from becoming unrestricted.
     for action in &actions {
         let action_expired = is_expired(action, current_slot);
-        let abs_data_offset = SESSION_HEADER_SIZE + action.data_offset;
+        let abs_data_offset = loc.abs(action.data_offset);
 
         match action.action_type {
             ActionType::SolMaxPerTx => {
@@ -393,7 +397,7 @@ pub fn evaluate_post_actions(
     // Same policy as SOL limits: expired = treat as fully exhausted.
     for action in &actions {
         let action_expired = is_expired(action, current_slot);
-        let abs_data_offset = SESSION_HEADER_SIZE + action.data_offset;
+        let abs_data_offset = loc.abs(action.data_offset);
 
         match action.action_type {
             ActionType::TokenMaxPerTx
@@ -470,14 +474,14 @@ pub fn evaluate_post_actions(
 
     // ── Phase 2: All checks passed. Now write state mutations. ──────
     // Re-parse using a slice reference — no allocation needed, same bytes, same offsets.
-    let actions = parse_actions(&session_data[SESSION_HEADER_SIZE..])?;
+    let actions = parse_actions(loc.slice(session_data))?;
 
     for action in &actions {
         if is_expired(action, current_slot) {
             continue;
         }
 
-        let abs_data_offset = SESSION_HEADER_SIZE + action.data_offset;
+        let abs_data_offset = loc.abs(action.data_offset);
 
         match action.action_type {
             ActionType::SolLimit => {
@@ -642,6 +646,7 @@ fn find_token_balance(
 mod tests {
     use super::*;
     use crate::state::action::ACTION_HEADER_SIZE;
+    use crate::state::session::SESSION_HEADER_SIZE;
 
     fn build_action(action_type: u8, expires_at: u64, data: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -654,7 +659,7 @@ mod tests {
 
     fn build_session_data(actions: &[u8]) -> Vec<u8> {
         let mut data = vec![0u8; SESSION_HEADER_SIZE];
-        data[0] = 3; // discriminator
+        data[0] = crate::state::AccountDiscriminator::Session as u8;
         data.extend_from_slice(actions);
         data
     }
@@ -670,8 +675,10 @@ mod tests {
         slot: u64,
     ) -> Result<(), ProgramError> {
         let gross = before.saturating_sub(after);
+        let loc = PolicyLocation::of(session_data).expect("session data resolves");
         evaluate_post_actions(
             session_data,
+            loc,
             accounts,
             vault_key,
             before,
@@ -696,7 +703,7 @@ mod tests {
     #[test]
     fn test_no_actions_passthrough() {
         let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
-        session_data[0] = 3;
+        session_data[0] = crate::state::AccountDiscriminator::Session as u8;
         let result = eval_post(
             &mut session_data,
             &[],
@@ -1833,8 +1840,10 @@ mod tests {
 
         // before=20 SOL, after=19.5 SOL → net = 0.5 SOL
         // But gross = 10 SOL (passed explicitly)
+        let loc = PolicyLocation::of(&session_data).expect("session data resolves");
         let result = evaluate_post_actions(
             &mut session_data,
+            loc,
             &[],
             &Pubkey::default(),
             20_000_000_000,
@@ -1852,8 +1861,10 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Gross = 3 SOL, net = 1 SOL
+        let loc = PolicyLocation::of(&session_data).expect("session data resolves");
         let result = evaluate_post_actions(
             &mut session_data,
+            loc,
             &[],
             &Pubkey::default(),
             20_000_000_000,
@@ -1873,8 +1884,10 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // net = 0.5 SOL, gross = 10 SOL
+        let loc = PolicyLocation::of(&session_data).expect("session data resolves");
         let result = evaluate_post_actions(
             &mut session_data,
+            loc,
             &[],
             &Pubkey::default(),
             20_000_000_000,
@@ -2004,9 +2017,10 @@ mod tests {
     #[test]
     fn test_pre_actions_no_actions_passthrough() {
         let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
-        session_data[0] = 3;
+        session_data[0] = crate::state::AccountDiscriminator::Session as u8;
 
-        let result = evaluate_pre_actions(&session_data, &[], &[], 100);
+        let loc = PolicyLocation::of(&session_data).expect("session data resolves");
+        let result = evaluate_pre_actions(&session_data, loc, &[], &[], 100);
         assert!(result.is_ok());
     }
 

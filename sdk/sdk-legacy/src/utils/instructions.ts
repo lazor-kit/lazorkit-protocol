@@ -121,6 +121,9 @@ export function createAddAuthorityIx(params: {
   secp256r1Pubkey?: Uint8Array;
   /** Secp256r1 only: RP ID string for the new authority */
   rpId?: string;
+  /** Action buffer bounding what this authority may spend. Required for
+   *  ROLE_DELEGATE; optional for Owner and Admin. */
+  policy?: Uint8Array;
   /** Auth payload for Secp256r1 admin authentication */
   authPayload?: Uint8Array;
   /** For Ed25519 admin: the signer pubkey */
@@ -142,6 +145,15 @@ export function createAddAuthorityIx(params: {
       parts.push(new Uint8Array(rpIdBytes));
     }
   }
+  // `[policy_len u16 LE][policy]` between the key material and the auth
+  // payload. Always emitted, even when empty, because the program treats these
+  // two bytes as part of the signed region — omitting them for a policy-less
+  // authority would make the client's challenge and the program's disagree.
+  const policy = params.policy ?? new Uint8Array(0);
+  const policyLen = Buffer.alloc(2);
+  policyLen.writeUInt16LE(policy.length, 0);
+  parts.push(new Uint8Array(policyLen), policy);
+
   if (params.authPayload) {
     parts.push(params.authPayload);
   }
