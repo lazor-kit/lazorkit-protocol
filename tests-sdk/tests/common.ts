@@ -25,6 +25,8 @@ export function makeClient(connection: Connection): LazorKitClient {
   return new LazorKitClient(connection);
 }
 
+import { Actions, serializeActions } from '../../sdk/sdk-legacy/src';
+
 export const RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
 
 // ─── Strict-fee setup (Approach A from the proposal) ─────────────────
@@ -95,6 +97,19 @@ export function initAuthority(): Keypair {
     readFileSync('../keys/devnet-init-authority.json', 'utf8'),
   ) as number[];
   return Keypair.fromSecretKey(Uint8Array.from(bytes));
+}
+
+/**
+ * A minimal policy for a Delegate (ROLE_SPENDER).
+ *
+ * A Delegate must carry one: rank says what an authority may manage, the policy
+ * says what it may spend, and a Delegate manages nothing. Without this the tier
+ * would be an unbounded spender wearing a restricted name — which is what H-2
+ * was. Tests that only need a Delegate to exist use this; tests about limits
+ * build their own.
+ */
+export function delegatePolicy(limitLamports = 1_000_000n): Uint8Array {
+  return serializeActions([Actions.solLimit(limitLamports)]);
 }
 
 export interface TestContext {

@@ -33,6 +33,7 @@ import {
 // Low-level instruction builders — internal-only.
 import { createExecuteIx } from '../../sdk/sdk-kit/src/instructions/builders.js';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -136,6 +137,7 @@ describe('Security', () => {
         },
         newAuthority: { type: 'ed25519', publicKey: spenderSigner.address },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const addResponse = await fakeWebAuthnSign(ownerKey, addPrepared.challenge);
       const addResult = client.finalizeAddAuthority(addPrepared, addResponse);
@@ -221,6 +223,7 @@ describe('Security', () => {
         adminSigner: ed25519(ownerA.address, resultA.authorityPda),
         newAuthority: { type: 'ed25519', publicKey: newSigner.address },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       await sendTxExpectError(ctx, instructions, [ownerA]);
     });

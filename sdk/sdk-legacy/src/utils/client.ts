@@ -116,6 +116,7 @@ export interface PreparedAddAuthority extends PreparedBase {
     newAuthorityPda: PublicKey;
     newType: number;
     newRole: number;
+    policy?: Uint8Array;
     credentialOrPubkey: Uint8Array;
     secp256r1Pubkey?: Uint8Array;
     rpId?: string;
@@ -711,6 +712,9 @@ export class LazorKitClient {
     secp256r1: Secp256r1Params;
     newAuthority: CreateWalletOwner;
     role: number;
+    /** Action buffer bounding what this authority may spend. Required for
+     *  ROLE_DELEGATE; optional for Admin. */
+    policy?: Uint8Array;
   }): Promise<PreparedAddAuthority> {
     assertAddAuthorityRole(params.role);
     const {
@@ -734,6 +738,7 @@ export class LazorKitClient {
       credentialOrPubkey,
       secp256r1Pubkey,
       rpId,
+      params.policy,
     );
     const signedPayload = concatBytes([dataPayload, params.payer.toBytes()]);
 
@@ -758,6 +763,7 @@ export class LazorKitClient {
         newAuthorityPda,
         newType,
         newRole: params.role,
+        policy: params.policy,
         credentialOrPubkey,
         secp256r1Pubkey,
         rpId,
@@ -776,6 +782,7 @@ export class LazorKitClient {
       response,
     );
     const ix = createAddAuthorityIx({
+      policy: i.policy,
       payer: i.payer,
       walletPda: i.walletPda,
       adminAuthorityPda: i.adminAuthorityPda,
@@ -1398,6 +1405,9 @@ export class LazorKitClient {
     adminSigner: AdminSigner;
     newAuthority: CreateWalletOwner;
     role: number;
+    /** Action buffer bounding what this authority may spend. Required for
+     *  ROLE_DELEGATE; optional for Admin. */
+    policy?: Uint8Array;
   }): Promise<{
     instructions: TransactionInstruction[];
     newAuthorityPda: PublicKey;
@@ -1417,6 +1427,7 @@ export class LazorKitClient {
 
     if (s.type === 'ed25519') {
       const ix = createAddAuthorityIx({
+      policy: params.policy,
         payer: params.payer,
         walletPda: params.walletPda,
         adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),

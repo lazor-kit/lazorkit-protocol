@@ -31,6 +31,8 @@ import {
 import { readFileSync } from 'fs';
 import { LazorKit, PROGRAM_ID_DEVNET, type LazorKitRpc } from '@lazorkit/sdk';
 
+import { Actions, serializeActions } from '@lazorkit/sdk';
+
 export const RPC_URL = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
 export const RPC_WS_URL = process.env.RPC_WS_URL ?? 'ws://127.0.0.1:8900';
 
@@ -59,6 +61,19 @@ export async function initAuthority() {
     readFileSync('../keys/devnet-init-authority.json', 'utf8'),
   ) as number[];
   return createKeyPairSignerFromBytes(Uint8Array.from(bytes));
+}
+
+/**
+ * A minimal policy for a Delegate (ROLE_SPENDER).
+ *
+ * A Delegate must carry one: rank says what an authority may manage, the policy
+ * says what it may spend, and a Delegate manages nothing. Without this the tier
+ * would be an unbounded spender wearing a restricted name — which is what H-2
+ * was. Tests that only need a Delegate to exist use this; tests about limits
+ * build their own.
+ */
+export function delegatePolicy(limitLamports = 1_000_000n): Uint8Array {
+  return serializeActions([Actions.solLimit(limitLamports)]);
 }
 
 export interface TestContext {

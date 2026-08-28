@@ -9,12 +9,26 @@ use pinocchio::{
     ProgramResult,
 };
 
+/// Rank values. Owner manages everything, Admin manages Delegates, a Delegate
+/// manages nothing and must carry a policy.
+pub const RANK_OWNER: u8 = 0;
+pub const RANK_ADMIN: u8 = 1;
+pub const RANK_DELEGATE: u8 = 2;
+
+/// Cap on an authority's policy buffer, matching the session cap in
+/// `session/create.rs` — the BPF heap is 32 KB, and 16 actions of ~128 bytes
+/// fit comfortably inside 2 KB.
+pub const MAX_POLICY_BUFFER_SIZE: usize = 2048;
+
 use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
     error::AuthError,
-    state::{authority::AuthorityAccountHeader, AccountDiscriminator},
+    state::{
+        action::validate_actions_buffer, authority::AuthorityAccountHeader,
+        policy::authority_fixed_len, AccountDiscriminator,
+    },
     utils::is_all_zero,
 };
 
@@ -115,12 +129,41 @@ pub fn process_add_authority(
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     };
 
-    // Split data_payload and authority_payload
-    // data_payload = everything up to and including the new authority data
-    let data_payload_len = 8 + full_auth_data.len(); // args + full_auth_data
-    if instruction_data.len() < data_payload_len {
+    // Optional policy, laid out exactly as CreateSession lays out its actions:
+    // `[policy_len u16 LE][policy]` after the key material and before the
+    // Secp256r1 auth payload. Putting it before the auth payload is what keeps
+    // it inside the signed region — a policy the passkey holder did not sign
+    // would be a policy somebody else chose.
+    let key_data_end = 8 + full_auth_data.len();
+    if instruction_data.len() < key_data_end {
         return Err(ProgramError::InvalidInstructionData);
     }
+
+    let (policy, data_payload_len) = if instruction_data.len() >= key_data_end + 2 {
+        let policy_len = u16::from_le_bytes(
+            instruction_data[key_data_end..key_data_end + 2]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        if policy_len > MAX_POLICY_BUFFER_SIZE {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let start = key_data_end + 2;
+        if instruction_data.len() < start + policy_len {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        (
+            &instruction_data[start..start + policy_len],
+            start + policy_len,
+        )
+    } else {
+        (&instruction_data[key_data_end..key_data_end], key_data_end)
+    };
+
+    if !policy.is_empty() {
+        validate_actions_buffer(policy)?;
+    }
+
     let (data_payload, authority_payload) = instruction_data.split_at(data_payload_len);
 
     let account_info_iter = &mut accounts.iter();
@@ -212,16 +255,35 @@ pub fn process_add_authority(
     }
 
     // Authorization
-    // Validate new_role is a known non-owner value (1=Admin, 2=Spender).
-    // Without this check an Owner could create a role-255 authority that can
-    // execute but cannot be revoked by any Admin. Owner creation is also
-    // disallowed here: ownership must move via TransferOwnership so there is
-    // only one active owner authority at a time.
+    // Rank must be a known non-Owner value (1 = Admin, 2 = Delegate). Without
+    // this an Owner could mint a rank-255 authority that executes but no Admin
+    // can revoke. Owner creation stays with TransferOwnership so there is only
+    // ever one active Owner.
     if args.new_role == 0 || args.new_role > 2 {
         return Err(AuthError::PermissionDenied.into());
     }
     if admin_header.role != 0 && (admin_header.role != 1 || args.new_role != 2) {
         return Err(AuthError::PermissionDenied.into());
+    }
+
+    // A Delegate must carry a policy.
+    //
+    // This is what closes H-2. `role` gated management operations and nothing
+    // else — Execute never read it — so "Spender" named a tier that had exactly
+    // the same power over the vault as Owner. Requiring the policy makes the
+    // name true: rank says what you may manage, the policy says what you may
+    // spend, and a Delegate manages nothing.
+    if args.new_role == RANK_DELEGATE && policy.is_empty() {
+        return Err(AuthError::DelegateRequiresPolicy.into());
+    }
+
+    // An authority that is itself bounded may not mint authorities.
+    //
+    // Comparing two policies to check the grant is no broader than the granter's
+    // is a hard problem; refusing the grant outright sidesteps it. Without this,
+    // an Admin capped at 1 SOL/day could mint a Delegate capped at 100.
+    if admin_header.policy_len != 0 {
+        return Err(AuthError::PolicyBearingAuthorityCannotDelegate.into());
     }
 
     // Logic
@@ -236,11 +298,9 @@ pub fn process_add_authority(
 
     // Fixed sizes per auth type (see wallet/create.rs for layout).
     let header_size = std::mem::size_of::<AuthorityAccountHeader>();
-    let space = match args.authority_type {
-        0 => header_size + 32,           // Ed25519: pubkey
-        1 => header_size + 32 + 33 + 32, // Secp256r1: cred ∥ pubkey ∥ rpIdHash
-        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
-    };
+    let fixed_len =
+        authority_fixed_len(args.authority_type).ok_or(AuthError::InvalidAuthenticationKind)?;
+    let space = fixed_len + policy.len();
     let rent_lamports = rent.minimum_balance(space);
 
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
@@ -271,11 +331,16 @@ pub fn process_add_authority(
         version: crate::state::CURRENT_ACCOUNT_VERSION,
         _padding1: [0; 3],
         counter: 0,
-        _padding2: [0; 4],
+        policy_len: policy.len() as u16,
+        _padding2: [0; 2],
         wallet: *wallet_pda.key(),
     };
+    // `write_unaligned`, matching every other header write and every reader.
+    // This site used to store through a plain `*mut` deref, which is only sound
+    // if the account data happens to be 8-aligned — true in practice, undefined
+    // by the language, and inconsistent with the `read_unaligned` on the way back.
     unsafe {
-        *(data.as_mut_ptr() as *mut AuthorityAccountHeader) = header;
+        std::ptr::write_unaligned(data.as_mut_ptr() as *mut AuthorityAccountHeader, header);
     }
 
     // Write variable data. For Secp256r1 hash rpId once here so every Execute
@@ -305,7 +370,13 @@ pub fn process_add_authority(
                 data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
             }
         },
-        _ => unreachable!(),
+        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
+    }
+
+    // The policy trails the key material, at the offset PolicyLocation derives
+    // from this account's own discriminator and authority type.
+    if !policy.is_empty() {
+        data[fixed_len..fixed_len + policy.len()].copy_from_slice(policy);
     }
 
     Ok(())

@@ -197,6 +197,9 @@ export function createAddAuthorityIx(params: {
   credentialOrPubkey: Uint8Array;
   secp256r1Pubkey?: Uint8Array;
   rpId?: string;
+  /** Action buffer bounding what this authority may spend. Required for
+   *  ROLE_DELEGATE; optional for Owner and Admin. */
+  policy?: Uint8Array;
   authPayload?: Uint8Array;
   authorizerSigner?: Address;
   programId: Address;
@@ -214,6 +217,15 @@ export function createAddAuthorityIx(params: {
       parts.push(new Uint8Array([rp.length]), rp);
     }
   }
+  // `[policy_len u16 LE][policy]` between the key material and the auth
+  // payload. Always emitted, even when empty, because the program treats these
+  // two bytes as part of the signed region — omitting them for a policy-less
+  // authority would make the client's challenge and the program's disagree.
+  const policy = params.policy ?? new Uint8Array(0);
+  const policyLen = new Uint8Array(2);
+  new DataView(policyLen.buffer).setUint16(0, policy.length, true);
+  parts.push(policyLen, policy);
+
   if (params.authPayload) parts.push(params.authPayload);
 
   const accounts: AccountMeta[] = [

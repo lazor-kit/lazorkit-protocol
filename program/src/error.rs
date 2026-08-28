@@ -37,6 +37,16 @@ pub enum AuthError {
     SessionVaultOwnerChanged = 3030,
     SessionVaultDataLenChanged = 3031,
     SessionTokenAuthorityChanged = 3032,
+    // Rank + policy (authority-level spending limits)
+    /// A Delegate authority was created without a policy. Rank says what an
+    /// authority may manage; the policy says what it may spend. A Delegate
+    /// manages nothing, so without a policy it would be an unbounded spender
+    /// wearing a restricted name — which is exactly what H-2 was.
+    DelegateRequiresPolicy = 3033,
+    /// An authority that carries a policy tried to create another authority.
+    /// Comparing two policies to prove the grant is no broader than the
+    /// granter's is hard; refusing the grant sidesteps it.
+    PolicyBearingAuthorityCannotDelegate = 3034,
 }
 
 impl From<AuthError> for ProgramError {

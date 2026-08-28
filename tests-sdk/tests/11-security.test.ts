@@ -18,6 +18,7 @@ import {
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -147,6 +148,7 @@ describe('Security', () => {
         },
         newAuthority: { type: 'ed25519', publicKey: spenderKp.publicKey },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const addResponse = await fakeWebAuthnSign(
         ownerKey,
@@ -265,6 +267,7 @@ describe('Security', () => {
         adminSigner: ed25519(ownerA.publicKey, resultA.authorityPda),
         newAuthority: { type: 'ed25519', publicKey: newKp.publicKey },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
 
       // Should fail — authority doesn't belong to walletB

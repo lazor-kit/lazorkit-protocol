@@ -8,7 +8,7 @@ use crate::{
         evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
         snapshot_token_balances, verify_token_authorities_unchanged,
     },
-    state::{authority::AuthorityAccountHeader, session::has_actions, AccountDiscriminator},
+    state::{authority::AuthorityAccountHeader, policy::PolicyLocation, AccountDiscriminator},
     utils::get_stack_height,
 };
 use pinocchio::{
@@ -101,9 +101,19 @@ pub fn process(
     let (compact_instructions, compact_len) =
         parse_compact_instructions_ref_with_len(instruction_data)?;
 
-    // Track whether this is a session-based execution and the current slot
-    let mut is_session = false;
-    let mut session_slot: u64 = 0;
+    // Where this account's policy lives, if it carries one. Resolved from the
+    // account's own discriminator and authority type rather than passed in, so
+    // an authority can never be measured with the session header's offset —
+    // an Ed25519 authority is *exactly* 80 bytes, so that mistake would read
+    // its stored pubkey as an action buffer. See state::policy.
+    //
+    // This is what makes the engine serve both account types: a session with
+    // actions and an authority with a policy take the same path from here on.
+    let policy = PolicyLocation::of(authority_data).filter(|loc| loc.is_present(authority_data));
+
+    // One clock read for both branches — policy evaluation needs the slot
+    // whether the caller is a session or a policy-bearing authority.
+    let current_slot = Clock::get()?.slot;
 
     // Bound to the enum rather than to numeric literals. The v1 code matched on
     // bare `2` and `3`, which silently stopped matching anything the moment the
@@ -177,9 +187,6 @@ pub fn process(
                 )
             };
 
-            let clock = Clock::get()?;
-            let current_slot = clock.slot;
-
             // Verify Wallet
             if session.wallet != *wallet_pda.key() {
                 return Err(ProgramError::InvalidAccountData);
@@ -201,21 +208,20 @@ pub fn process(
             if !signer_matched {
                 return Err(ProgramError::MissingRequiredSignature);
             }
-
-            // Pre-CPI action checks (program whitelist/blacklist)
-            if has_actions(authority_data) {
-                evaluate_pre_actions(
-                    authority_data,
-                    &compact_instructions,
-                    accounts,
-                    current_slot,
-                )?;
-            }
-
-            is_session = true;
-            session_slot = current_slot;
         },
         _ => return Err(ProgramError::InvalidAccountData),
+    }
+
+    // Pre-CPI policy checks (program whitelist/blacklist), for a session with
+    // actions or an authority with a policy alike.
+    if let Some(loc) = policy {
+        evaluate_pre_actions(
+            authority_data,
+            loc,
+            &compact_instructions,
+            accounts,
+            current_slot,
+        )?;
     }
 
     // Get vault bump for signing
@@ -229,13 +235,16 @@ pub fn process(
         return Err(ProgramError::InvalidSeeds);
     }
 
-    // Snapshot balances before CPI (for session action enforcement)
-    let vault_lamports_before = if is_session { vault_pda.lamports() } else { 0 };
-    let token_snapshots_before = if is_session {
-        // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
-        snapshot_token_balances(authority_data, accounts, vault_pda.key())?
+    // Snapshot balances before CPI, for policy enforcement afterwards.
+    let vault_lamports_before = if policy.is_some() {
+        vault_pda.lamports()
     } else {
-        Vec::new()
+        0
+    };
+    let token_snapshots_before = match policy {
+        // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
+        Some(loc) => snapshot_token_balances(authority_data, loc, accounts, vault_pda.key())?,
+        None => Vec::new(),
     };
 
     // ── Session invariants (defense against System::Assign / SetAuthority escapes) ──
@@ -247,21 +256,11 @@ pub fn process(
     //
     // Snapshot the vault's metadata + every listed-mint vault-owned token account's
     // authority fields BEFORE the CPI loop; verify unchanged AFTER.
-    let session_has_actions = is_session && has_actions(authority_data);
-    let vault_owner_before = if session_has_actions {
-        Some(*vault_pda.owner())
-    } else {
-        None
-    };
-    let vault_data_len_before = if session_has_actions {
-        Some(unsafe { vault_pda.borrow_data_unchecked().len() })
-    } else {
-        None
-    };
-    let token_authority_snapshots = if session_has_actions {
-        snapshot_token_authorities(authority_data, accounts, vault_pda.key())?
-    } else {
-        Vec::new()
+    let vault_owner_before = policy.map(|_| *vault_pda.owner());
+    let vault_data_len_before = policy.map(|_| unsafe { vault_pda.borrow_data_unchecked().len() });
+    let token_authority_snapshots = match policy {
+        Some(loc) => snapshot_token_authorities(authority_data, loc, accounts, vault_pda.key())?,
+        None => Vec::new(),
     };
 
     // Track gross SOL outflow across all CPIs (for SolMaxPerTx check)
@@ -322,7 +321,7 @@ pub fn process(
         }
 
         // Track gross SOL outflow per CPI (used for SolMaxPerTx — not net balance diff).
-        if is_session {
+        if policy.is_some() {
             let post = vault_pda.lamports();
             if prev_vault_lamports > post {
                 vault_lamports_gross_out =
@@ -352,16 +351,17 @@ pub fn process(
 
     // Post-CPI action checks (spending limits)
     // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
-    if session_has_actions {
+    if let Some(loc) = policy {
         evaluate_post_actions(
             authority_data,
+            loc,
             accounts,
             vault_pda.key(),
             vault_lamports_before,
             vault_pda.lamports(),
             vault_lamports_gross_out,
             &token_snapshots_before,
-            session_slot,
+            current_slot,
         )?;
     }
 

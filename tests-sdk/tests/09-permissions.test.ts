@@ -12,6 +12,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -80,6 +81,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(adminKp.publicKey, adminAuthPda),
       newAuthority: { type: 'ed25519', publicKey: spenderKp.publicKey },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     spenderAuthPda = addSpenderResult.newAuthorityPda;
     await sendTx(ctx, addSpenderResult.instructions, [adminKp]);
@@ -96,6 +98,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderKp.publicKey, spenderAuthPda),
       newAuthority: { type: 'ed25519', publicKey: newKp.publicKey },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
 
     // Error 3002 = PermissionDenied
@@ -273,6 +276,7 @@ describe('Permission Boundaries', () => {
           rpId: secpSpenderKey.rpId,
         },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
       const addResult = client.finalizeAddAuthority(prepared, response);
@@ -293,6 +297,7 @@ describe('Permission Boundaries', () => {
         },
         newAuthority: { type: 'ed25519', publicKey: newKp.publicKey },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(
         secpSpenderKey,

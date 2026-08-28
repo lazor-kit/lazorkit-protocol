@@ -251,7 +251,8 @@ pub fn process(
         version: crate::state::CURRENT_ACCOUNT_VERSION,
         _padding1: [0; 3],
         counter: 0,
-        _padding2: [0; 4],
+        policy_len: 0,
+        _padding2: [0; 2],
         wallet: *wallet_pda.key(),
     };
 

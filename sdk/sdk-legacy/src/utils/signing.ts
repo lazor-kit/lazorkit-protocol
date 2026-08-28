@@ -171,6 +171,7 @@ export function buildDataPayloadForAdd(
   credentialOrPubkey: Uint8Array,
   secp256r1Pubkey?: Uint8Array,
   rpId?: string,
+  policy?: Uint8Array,
 ): Uint8Array {
   const parts: Uint8Array[] = [
     new Uint8Array([newType, newRole]),
@@ -185,6 +186,13 @@ export function buildDataPayloadForAdd(
       parts.push(new Uint8Array(rpIdBytes));
     }
   }
+  // Must stay byte-identical with createAddAuthorityIx — the program hashes
+  // its own instruction bytes up to this point, so any divergence surfaces as
+  // an unexplained signature failure rather than a format error.
+  const p = policy ?? new Uint8Array(0);
+  const policyLen = Buffer.alloc(2);
+  policyLen.writeUInt16LE(p.length, 0);
+  parts.push(new Uint8Array(policyLen), p);
   return concatBytes(parts);
 }
 
