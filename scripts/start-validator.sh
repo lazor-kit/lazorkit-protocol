@@ -58,11 +58,19 @@ fi
 # 2. Build the SBF artifact the validator is about to preload.
 ( cd "$REPO_ROOT/program" && cargo build-sbf --features devnet ) || exit 1
 
-SO="$REPO_ROOT/target/deploy/lazorkit_program.so"
-if [ ! -f "$SO" ]; then
-  echo "error: $SO not produced by cargo build-sbf" >&2
+# `cargo build-sbf` and `cargo test` do not always agree on the target
+# directory — depending on how the shell was invoked, CARGO_TARGET_DIR may point
+# somewhere other than ./target — so both locations can hold an artifact. Take
+# the newest, the same rule `program/tests/common/mod.rs` applies, rather than
+# hardcoding a path that may be a build behind.
+SO="$(find "$REPO_ROOT/target/deploy" "$REPO_ROOT/.git/shared-target/deploy" \
+        -name lazorkit_program.so 2>/dev/null |
+      xargs -r stat -f '%m %N' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+if [ -z "$SO" ] || [ ! -f "$SO" ]; then
+  echo "error: no lazorkit_program.so produced by cargo build-sbf" >&2
   exit 1
 fi
+echo "using $SO"
 
 # 3. Launch detached. `--reset` wipes the shared ledger, which is what makes it
 #    safe for this repo and the sibling program-v2 repo to share $HOME/test-ledger.

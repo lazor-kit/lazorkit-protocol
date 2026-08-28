@@ -256,8 +256,11 @@ pub fn try_send(
 }
 
 /// Assert a transaction failed with a specific `ProgramError::Custom` code.
-pub fn assert_custom_error(
-    result: Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata>,
+///
+/// Generic in the success type so it also takes the results of the helpers that
+/// return something useful on the happy path, like the PDA they created.
+pub fn assert_custom_error<T>(
+    result: Result<T, litesvm::types::FailedTransactionMetadata>,
     expected: u32,
     context: &str,
 ) {
@@ -676,12 +679,78 @@ fn load_program(svm: &mut LiteSVM) -> Pubkey {
     // LazorKit program ID (deterministic for tests)
     let program_id = Pubkey::new_unique();
 
-    // Load the compiled program
-    let path = "../target/deploy/lazorkit_program.so";
-    svm.add_program_from_file(program_id, path)
+    svm.add_program_from_file(program_id, sbf_artifact())
         .expect("Failed to load program");
 
     program_id
+}
+
+/// Locate the SBF artifact and refuse to run against a stale one.
+///
+/// Two things make this worth doing properly. `cargo build-sbf` and `cargo test`
+/// do not always agree on the target directory — depending on how the shell was
+/// invoked, one writes `target/deploy` while the other's `CARGO_TARGET_DIR`
+/// points elsewhere — so both locations can hold an artifact and the older one
+/// wins by being hardcoded. And a stale artifact does not fail; it passes the
+/// old assertions and fails the new ones for reasons invisible in the diff. That
+/// has cost real debugging time three times in this branch, once presenting as a
+/// permission error and once as an unexplained zero field.
+fn sbf_artifact() -> std::path::PathBuf {
+    use std::{path::PathBuf, time::SystemTime};
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut candidates: Vec<PathBuf> = vec![manifest.join("../target/deploy")];
+    if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
+        candidates.push(PathBuf::from(&dir).join("deploy"));
+        candidates.push(manifest.join("..").join(&dir).join("deploy"));
+    }
+
+    let modified = |p: &PathBuf| -> Option<SystemTime> { p.metadata().ok()?.modified().ok() };
+
+    let artifact = candidates
+        .iter()
+        .map(|d| d.join("lazorkit_program.so"))
+        .filter(|p| p.exists())
+        .max_by_key(|p| modified(p).unwrap_or(SystemTime::UNIX_EPOCH));
+
+    let Some(artifact) = artifact else {
+        panic!(
+            "no lazorkit_program.so found in {candidates:?}\n             run: cargo build-sbf --features devnet"
+        );
+    };
+
+    // Newest source file under program/src, compared against the artifact.
+    fn newest(dir: &std::path::Path, out: &mut Option<SystemTime>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                newest(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                if let Ok(t) = entry.metadata().and_then(|m| m.modified()) {
+                    if out.is_none_or(|best| t > best) {
+                        *out = Some(t);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut newest_source = None;
+    newest(&manifest.join("src"), &mut newest_source);
+
+    if let (Some(source), Some(built)) = (newest_source, modified(&artifact)) {
+        assert!(
+            built >= source,
+            "{} is older than program/src — every assertion below would be \
+             testing the previous binary.\nrun: cargo build-sbf --features devnet",
+            artifact.display()
+        );
+    }
+
+    artifact
 }
 
 /// Initialise the protocol as `PROTOCOL_INIT_AUTHORITY`.
@@ -777,4 +846,143 @@ pub fn with_protocol_fee_accounts(
 ) -> Vec<AccountMeta> {
     accounts.extend(protocol_fee_account_metas(context));
     accounts
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Authority management
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Rank values, mirroring `processor::authority::manage`.
+pub const RANK_OWNER: u8 = 0;
+pub const RANK_ADMIN: u8 = 1;
+pub const RANK_DELEGATE: u8 = 2;
+
+/// The authority PDA an Ed25519 key would occupy on this wallet.
+pub fn authority_pda_for(program_id: Pubkey, wallet_pda: Pubkey, key: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            key.as_ref(),
+        ],
+        &program_id,
+    )
+    .0
+}
+
+/// `AddAuthority` for an Ed25519 key, optionally carrying a policy.
+///
+/// Large `Err` variant is litesvm's `FailedTransactionMetadata` — see the note
+/// on [`try_send`].
+#[allow(clippy::result_large_err)]
+pub fn add_ed25519_authority(
+    context: &mut TestContext,
+    wallet: &WalletFixture,
+    authorizer_pda: Pubkey,
+    authorizer_key: &Keypair,
+    new_key: &Keypair,
+    rank: u8,
+    policy: &[u8],
+) -> Result<Pubkey, litesvm::types::FailedTransactionMetadata> {
+    let new_auth_pda = authority_pda_for(context.program_id, wallet.wallet_pda, &new_key.pubkey());
+
+    let mut data = vec![1u8]; // AddAuthority
+    data.push(0); // authority_type = Ed25519
+    data.push(rank);
+    data.extend_from_slice(&[0u8; 6]); // padding
+    data.extend_from_slice(new_key.pubkey().as_ref());
+    // `[policy_len u16][policy]` sits between the key material and the auth
+    // payload — the same shape CreateSession uses for its actions, and inside
+    // the signed region for the same reason.
+    data.extend_from_slice(&(policy.len() as u16).to_le_bytes());
+    data.extend_from_slice(policy);
+
+    let ix = Instruction {
+        program_id: context.program_id,
+        accounts: vec![
+            AccountMeta::new(context.payer.pubkey(), true),
+            // Writable: AddAuthority maintains the wallet's owner_count.
+            AccountMeta::new(wallet.wallet_pda, false),
+            AccountMeta::new(authorizer_pda, false),
+            AccountMeta::new(new_auth_pda, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            AccountMeta::new_readonly(authorizer_key.pubkey(), true),
+        ],
+        data,
+    };
+
+    let payer = context.payer.insecure_clone();
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, authorizer_key])?;
+    Ok(new_auth_pda)
+}
+
+/// `AddAuthority` authorized by the wallet's original Owner.
+#[allow(clippy::result_large_err)]
+pub fn owner_adds_ed25519(
+    context: &mut TestContext,
+    wallet: &WalletFixture,
+    new_key: &Keypair,
+    rank: u8,
+    policy: &[u8],
+) -> Result<Pubkey, litesvm::types::FailedTransactionMetadata> {
+    let owner_pda = wallet.owner_auth_pda;
+    let owner_key = wallet.owner.insecure_clone();
+    add_ed25519_authority(
+        context, wallet, owner_pda, &owner_key, new_key, rank, policy,
+    )
+}
+
+/// A `RemoveAuthority` instruction, authorized by an Ed25519 authority.
+///
+/// Separate from [`remove_authority`] so several can be batched into one
+/// transaction, which is how the ordering rules get tested.
+pub fn remove_authority_ix(
+    context: &TestContext,
+    wallet: &WalletFixture,
+    authorizer_pda: Pubkey,
+    authorizer_key: &Keypair,
+    target_pda: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: context.program_id,
+        accounts: vec![
+            AccountMeta::new(context.payer.pubkey(), true),
+            // Writable: RemoveAuthority maintains the wallet's owner_count.
+            AccountMeta::new(wallet.wallet_pda, false),
+            AccountMeta::new(authorizer_pda, false),
+            AccountMeta::new(target_pda, false),
+            AccountMeta::new(Pubkey::new_unique(), false), // refund destination
+            AccountMeta::new_readonly(authorizer_key.pubkey(), true),
+        ],
+        data: vec![2u8], // RemoveAuthority, empty Ed25519 payload
+    }
+}
+
+/// `RemoveAuthority`, authorized by an Ed25519 authority.
+#[allow(clippy::result_large_err)]
+pub fn remove_authority(
+    context: &mut TestContext,
+    wallet: &WalletFixture,
+    authorizer_pda: Pubkey,
+    authorizer_key: &Keypair,
+    target_pda: Pubkey,
+) -> Result<(), litesvm::types::FailedTransactionMetadata> {
+    let ix = remove_authority_ix(context, wallet, authorizer_pda, authorizer_key, target_pda);
+    let payer = context.payer.insecure_clone();
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, authorizer_key])?;
+    Ok(())
+}
+
+/// The wallet's `owner_count`.
+pub fn wallet_owner_count(svm: &LiteSVM, wallet_pda: Pubkey) -> u32 {
+    let data = svm.get_account(&wallet_pda).expect("wallet account").data;
+    u32::from_le_bytes(data[4..8].try_into().expect("owner_count field"))
+}
+
+/// The `role` byte of an authority account.
+pub fn authority_role(svm: &LiteSVM, authority_pda: Pubkey) -> u8 {
+    svm.get_account(&authority_pda)
+        .expect("authority account")
+        .data[2]
 }

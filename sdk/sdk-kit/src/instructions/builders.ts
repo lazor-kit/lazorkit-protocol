@@ -230,7 +230,8 @@ export function createAddAuthorityIx(params: {
 
   const accounts: AccountMeta[] = [
     meta(params.payer, SIGNER_RO),
-    meta(params.walletPda, RO),
+    // Writable: Add/RemoveAuthority maintain the wallet's owner_count.
+    meta(params.walletPda, RW),
     meta(params.adminAuthorityPda, RW),
     meta(params.newAuthorityPda, RW),
     meta(SYSTEM_PROGRAM_ADDRESS, RO),
@@ -266,7 +267,8 @@ export function createRemoveAuthorityIx(params: {
 
   const accounts: AccountMeta[] = [
     meta(params.payer, SIGNER_RO),
-    meta(params.walletPda, RO),
+    // Writable: Add/RemoveAuthority maintain the wallet's owner_count.
+    meta(params.walletPda, RW),
     meta(params.adminAuthorityPda, RW),
     meta(params.targetAuthorityPda, RW),
     meta(params.refundDestination, RW),

@@ -198,7 +198,9 @@ pub fn process(
         discriminator: AccountDiscriminator::Wallet as u8,
         bump: wallet_bump,
         version: crate::state::CURRENT_ACCOUNT_VERSION,
-        _padding: [0; 5],
+        _padding: [0; 1],
+        // The authority created just below is this wallet's first Owner.
+        owner_count: 1,
     };
     unsafe {
         std::ptr::write_unaligned(

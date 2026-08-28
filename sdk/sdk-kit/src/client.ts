@@ -287,15 +287,22 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
   };
 }
 
-function assertAddAuthorityRole(role: number): void {
-  if (role === ROLE_OWNER) {
+/// The program lets an Owner create another Owner — that is what makes a second
+/// device able to revoke a lost first one. It stays behind an explicit opt-in
+/// here because handing out ownership is not something to do by passing a `0`
+/// where a `1` was meant, and because the safe default is the one most callers
+/// want.
+function assertAddAuthorityRole(role: number, allowOwner = false): void {
+  if (role === ROLE_OWNER && !allowOwner) {
     throw new Error(
-      'AddAuthority cannot create Owner authorities; use transferOwnership instead',
+      'AddAuthority creates an Owner only with allowOwner: true — an Owner can ' +
+        'manage and revoke everything, including you. Use ROLE_ADMIN for a ' +
+        'manager, or transferOwnership to hand ownership over.',
     );
   }
-  if (role < 1 || role > 2) {
+  if (role < 0 || role > 2) {
     throw new Error(
-      'AddAuthority role must be ROLE_ADMIN (1) or ROLE_SPENDER (2)',
+      'AddAuthority role must be ROLE_OWNER (0), ROLE_ADMIN (1) or ROLE_SPENDER (2)',
     );
   }
 }
@@ -637,8 +644,11 @@ export class LazorKit {
     /** Action buffer bounding what this authority may spend. Required for
      *  ROLE_DELEGATE; optional for Admin. */
     policy?: Uint8Array;
+    /** Opt in to creating another Owner. An Owner can manage and revoke every
+     *  authority on the wallet, this one included, so it is never the default. */
+    allowOwner?: boolean;
   }): Promise<{ instructions: Instruction[]; newAuthorityPda: Address }> {
-    assertAddAuthorityRole(params.role);
+    assertAddAuthorityRole(params.role, params.allowOwner);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
       params.newAuthority,
     );
@@ -684,8 +694,11 @@ export class LazorKit {
     /** Action buffer bounding what this authority may spend. Required for
      *  ROLE_DELEGATE; optional for Admin. */
     policy?: Uint8Array;
+    /** Opt in to creating another Owner. An Owner can manage and revoke every
+     *  authority on the wallet, this one included, so it is never the default. */
+    allowOwner?: boolean;
   }): Promise<PreparedAddAuthority> {
-    assertAddAuthorityRole(params.role);
+    assertAddAuthorityRole(params.role, params.allowOwner);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
       params.newAuthority,
     );

@@ -100,10 +100,10 @@
         },
         {
           "name": "wallet",
-          "isMut": false,
+          "isMut": true,
           "isSigner": false,
           "docs": [
-            "Wallet PDA"
+            "Wallet PDA (owner_count)"
           ]
         },
         {
@@ -194,10 +194,10 @@
         },
         {
           "name": "wallet",
-          "isMut": false,
+          "isMut": true,
           "isSigner": false,
           "docs": [
-            "Wallet PDA"
+            "Wallet PDA (owner_count)"
           ]
         },
         {

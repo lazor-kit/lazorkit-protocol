@@ -97,16 +97,11 @@ fn test_create_wallet_secp256r1_repro() {
     println!("✅ Wallet created with Secp256r1 Authority");
 }
 
-// Red on `develop` since commit 5aecaf7 ("fix owner authority role policy"),
-// which made `new_role == 0` illegal at manage.rs:227. This test still asks
-// for role 0 (see the `add_auth_args` block below). Nobody noticed because the
-// litesvm suite has never run in CI.
-//
-// Left in place rather than edited: multi-owner support makes creating a second
-// Owner legal again, at which point this test describes the intended behaviour
-// and the attribute comes off. Un-ignoring it is part of that work's acceptance.
+// Two Owner passkeys on one wallet — the multi-device case this exists for. Was
+// red on `develop` since commit 5aecaf7 ("fix owner authority role policy"),
+// which made `new_role == 0` illegal, and stayed unnoticed because the litesvm
+// suite had never run in CI. It asks for role 0 twice, which is now the point.
 #[test]
-#[ignore = "asks for role 0; legal again once multi-owner lands, then un-ignore"]
 fn test_add_multiple_secp256r1_authorities() {
     let mut context = setup_test();
 
@@ -210,6 +205,9 @@ fn test_add_multiple_secp256r1_authorities() {
         payload.extend_from_slice(&pubkey_bytes1);
         payload.push(rp_id.len() as u8);
         payload.extend_from_slice(rp_id);
+        // `[policy_len u16][policy]`, inside the signed region. Empty here: an
+        // Owner is unbounded, and only a Delegate is required to carry one.
+        payload.extend_from_slice(&0u16.to_le_bytes());
         payload
     };
 
@@ -220,6 +218,7 @@ fn test_add_multiple_secp256r1_authorities() {
     add_auth_ix_data.extend_from_slice(&pubkey_bytes1);
     add_auth_ix_data.push(rp_id.len() as u8);
     add_auth_ix_data.extend_from_slice(rp_id);
+    add_auth_ix_data.extend_from_slice(&0u16.to_le_bytes());
     add_auth_ix_data.extend_from_slice(signature.as_ref());
 
     let add_auth_ix1 = Instruction {
@@ -281,6 +280,9 @@ fn test_add_multiple_secp256r1_authorities() {
         payload.extend_from_slice(&pubkey_bytes2);
         payload.push(rp_id.len() as u8);
         payload.extend_from_slice(rp_id);
+        // `[policy_len u16][policy]`, inside the signed region. Empty here: an
+        // Owner is unbounded, and only a Delegate is required to carry one.
+        payload.extend_from_slice(&0u16.to_le_bytes());
         payload
     };
 
@@ -291,6 +293,7 @@ fn test_add_multiple_secp256r1_authorities() {
     add_auth_ix_data.extend_from_slice(&pubkey_bytes2);
     add_auth_ix_data.push(rp_id.len() as u8);
     add_auth_ix_data.extend_from_slice(rp_id);
+    add_auth_ix_data.extend_from_slice(&0u16.to_le_bytes());
     add_auth_ix_data.extend_from_slice(signature.as_ref());
 
     let add_auth_ix2 = Instruction {
