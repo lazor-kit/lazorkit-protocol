@@ -35,6 +35,19 @@ pub mod config_offsets {
     pub const EXECUTION_FEE: usize = 80;
 }
 
+/// The keypair `initialize_protocol` now requires.
+///
+/// `ProtocolConfig` is the root of the fee system and has no earlier on-chain
+/// account to anchor trust to, so the anchor is a pubkey compiled into the
+/// binary (`state::protocol_config::PROTOCOL_INIT_AUTHORITY`). The devnet value
+/// is this committed test key — devnet carries no value, and a shared secret
+/// would make the local suites unrunnable.
+pub fn init_authority() -> Keypair {
+    const PATH: &str = "../keys/devnet-init-authority.json";
+    solana_sdk::signer::keypair::read_keypair_file(PATH)
+        .unwrap_or_else(|e| panic!("cannot read {PATH}: {e}. It is committed; is the tree clean?"))
+}
+
 /// Load the program and fund a payer, but do **not** run `initialize_protocol`.
 ///
 /// This is the state every fresh deployment is in for the window between
@@ -147,6 +160,45 @@ pub fn init_shard_ix(
         ],
         data: vec![14u8, shard_id],
     }
+}
+
+/// Build a `ProposeProtocolAdmin` (discriminator 15) instruction.
+pub fn propose_admin_ix(program_id: Pubkey, admin: Pubkey, new_admin: Pubkey) -> Instruction {
+    let (config_pda, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
+    let mut data = vec![15u8];
+    data.extend_from_slice(new_admin.as_ref());
+    Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(admin, true),
+            AccountMeta::new(config_pda, false),
+        ],
+        data,
+    }
+}
+
+/// Build an `AcceptProtocolAdmin` (discriminator 16) instruction.
+pub fn accept_admin_ix(program_id: Pubkey, new_admin: Pubkey) -> Instruction {
+    let (config_pda, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
+    Instruction {
+        program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(new_admin, true),
+            AccountMeta::new(config_pda, false),
+        ],
+        data: vec![16u8],
+    }
+}
+
+/// Lamports currently sitting in treasury shard 0.
+pub fn shard_balance(svm: &LiteSVM, program_id: Pubkey) -> u64 {
+    let (shard_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::TREASURY_SHARD, &[0u8]],
+        &program_id,
+    );
+    svm.get_account(&shard_pda).map(|a| a.lamports).unwrap_or(0)
 }
 
 /// The four accounts `try_collect_fee` requires as a suffix, keyed to an
@@ -611,7 +663,7 @@ pub fn setup_test() -> TestContext {
 
     // Load program
     let program_id = load_program(&mut svm);
-    initialize_protocol(&mut svm, &payer, program_id);
+    initialize_protocol(&mut svm, program_id);
 
     TestContext {
         svm,
@@ -632,7 +684,16 @@ fn load_program(svm: &mut LiteSVM) -> Pubkey {
     program_id
 }
 
-fn initialize_protocol(svm: &mut LiteSVM, payer: &Keypair, program_id: Pubkey) {
+/// Initialise the protocol as `PROTOCOL_INIT_AUTHORITY`.
+///
+/// The per-test payer cannot do this any more: `initialize_protocol` is gated on
+/// a pubkey compiled into the binary, because ProtocolConfig is the root of the
+/// fee system and there is no earlier on-chain account to anchor trust to.
+fn initialize_protocol(svm: &mut LiteSVM, program_id: Pubkey) {
+    let authority = init_authority();
+    svm.airdrop(&authority.pubkey(), 1_000_000_000)
+        .expect("Failed to fund init authority");
+    let payer = &authority;
     let (config_pda, _) =
         Pubkey::find_program_address(&[lazorkit_program::seeds::PROTOCOL_CONFIG], &program_id);
     let shard_id = [0u8];

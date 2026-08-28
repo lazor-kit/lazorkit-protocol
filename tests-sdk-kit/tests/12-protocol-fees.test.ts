@@ -42,6 +42,7 @@ import {
   airdrop,
   getProtocolAdmin,
   getProtocolTreasury,
+  initAuthority,
   systemTransferFromPda,
   type TestContext,
   makeClient,
@@ -120,15 +121,41 @@ describe('Protocol Fees', () => {
   // initialization" because it asserts on-chain idempotency.
 
   it('rejects double initialization', async () => {
+    // Signed by the init authority so this reaches the idempotency check
+    // rather than stopping at the authorization gate.
+    const authority = await initAuthority();
     const { instructions } = await client.initializeProtocol({
-      payer: ctx.payer.address,
+      payer: authority.address,
       admin: adminSigner.address,
       treasury: treasurySigner.address,
       creationFee: CREATION_FEE,
       executionFee: EXECUTION_FEE,
       numShards: NUM_SHARDS,
     });
-    await sendTxExpectError(ctx, instructions, [], 4001);
+    await sendTxExpectError(ctx, instructions, [authority], 4001);
+  });
+
+  it('rejects initialization by anyone but the init authority', async () => {
+    const { instructions } = await client.initializeProtocol({
+      payer: ctx.payer.address,
+      admin: ctx.payer.address,
+      treasury: ctx.payer.address,
+      creationFee: CREATION_FEE,
+      executionFee: EXECUTION_FEE,
+      numShards: NUM_SHARDS,
+    });
+    await sendTxExpectError(ctx, instructions, [], 4015);
+  });
+
+  it('rejects a fee above the ceiling', async () => {
+    const { instructions } = await client.updateProtocol({
+      admin: adminSigner.address,
+      creationFee: 10_000_001n, // MAX_PROTOCOL_FEE_LAMPORTS + 1
+      executionFee: EXECUTION_FEE,
+      enabled: true,
+      newTreasury: treasurySigner.address,
+    });
+    await sendTxExpectError(ctx, instructions, [adminSigner], 4014);
   });
 
   it('protocol config is initialized + valid', async () => {
@@ -233,7 +260,7 @@ describe('Protocol Fees', () => {
     );
   });
 
-  it('rejects fee-eligible instructions while protocol is disabled', async () => {
+  it('keeps fee-eligible instructions working while the protocol is disabled', async () => {
     const disable = await client.updateProtocol({
       admin: adminSigner.address,
       creationFee: CREATION_FEE,
@@ -245,12 +272,16 @@ describe('Protocol Fees', () => {
     client.invalidateProtocolCache();
 
     try {
-      await sendTxExpectError(
+      // The freeze fix: a disabled protocol stops charging, it does not stop
+      // users from transacting. Disc 0/4/7 are the only paths that move funds
+      // out of a vault, so reverting here put user funds behind a config flag.
+      const shardsBefore = await sumShardBalances();
+      await sendTx(
         ctx,
         [await buildRawCreateWalletIx(ctx.payer.address, await feeAccountsFor())],
         [],
-        4003,
       );
+      expect(await sumShardBalances()).toBe(shardsBefore);
     } finally {
       const enable = await client.updateProtocol({
         admin: adminSigner.address,
@@ -264,7 +295,7 @@ describe('Protocol Fees', () => {
     }
   });
 
-  it('rejects fee-eligible instructions when creation fee is zero', async () => {
+  it('keeps fee-eligible instructions working when the creation fee is zero', async () => {
     const zeroCreationFee = await client.updateProtocol({
       admin: adminSigner.address,
       creationFee: 0n,
@@ -276,12 +307,13 @@ describe('Protocol Fees', () => {
     client.invalidateProtocolCache();
 
     try {
-      await sendTxExpectError(
+      const shardsBefore = await sumShardBalances();
+      await sendTx(
         ctx,
         [await buildRawCreateWalletIx(ctx.payer.address, await feeAccountsFor())],
         [],
-        4012,
       );
+      expect(await sumShardBalances()).toBe(shardsBefore);
     } finally {
       const revert = await client.updateProtocol({
         admin: adminSigner.address,

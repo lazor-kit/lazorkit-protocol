@@ -28,6 +28,8 @@ export const DISC_UPDATE_PROTOCOL = 11;
 export const DISC_REGISTER_PAYER = 12;
 export const DISC_WITHDRAW_TREASURY = 13;
 export const DISC_INITIALIZE_TREASURY_SHARD = 14;
+export const DISC_PROPOSE_PROTOCOL_ADMIN = 15;
+export const DISC_ACCEPT_PROTOCOL_ADMIN = 16;
 
 // ─── Authority types ─────────────────────────────────────────────────
 export const AUTH_TYPE_ED25519 = 0;

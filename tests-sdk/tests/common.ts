@@ -12,6 +12,7 @@ import {
 // Tests run against `solana-test-validator` which loads the SBF built with
 // `--features devnet`, so the on-chain program ID is the devnet vanity.
 // Re-export under the legacy name so per-test files don't need to change.
+import { readFileSync } from 'fs';
 import {
   LazorKitClient,
   PROGRAM_ID_DEVNET,
@@ -76,6 +77,24 @@ export function getProtocolTreasury(): Keypair {
     throw new Error('getProtocolTreasury() called before setupTest()');
   }
   return _treasuryKp;
+}
+
+/**
+ * The keypair `initialize_protocol` now requires.
+ *
+ * ProtocolConfig is the root of the fee system and has no earlier on-chain
+ * account to anchor trust to, so the anchor is a pubkey compiled into the
+ * program (`PROTOCOL_INIT_AUTHORITY`). The devnet value is this committed test
+ * key — devnet carries no value, and a shared secret would make the local
+ * suites unrunnable.
+ */
+export function initAuthority(): Keypair {
+  // vitest runs with cwd at the package root, so this resolves the same in
+  // both module modes without depending on import.meta or __dirname.
+  const bytes = JSON.parse(
+    readFileSync('../keys/devnet-init-authority.json', 'utf8'),
+  ) as number[];
+  return Keypair.fromSecretKey(Uint8Array.from(bytes));
 }
 
 export interface TestContext {
@@ -176,8 +195,25 @@ async function ensureProtocolInitialized(
   }
 
   // Fresh validator — initialize protocol + shards.
+  //
+  // initialize_protocol is gated on PROTOCOL_INIT_AUTHORITY, so the random
+  // per-run payer cannot do it. Fund the authority and let it pay its own rent.
+  const authority = initAuthority();
+  await sendAndConfirmTransaction(
+    connection,
+    new Transaction().add(
+      (await import('@solana/web3.js')).SystemProgram.transfer({
+        fromPubkey: funderForAdmin.publicKey,
+        toPubkey: authority.publicKey,
+        lamports: 1 * LAMPORTS_PER_SOL,
+      }),
+    ),
+    [funderForAdmin],
+    { commitment: 'confirmed' },
+  );
+
   const initIxs = client.initializeProtocol({
-    payer: funderForAdmin.publicKey,
+    payer: authority.publicKey,
     admin: _adminKp.publicKey,
     treasury: _treasuryKp.publicKey,
     creationFee: CREATION_FEE,
@@ -186,7 +222,7 @@ async function ensureProtocolInitialized(
   }).instructions;
   const initTx = new Transaction();
   for (const ix of initIxs) initTx.add(ix);
-  await sendAndConfirmTransaction(connection, initTx, [funderForAdmin], {
+  await sendAndConfirmTransaction(connection, initTx, [authority], {
     commitment: 'confirmed',
   });
 

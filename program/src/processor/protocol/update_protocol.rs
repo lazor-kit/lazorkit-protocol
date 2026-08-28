@@ -2,7 +2,10 @@ use pinocchio::{
     account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
 };
 
-use crate::{error::ProtocolError, state::protocol_config::ProtocolConfig};
+use crate::{
+    error::ProtocolError,
+    state::protocol_config::{ProtocolConfig, MAX_PROTOCOL_FEE_LAMPORTS},
+};
 
 /// Processes the `UpdateProtocol` instruction.
 ///
@@ -26,6 +29,15 @@ pub fn process(
     let creation_fee = u64::from_le_bytes(instruction_data[0..8].try_into().unwrap());
     let execution_fee = u64::from_le_bytes(instruction_data[8..16].try_into().unwrap());
     let enabled = instruction_data[16];
+
+    // An unbounded fee is a freeze in disguise — see MAX_PROTOCOL_FEE_LAMPORTS.
+    if creation_fee > MAX_PROTOCOL_FEE_LAMPORTS || execution_fee > MAX_PROTOCOL_FEE_LAMPORTS {
+        return Err(ProtocolError::FeeExceedsMaximum.into());
+    }
+    // `enabled` is read as a boolean everywhere; refuse values that are neither.
+    if enabled > 1 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
     // 7 bytes padding at [17..24]
     let new_treasury: &[u8; 32] = instruction_data[24..56].try_into().unwrap();
 
