@@ -514,6 +514,10 @@ export class LazorKit {
   private buildCompactLayoutAndHash(
     fixedAccounts: AccountMeta[],
     userInstructions: ReadonlyArray<Instruction>,
+    // Threaded through rather than read off `fixedAccounts[0]`: the deferred
+    // layout lists the payer twice, and the whole point of the payer exclusion
+    // is that a duplicate entry must not launder it.
+    payer: Address,
   ): {
     compactInstructions: CompactInstruction[];
     remainingAccounts: AccountMeta[];
@@ -524,6 +528,7 @@ export class LazorKit {
     const { compactInstructions, remainingAccounts } = buildCompactLayout(
       fixedAddresses,
       userInstructions,
+      payer,
     );
     const allAccountMetas = [...fixedAccounts, ...remainingAccounts];
     const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
@@ -1223,6 +1228,7 @@ export class LazorKit {
         const { compactInstructions, remainingAccounts } = buildCompactLayout(
           fixedAccounts,
           params.instructions,
+          params.payer,
         );
         const packed = packCompactInstructions(compactInstructions);
         const ix = createExecuteIx({
@@ -1261,6 +1267,7 @@ export class LazorKit {
         const { compactInstructions, remainingAccounts } = buildCompactLayout(
           fixedAccounts,
           params.instructions,
+          params.payer,
         );
         const packed = packCompactInstructions(compactInstructions);
         const sessionKeyMeta: AccountMeta = {
@@ -1307,7 +1314,7 @@ export class LazorKit {
       { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
     ];
     const { compactInstructions, remainingAccounts, accountsHash } =
-      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions);
+      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions, params.payer);
     const packed = packCompactInstructions(compactInstructions);
     const signedPayload = concatBytes([packed, accountsHash]);
 
@@ -1409,7 +1416,7 @@ export class LazorKit {
       { address: params.payer, role: AccountRole.WRITABLE },
     ];
     const { compactInstructions, remainingAccounts, accountsHash } =
-      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions);
+      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions, params.payer);
     const instructionsHash = computeInstructionsHash(compactInstructions);
     const expiryOffsetBuf = new Uint8Array(2);
     expiryOffsetBuf[0] = expiryOffset & 0xff;

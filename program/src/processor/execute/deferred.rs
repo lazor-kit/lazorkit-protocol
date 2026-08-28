@@ -1,5 +1,5 @@
 use crate::{
-    compact::{parse_compact_instructions_ref_with_len, CompactInstructionRef},
+    compact::{compute_accounts_hash, parse_compact_instructions_ref_with_len},
     error::AuthError,
     state::deferred::DeferredExecAccount,
 };
@@ -35,6 +35,11 @@ pub fn process(
 ) -> ProgramResult {
     // Parse accounts
     let payer = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
+    let payer_key = payer.key();
+    // ExecuteDeferred has no session branch — its authorization came from the
+    // Authorize step, which is Secp256r1 only — so nothing narrows forwarding
+    // beyond the payer exclusion.
+    let session_key: Option<Pubkey> = None;
     let wallet_pda = accounts.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
     let vault_pda = accounts.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
     let deferred_pda = accounts.get(3).ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -151,10 +156,30 @@ pub fn process(
 
         account_metas.clear();
         cpi_accounts.clear();
-        for &acc in &decompressed.accounts {
+        // Signer forwarding is opt-in and never covers the fee payer.
+        //
+        // v1 forwarded every outer signer into every inner instruction that
+        // referenced it, which let a session limited to 0.001 SOL move 2 SOL
+        // out of the paymaster's own wallet: the action limits watch the
+        // vault, and the paymaster is not the vault.
+        //
+        // Three conditions now, and the high bit alone is not enough. It is
+        // real consent for a Secp256r1 authority — the compact bytes are in
+        // the signed payload, so the passkey holder signs the elevation. It
+        // is *not* consent in the session branch, where the session key
+        // holder is the adversary and would simply set the bit. So a session
+        // may only ever conscript its own signature, and nobody may ever
+        // conscript the fee payer's. Compared by key, not by position, so
+        // passing the payer twice cannot launder it.
+        for (i, &acc) in decompressed.accounts.iter().enumerate() {
+            let forwarded = decompressed.forward_signer[i]
+                && acc.is_signer()
+                && acc.key() != payer_key
+                && session_key.is_none_or(|sk| acc.key() == &sk);
+
             account_metas.push(AccountMeta {
                 pubkey: acc.key(),
-                is_signer: acc.is_signer() || acc.key() == vault_pda.key(),
+                is_signer: forwarded || acc.key() == vault_pda.key(),
                 is_writable: acc.is_writable(),
             });
             cpi_accounts.push(Account::from(acc));
@@ -190,47 +215,4 @@ fn compute_sha256(data: &[u8]) -> [u8; 32] {
         let _ = data;
     }
     hash
-}
-
-/// Compute SHA256 hash of all account pubkeys referenced by compact instructions.
-/// Matches execute::immediate::compute_accounts_hash.
-fn compute_accounts_hash(
-    accounts: &[AccountInfo],
-    compact_instructions: &[CompactInstructionRef<'_>],
-) -> Result<[u8; 32], ProgramError> {
-    let mut refs: Vec<&[u8]> = Vec::with_capacity(compact_instructions.len() * 4);
-
-    for ix in compact_instructions {
-        let program_idx = ix.program_id_index as usize;
-        if program_idx >= accounts.len() {
-            return Err(ProgramError::InvalidInstructionData);
-        }
-        refs.push(accounts[program_idx].key().as_ref());
-
-        for &acc_idx in ix.accounts {
-            let idx = acc_idx as usize;
-            if idx >= accounts.len() {
-                return Err(ProgramError::InvalidInstructionData);
-            }
-            refs.push(accounts[idx].key().as_ref());
-        }
-    }
-
-    #[allow(unused_assignments)]
-    let mut hash = [0u8; 32];
-    #[cfg(target_os = "solana")]
-    unsafe {
-        pinocchio::syscalls::sol_sha256(
-            refs.as_ptr() as *const u8,
-            refs.len() as u64,
-            hash.as_mut_ptr(),
-        );
-    }
-    #[cfg(not(target_os = "solana"))]
-    {
-        hash = [0xAA; 32];
-        let _ = refs;
-    }
-
-    Ok(hash)
 }

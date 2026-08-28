@@ -278,6 +278,106 @@ describe('Security', () => {
   // ─── Accounts hash mismatch ─────────────────────────────────────
 
   describe('Accounts hash binding', () => {
+    /// Rebuild the LazorKit instruction with one referenced account's privilege
+    /// changed, leaving the account set and every byte of instruction data alone.
+    /// This is the relayer's position: it cannot alter what was signed, but it
+    /// does choose the privileges the accounts carry when the transaction lands.
+    function reprivilege(
+      instructions: TransactionInstruction[],
+      target: PublicKey,
+      privilege: { isSigner: boolean; isWritable: boolean },
+    ): TransactionInstruction[] {
+      let found = false;
+      const out = instructions.map((ix) => {
+        if (!ix.programId.equals(PROGRAM_ID_DEVNET)) return ix;
+        return new TransactionInstruction({
+          programId: ix.programId,
+          data: ix.data,
+          keys: ix.keys.map((k) => {
+            if (!k.pubkey.equals(target)) return k;
+            found = true;
+            return { pubkey: k.pubkey, ...privilege };
+          }),
+        });
+      });
+      if (!found) throw new Error(`${target.toBase58()} is not in the LazorKit instruction`);
+      return out;
+    }
+
+    // M-4. The accounts hash used to cover only the 32-byte keys, so the flags
+    // byte was the relayer's to choose: it could hand an inner instruction an
+    // account the passkey holder had approved as read-only and mark it writable.
+    // The bystander below is exactly that — System::Transfer takes the first two
+    // accounts and ignores the rest, so it rides along as read-only and the
+    // legitimate transfer still lands.
+    it('rejects execute when a referenced account is upgraded to writable after signing', async () => {
+      const ownerKey = await generateMockSecp256r1Key();
+      const userSeed = crypto.randomBytes(32);
+      const result = await client.createWallet({
+        payer: ctx.payer.publicKey,
+        userSeed,
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: ownerKey.credentialIdHash,
+          compressedPubkey: ownerKey.publicKeyBytes,
+          rpId: ownerKey.rpId,
+        },
+      });
+      await sendTx(ctx, result.instructions);
+      await ctx.connection.confirmTransaction(
+        await ctx.connection.requestAirdrop(result.vaultPda, 2 * LAMPORTS_PER_SOL),
+        'confirmed',
+      );
+
+      const recipient = Keypair.generate().publicKey;
+      const bystander = Keypair.generate().publicKey;
+
+      const withBystander = () => {
+        const base = SystemProgram.transfer({
+          fromPubkey: result.vaultPda,
+          toPubkey: recipient,
+          lamports: 1_000_000,
+        });
+        base.keys.push({ pubkey: bystander, isSigner: false, isWritable: false });
+        return base;
+      };
+
+      const prepare = () =>
+        client.prepareExecute({
+          payer: ctx.payer.publicKey,
+          walletPda: result.walletPda,
+          secp256r1: {
+            credentialIdHash: ownerKey.credentialIdHash,
+            publicKeyBytes: ownerKey.publicKeyBytes,
+            authorityPda: result.authorityPda,
+          },
+          instructions: [withBystander()],
+        });
+
+      // Control: signed and submitted with the bystander read-only, as approved.
+      const good = await prepare();
+      const { instructions: goodIxs } = client.finalizeExecute(
+        good,
+        await fakeWebAuthnSign(ownerKey, good.challenge),
+      );
+      const before = await ctx.connection.getBalance(recipient);
+      await sendTx(ctx, goodIxs);
+      expect((await ctx.connection.getBalance(recipient)) - before).toBe(1_000_000);
+
+      // Attack: same signature, same accounts, bystander promoted to writable.
+      const tampered = await prepare();
+      const { instructions: tamperedIxs } = client.finalizeExecute(
+        tampered,
+        await fakeWebAuthnSign(ownerKey, tampered.challenge),
+      );
+      await sendTxExpectError(
+        ctx,
+        reprivilege(tamperedIxs, bystander, { isSigner: false, isWritable: true }),
+        [],
+        3005,
+      );
+    });
+
     it('rejects execute with swapped recipient accounts', async () => {
       const ownerKey = await generateMockSecp256r1Key();
       const userSeed = crypto.randomBytes(32);
@@ -354,7 +454,7 @@ describe('Security', () => {
       ];
       const { compactInstructions, remainingAccounts } = (
         await import('../../sdk/sdk-legacy/src/utils/compact')
-      ).buildCompactLayout(fixedAccounts, [transferIx]);
+      ).buildCompactLayout(fixedAccounts, [transferIx], ctx.payer.publicKey);
       const packed = packCompactInstructions(compactInstructions);
 
       // Compute accounts hash with recipientA (the one we sign)

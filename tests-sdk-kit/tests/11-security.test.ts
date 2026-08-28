@@ -230,6 +230,100 @@ describe('Security', () => {
   });
 
   describe('Accounts hash binding', () => {
+    /// Rebuild the LazorKit instruction with one referenced account's privilege
+    /// changed, leaving the account set and every byte of instruction data alone.
+    /// This is the relayer's position: it cannot alter what was signed, but it
+    /// does choose the privileges the accounts carry when the transaction lands.
+    function reprivilege(
+      instructions: readonly Instruction[],
+      target: Address,
+      role: AccountRole,
+    ): Instruction[] {
+      let found = false;
+      const out = instructions.map((ix) => {
+        if (ix.programAddress !== PROGRAM_ID_DEVNET) return ix;
+        return {
+          ...ix,
+          accounts: (ix.accounts ?? []).map((a) => {
+            if (a.address !== target) return a;
+            found = true;
+            return { ...a, role };
+          }),
+        };
+      });
+      if (!found) throw new Error(`${target} is not in the LazorKit instruction`);
+      return out;
+    }
+
+    // M-4. The accounts hash used to cover only the 32-byte keys, so the flags
+    // byte was the relayer's to choose: it could hand an inner instruction an
+    // account the passkey holder had approved as read-only and mark it writable.
+    // The bystander below is exactly that — System::Transfer takes the first two
+    // accounts and ignores the rest, so it rides along as read-only and the
+    // legitimate transfer still lands.
+    it('rejects execute when a referenced account is upgraded to writable after signing', async () => {
+      const ownerKey = await generateMockSecp256r1Key();
+      const userSeed = crypto.randomBytes(32);
+      const result = await client.createWallet({
+        payer: ctx.payer.address,
+        userSeed,
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: ownerKey.credentialIdHash,
+          compressedPubkey: ownerKey.publicKeyBytes,
+          rpId: ownerKey.rpId,
+        },
+      });
+      await sendTx(ctx, result.instructions);
+      await airdrop(ctx, result.vaultPda, 2n * 1_000_000_000n);
+
+      const recipient = (await generateKeyPairSigner()).address;
+      const bystander = (await generateKeyPairSigner()).address;
+
+      const withBystander = (): Instruction => {
+        const base = systemTransferFromPda(result.vaultPda, recipient, 1_000_000n);
+        return {
+          ...base,
+          accounts: [...(base.accounts ?? []), { address: bystander, role: AccountRole.READONLY }],
+        };
+      };
+
+      const prepare = async () =>
+        client.prepareExecute({
+          payer: ctx.payer.address,
+          walletPda: result.walletPda,
+          secp256r1: {
+            credentialIdHash: ownerKey.credentialIdHash,
+            publicKeyBytes: ownerKey.publicKeyBytes,
+            authorityPda: result.authorityPda,
+          },
+          instructions: [withBystander()],
+        });
+
+      // Control: signed and submitted with the bystander read-only, as approved.
+      const good = await prepare();
+      const { instructions: goodIxs } = client.finalizeExecute(
+        good,
+        await fakeWebAuthnSign(ownerKey, good.challenge),
+      );
+      const before = await getBalance(ctx, recipient);
+      await sendTx(ctx, goodIxs);
+      expect((await getBalance(ctx, recipient)) - before).toBe(1_000_000n);
+
+      // Attack: same signature, same accounts, bystander promoted to writable.
+      const tampered = await prepare();
+      const { instructions: tamperedIxs } = client.finalizeExecute(
+        tampered,
+        await fakeWebAuthnSign(ownerKey, tampered.challenge),
+      );
+      await sendTxExpectError(
+        ctx,
+        reprivilege(tamperedIxs, bystander, AccountRole.WRITABLE),
+        [],
+        3005,
+      );
+    });
+
     it('rejects execute with swapped recipient accounts', async () => {
       const ownerKey = await generateMockSecp256r1Key();
       const userSeed = crypto.randomBytes(32);
@@ -283,6 +377,7 @@ describe('Security', () => {
       const { compactInstructions, remainingAccounts } = buildCompactLayout(
         fixedAccounts,
         [transferIx],
+        ctx.payer.address,
       );
       const packed = packCompactInstructions(compactInstructions);
 

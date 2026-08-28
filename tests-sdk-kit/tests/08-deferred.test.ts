@@ -19,9 +19,11 @@ import {
   generateKeyPairSigner,
   type AccountMeta,
   type Address,
+  type Instruction,
 } from '@solana/kit';
 import {
   LazorKit,
+  PROGRAM_ID_DEVNET as PROGRAM_ID,
   SYSTEM_PROGRAM_ADDRESS,
   decodeAuthorityAccount,
   packCompactInstructions,
@@ -188,6 +190,85 @@ describe('Deferred Execution', () => {
       ownerAuthorityPda = result.authorityPda;
       await sendTx(ctx, result.instructions);
       await airdrop(ctx, vaultPda, 5n * LAMPORTS_PER_SOL);
+    });
+
+    // M-4, on the deferred path. The window between Authorize and
+    // ExecuteDeferred is where a relayer sits with a signature it cannot change
+    // and a transaction it fully controls. Binding only the account keys left
+    // the privileges for it to pick: a bystander the passkey holder approved as
+    // read-only could arrive writable. System::Transfer takes the first two
+    // accounts and ignores the rest, so the bystander rides along without
+    // changing what the legitimate transfer does.
+    it('rejects ExecuteDeferred when a referenced account is upgraded to writable', async () => {
+      // Its own wallet, so the shared vault's balance and the shared authority's
+      // counter stay exactly as the tests around this one expect them.
+      const own = await client.createWallet({
+        payer: ctx.payer.address,
+        userSeed: crypto.randomBytes(32),
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: ownerKey.credentialIdHash,
+          compressedPubkey: ownerKey.publicKeyBytes,
+          rpId: ownerKey.rpId,
+        },
+      });
+      await sendTx(ctx, own.instructions);
+      await airdrop(ctx, own.vaultPda, LAMPORTS_PER_SOL);
+
+      const recipient = (await generateKeyPairSigner()).address;
+      const bystander = (await generateKeyPairSigner()).address;
+
+      const amount = 1_000_000n;
+      const transfer = systemTransferFromPda(own.vaultPda, recipient, amount);
+      const withBystander: Instruction = {
+        ...transfer,
+        accounts: [...(transfer.accounts ?? []), { address: bystander, role: AccountRole.READONLY }],
+      };
+
+      const prepared = await client.prepareAuthorize({
+        payer: ctx.payer.address,
+        walletPda: own.walletPda,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: own.authorityPda,
+        },
+        instructions: [withBystander],
+      });
+      const { instructions: authIxs, deferredPayload } = client.finalizeAuthorize(
+        prepared,
+        await fakeWebAuthnSign(ownerKey, prepared.challenge),
+      );
+      await sendTx(ctx, authIxs);
+
+      const tx2 = await client.executeDeferredFromPayload({
+        payer: ctx.payer.address,
+        deferredPayload,
+      });
+
+      // The account set and the instruction data are untouched; only the
+      // bystander's privilege changes.
+      let found = false;
+      const tampered = tx2.instructions.map((ix) => {
+        if (ix.programAddress !== PROGRAM_ID) return ix;
+        return {
+          ...ix,
+          accounts: (ix.accounts ?? []).map((a) => {
+            if (a.address !== bystander) return a;
+            found = true;
+            return { ...a, role: AccountRole.WRITABLE };
+          }),
+        };
+      });
+      expect(found).toBe(true);
+
+      await sendTxExpectError(ctx, tampered, [], 3015);
+
+      // The authorization survives the failed attempt, so the honest execution
+      // still works — the relayer gains nothing by trying.
+      const before = await getBalance(ctx, recipient);
+      await sendTx(ctx, tx2.instructions);
+      expect((await getBalance(ctx, recipient)) - before).toBe(amount);
     });
 
     it('rejects ExecuteDeferred with wrong instructions (hash mismatch 3015)', async () => {

@@ -3,6 +3,7 @@ import {
   Keypair,
   PublicKey,
   SystemProgram,
+  TransactionInstruction,
   LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
@@ -38,7 +39,7 @@ import {
   createExecuteDeferredIx,
   createReclaimDeferredIx,
 } from '../../sdk/sdk-legacy/src/utils/instructions';
-import { ACCOUNT_DISCRIMINATOR } from '../../sdk/sdk-legacy/src';
+import { ACCOUNT_DISCRIMINATOR, LazorKitClient } from '../../sdk/sdk-legacy/src';
 
 describe('Deferred Execution', () => {
   let ctx: TestContext;
@@ -373,6 +374,92 @@ describe('Deferred Execution', () => {
         5 * LAMPORTS_PER_SOL,
       );
       await ctx.connection.confirmTransaction(sig, 'confirmed');
+    });
+
+    // M-4, on the deferred path. The window between Authorize and
+    // ExecuteDeferred is where a relayer sits with a signature it cannot change
+    // and a transaction it fully controls. Binding only the account keys left
+    // the privileges for it to pick: a bystander the passkey holder approved as
+    // read-only could arrive writable. System::Transfer takes the first two
+    // accounts and ignores the rest, so the bystander rides along without
+    // changing what the legitimate transfer does.
+    it('rejects ExecuteDeferred when a referenced account is upgraded to writable', async () => {
+      // Its own wallet: the tests around it hardcode the shared authority's
+      // counter (1, 2, 3, 4) and assert the total afterwards, so an extra
+      // authorization against that authority would renumber all of them.
+      const client = new LazorKitClient(ctx.connection);
+      const own = await client.createWallet({
+        payer: ctx.payer.publicKey,
+        userSeed: crypto.randomBytes(32),
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: ownerKey.credentialIdHash,
+          compressedPubkey: ownerKey.publicKeyBytes,
+          rpId: ownerKey.rpId,
+        },
+      });
+      await sendTx(ctx, own.instructions);
+      await ctx.connection.confirmTransaction(
+        await ctx.connection.requestAirdrop(own.vaultPda, LAMPORTS_PER_SOL),
+        'confirmed',
+      );
+
+      const recipient = Keypair.generate().publicKey;
+      const bystander = Keypair.generate().publicKey;
+
+      const amount = 1_000_000;
+      const transfer = SystemProgram.transfer({
+        fromPubkey: own.vaultPda,
+        toPubkey: recipient,
+        lamports: amount,
+      });
+      transfer.keys.push({ pubkey: bystander, isSigner: false, isWritable: false });
+
+      const prepared = await client.prepareAuthorize({
+        payer: ctx.payer.publicKey,
+        walletPda: own.walletPda,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: own.authorityPda,
+        },
+        instructions: [transfer],
+      });
+      const { instructions: authIxs, deferredPayload } = client.finalizeAuthorize(
+        prepared,
+        await fakeWebAuthnSign(ownerKey, prepared.challenge),
+      );
+      await sendTx(ctx, authIxs);
+
+      const tx2 = await client.executeDeferredFromPayload({
+        payer: ctx.payer.publicKey,
+        deferredPayload,
+      });
+
+      // The account set and the instruction data are untouched; only the
+      // bystander's privilege changes.
+      let found = false;
+      const tampered = tx2.instructions.map((ix) => {
+        if (!ix.programId.equals(PROGRAM_ID_DEVNET)) return ix;
+        return new TransactionInstruction({
+          programId: ix.programId,
+          data: ix.data,
+          keys: ix.keys.map((k) => {
+            if (!k.pubkey.equals(bystander)) return k;
+            found = true;
+            return { pubkey: k.pubkey, isSigner: false, isWritable: true };
+          }),
+        });
+      });
+      expect(found).toBe(true);
+
+      await sendTxExpectError(ctx, tampered, [], 3015);
+
+      // The authorization survives the failed attempt, so the honest execution
+      // still works — the relayer gains nothing by trying.
+      const before = await ctx.connection.getBalance(recipient);
+      await sendTx(ctx, tx2.instructions);
+      expect((await ctx.connection.getBalance(recipient)) - before).toBe(amount);
     });
 
     it('rejects ExecuteDeferred with wrong instructions (hash mismatch)', async () => {

@@ -307,6 +307,7 @@ function buildCompactLayoutAndHash(
   const { compactInstructions, remainingAccounts } = buildCompactLayout(
     fixedKeys,
     userInstructions,
+    fixedKeys[0],
   );
   const allAccountMetas: AccountMeta[] = [
     ...fixedAccounts,
@@ -1673,6 +1674,7 @@ export class LazorKitClient {
         const { compactInstructions, remainingAccounts } = buildCompactLayout(
           fixedAccounts,
           params.instructions,
+          params.payer,
         );
         const packed = packCompactInstructions(compactInstructions);
         const ix = createExecuteIx({
@@ -1713,6 +1715,7 @@ export class LazorKitClient {
         const { compactInstructions, remainingAccounts } = buildCompactLayout(
           fixedAccounts,
           params.instructions,
+          params.payer,
         );
         const packed = packCompactInstructions(compactInstructions);
 

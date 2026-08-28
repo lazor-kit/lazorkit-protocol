@@ -2,7 +2,7 @@ use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
-    compact::{parse_compact_instructions_ref_with_len, CompactInstructionRef},
+    compact::{compute_accounts_hash, parse_compact_instructions_ref_with_len},
     error::AuthError,
     processor::execute::actions::{
         evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
@@ -54,9 +54,12 @@ pub fn process(
 
     // Parse accounts
     let account_info_iter = &mut accounts.iter();
-    let _payer = account_info_iter
+    let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // Compared by key rather than by position when deciding what may be
+    // forwarded, so the same account passed twice cannot launder the payer.
+    let payer_key = payer.key();
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -110,6 +113,10 @@ pub fn process(
     // This is what makes the engine serve both account types: a session with
     // actions and an authority with a policy take the same path from here on.
     let policy = PolicyLocation::of(authority_data).filter(|loc| loc.is_present(authority_data));
+
+    // Set on the session branch. `None` means "no session-specific restriction",
+    // which is what an authority-authenticated Execute wants.
+    let mut session_key: Option<Pubkey> = None;
 
     // One clock read for both branches — policy evaluation needs the slot
     // whether the caller is a session or a policy-bearing authority.
@@ -208,6 +215,10 @@ pub fn process(
             if !signer_matched {
                 return Err(ProgramError::MissingRequiredSignature);
             }
+
+            // Owned, not borrowed: `session` is a stack copy read out of the
+            // account, so a reference to it dies with this arm.
+            session_key = Some(session.session_key);
         },
         _ => return Err(ProgramError::InvalidAccountData),
     }
@@ -299,10 +310,30 @@ pub fn process(
 
         account_metas.clear();
         cpi_accounts.clear();
-        for &acc in &decompressed.accounts {
+        // Signer forwarding is opt-in and never covers the fee payer.
+        //
+        // v1 forwarded every outer signer into every inner instruction that
+        // referenced it, which let a session limited to 0.001 SOL move 2 SOL
+        // out of the paymaster's own wallet: the action limits watch the
+        // vault, and the paymaster is not the vault.
+        //
+        // Three conditions now, and the high bit alone is not enough. It is
+        // real consent for a Secp256r1 authority — the compact bytes are in
+        // the signed payload, so the passkey holder signs the elevation. It
+        // is *not* consent in the session branch, where the session key
+        // holder is the adversary and would simply set the bit. So a session
+        // may only ever conscript its own signature, and nobody may ever
+        // conscript the fee payer's. Compared by key, not by position, so
+        // passing the payer twice cannot launder it.
+        for (i, &acc) in decompressed.accounts.iter().enumerate() {
+            let forwarded = decompressed.forward_signer[i]
+                && acc.is_signer()
+                && acc.key() != payer_key
+                && session_key.is_none_or(|sk| acc.key() == &sk);
+
             account_metas.push(AccountMeta {
                 pubkey: acc.key(),
-                is_signer: acc.is_signer() || acc.key() == vault_pda.key(),
+                is_signer: forwarded || acc.key() == vault_pda.key(),
                 is_writable: acc.is_writable(),
             });
             cpi_accounts.push(Account::from(acc));
@@ -366,53 +397,4 @@ pub fn process(
     }
 
     Ok(())
-}
-
-/// Compute SHA256 hash of all account pubkeys referenced by compact instructions (Issue #11).
-///
-/// Optimisation: pass each 32-byte pubkey as a separate slice to sol_sha256
-/// instead of concatenating them into an owned Vec first. sol_sha256 accepts
-/// an array of slices natively, so the concat step was pure overhead.
-fn compute_accounts_hash(
-    accounts: &[AccountInfo],
-    compact_instructions: &[CompactInstructionRef<'_>],
-) -> Result<[u8; 32], ProgramError> {
-    // Collect slice references (16 bytes each) instead of copying 32-byte pubkeys.
-    // With MAX_COMPACT_INSTRUCTIONS = 16 and a reasonable per-ix account count,
-    // this fits comfortably on the BPF heap.
-    let mut refs: Vec<&[u8]> = Vec::with_capacity(compact_instructions.len() * 4);
-
-    for ix in compact_instructions {
-        let program_idx = ix.program_id_index as usize;
-        if program_idx >= accounts.len() {
-            return Err(ProgramError::InvalidInstructionData);
-        }
-        refs.push(accounts[program_idx].key().as_ref());
-
-        for &acc_idx in ix.accounts {
-            let idx = acc_idx as usize;
-            if idx >= accounts.len() {
-                return Err(ProgramError::InvalidInstructionData);
-            }
-            refs.push(accounts[idx].key().as_ref());
-        }
-    }
-
-    #[allow(unused_assignments)]
-    let mut hash = [0u8; 32];
-    #[cfg(target_os = "solana")]
-    unsafe {
-        pinocchio::syscalls::sol_sha256(
-            refs.as_ptr() as *const u8,
-            refs.len() as u64,
-            hash.as_mut_ptr(),
-        );
-    }
-    #[cfg(not(target_os = "solana"))]
-    {
-        hash = [0xAA; 32];
-        let _ = refs;
-    }
-
-    Ok(hash)
 }
