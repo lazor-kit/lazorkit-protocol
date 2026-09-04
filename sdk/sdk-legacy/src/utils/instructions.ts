@@ -30,6 +30,7 @@ export const DISC_WITHDRAW_TREASURY = 13;
 export const DISC_INITIALIZE_TREASURY_SHARD = 14;
 export const DISC_PROPOSE_PROTOCOL_ADMIN = 15;
 export const DISC_ACCEPT_PROTOCOL_ADMIN = 16;
+export const DISC_MIGRATE_WALLET = 17;
 
 // ─── Authority types ─────────────────────────────────────────────────
 export const AUTH_TYPE_ED25519 = 0;
@@ -764,4 +765,75 @@ export function appendProtocolFeeAccounts(
     { pubkey: treasuryShardPda, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   );
+}
+
+
+// ─── MigrateWallet (v1 → v2) ────────────────────────────────────────
+
+/** SPL Token program — the classic one; pass a different id for Token-2022. */
+export const SPL_TOKEN_PROGRAM_ID = new PublicKey(
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+);
+
+export interface MigrateTokenPair {
+  /** The v1 vault's token account for this mint. */
+  sourceAta: PublicKey;
+  /** A token account owned by `destination` for the same mint. */
+  destAta: PublicKey;
+}
+
+/**
+ * Build a `MigrateWallet` instruction — sweep a v1 wallet's SOL and SPL tokens
+ * to `destination` and close the v1 PDAs, authorized by the v1 authority.
+ *
+ * Derive the v1 accounts with `./v1` and the v2 `destination` (its vault) with
+ * `./pdas`. `authSigner` is the Ed25519 owner key for an Ed25519 authority, or
+ * the fee payer as a non-signer placeholder for a passkey (whose approval rides
+ * in `authPayload` + a preceding Secp256r1 precompile instruction).
+ *
+ * The passkey's `authPayload` must be signed over the destination — build it
+ * with the existing `finalizeSecp256r1` flow using `DISC_MIGRATE_WALLET` and a
+ * `signedPayload` of `destination.toBuffer()`, and place the returned precompile
+ * instruction immediately before this one in the transaction.
+ */
+export function createMigrateWalletIx(params: {
+  payer: PublicKey;
+  v1Wallet: PublicKey;
+  v1Authority: PublicKey;
+  v1Vault: PublicKey;
+  destination: PublicKey;
+  refundDestination: PublicKey;
+  authSigner: PublicKey;
+  authSignerIsSigner: boolean;
+  tokens?: MigrateTokenPair[];
+  authPayload?: Uint8Array;
+  tokenProgram?: PublicKey;
+  programId: PublicKey;
+}): TransactionInstruction {
+  const tokens = params.tokens ?? [];
+  const keys = [
+    { pubkey: params.payer, isSigner: true, isWritable: true },
+    { pubkey: params.v1Wallet, isSigner: false, isWritable: true },
+    { pubkey: params.v1Authority, isSigner: false, isWritable: true },
+    { pubkey: params.v1Vault, isSigner: false, isWritable: true },
+    { pubkey: params.destination, isSigner: false, isWritable: true },
+    { pubkey: params.refundDestination, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: params.tokenProgram ?? SPL_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+    { pubkey: params.authSigner, isSigner: params.authSignerIsSigner, isWritable: false },
+  ];
+  for (const t of tokens) {
+    keys.push({ pubkey: t.sourceAta, isSigner: false, isWritable: true });
+    keys.push({ pubkey: t.destAta, isSigner: false, isWritable: true });
+  }
+
+  const data = Buffer.from(
+    concatBytes([
+      Uint8Array.from([DISC_MIGRATE_WALLET, tokens.length]),
+      params.authPayload ?? new Uint8Array(0),
+    ]),
+  );
+
+  return new TransactionInstruction({ programId: params.programId, keys, data });
 }
