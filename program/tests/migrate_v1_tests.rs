@@ -332,3 +332,300 @@ fn migrate_refuses_a_non_v1_wallet() {
         "a v2-shaped wallet must not be migratable through the v1 path"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Secp256r1 (passkey) — the path 85% of mainnet uses
+// ─────────────────────────────────────────────────────────────────────────
+
+use p256::ecdsa::{signature::Signer as _, Signature, SigningKey, VerifyingKey};
+use sha2::Digest;
+
+struct V1Passkey {
+    signing_key: SigningKey,
+    rp_id: String,
+    wallet: Pubkey,
+    vault: Pubkey,
+    authority: Pubkey,
+}
+
+/// Fabricate a v1 wallet controlled by a Secp256r1 passkey, funded with SOL.
+fn fabricate_v1_passkey_wallet(context: &mut TestContext, lamports: u64) -> V1Passkey {
+    let program_id = context.program_id;
+    let user_seed = rand::random::<[u8; 32]>();
+    let signing_key = SigningKey::random(&mut rand::thread_rng());
+    let pubkey_compressed = VerifyingKey::from(&signing_key)
+        .to_encoded_point(true)
+        .as_bytes()
+        .to_vec();
+    let credential_id_hash = rand::random::<[u8; 32]>();
+    let rp_id = "lazorkit.mainnet".to_string();
+    let rp_id_hash: [u8; 32] = sha2::Sha256::digest(rp_id.as_bytes()).into();
+
+    let (wallet, wallet_bump) =
+        Pubkey::find_program_address(&[V1_WALLET_SEED, &user_seed], &program_id);
+    let (vault, _) = Pubkey::find_program_address(&[V1_VAULT_SEED, wallet.as_ref()], &program_id);
+    let (authority, auth_bump) = Pubkey::find_program_address(
+        &[V1_AUTHORITY_SEED, wallet.as_ref(), &credential_id_hash],
+        &program_id,
+    );
+
+    let mut wdata = vec![0u8; 8];
+    wdata[0] = V1_DISC_WALLET;
+    wdata[1] = wallet_bump;
+    wdata[2] = 1;
+    set_program_account(context, wallet, wdata);
+
+    // v1 secp authority: header(48) ‖ credential_hash(32) ‖ pubkey(33) ‖ rpIdHash(32) = 145.
+    let mut adata = vec![0u8; 145];
+    adata[0] = V1_DISC_AUTHORITY;
+    adata[1] = 1; // Secp256r1
+    adata[2] = 0; // Owner
+    adata[3] = auth_bump;
+    adata[4] = 1; // version
+    adata[16..48].copy_from_slice(wallet.as_ref());
+    adata[48..80].copy_from_slice(&credential_id_hash);
+    adata[80..113].copy_from_slice(&pubkey_compressed);
+    adata[113..145].copy_from_slice(&rp_id_hash);
+    set_program_account(context, authority, adata);
+
+    context
+        .svm
+        .set_account(
+            vault,
+            solana_sdk::account::Account {
+                lamports,
+                data: vec![],
+                owner: solana_sdk::system_program::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .expect("set v1 vault");
+
+    V1Passkey {
+        signing_key,
+        rp_id,
+        wallet,
+        vault,
+        authority,
+    }
+}
+
+fn base64url_no_pad(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = match chunk.len() {
+            3 => (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8 | chunk[2] as u32,
+            2 => (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8,
+            _ => (chunk[0] as u32) << 16,
+        };
+        out.push(A[((b >> 18) & 0x3f) as usize] as char);
+        out.push(A[((b >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(A[((b >> 6) & 0x3f) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(A[(b & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// The Secp256r1 precompile instruction, in the exact fixed-offset layout the
+/// program's introspection requires (signature@16, pubkey@80, message@114, all
+/// indices self-referential 0xFFFF). The generic SDK builder lays the fields out
+/// differently, so this mirrors `buildSecp256r1PrecompileIx` in sdk-legacy.
+fn build_secp256r1_precompile_ix(
+    pubkey33: &[u8; 33],
+    sig64: &[u8; 64],
+    message: &[u8],
+) -> Instruction {
+    const HEADER: usize = 16;
+    let sig_off = HEADER;
+    let pk_off = sig_off + 64;
+    let msg_off = pk_off + 33 + 1; // 1 byte alignment padding
+    let mut data = vec![0u8; msg_off + message.len()];
+    data[0] = 1; // num signatures
+    data[1] = 0; // padding
+    data[2..4].copy_from_slice(&(sig_off as u16).to_le_bytes());
+    data[4..6].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    data[6..8].copy_from_slice(&(pk_off as u16).to_le_bytes());
+    data[8..10].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    data[10..12].copy_from_slice(&(msg_off as u16).to_le_bytes());
+    data[12..14].copy_from_slice(&(message.len() as u16).to_le_bytes());
+    data[14..16].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    data[sig_off..sig_off + 64].copy_from_slice(sig64);
+    data[pk_off..pk_off + 33].copy_from_slice(pubkey33);
+    data[msg_off..msg_off + message.len()].copy_from_slice(message);
+    Instruction {
+        program_id: "Secp256r1SigVerify1111111111111111111111111"
+            .parse()
+            .unwrap(),
+        accounts: vec![],
+        data,
+    }
+}
+
+/// Build the `[precompile, migrate]` instruction pair a passkey signs.
+///
+/// `signed_destination` is what the passkey commits to; `sysvar_ix_index` is
+/// where the instructions sysvar sits in the migrate account list (8).
+fn build_passkey_migrate(
+    context: &TestContext,
+    pk: &V1Passkey,
+    signed_destination: Pubkey,
+    migrate_accounts: Vec<AccountMeta>,
+    num_tokens: u8,
+) -> [Instruction; 2] {
+    let program_id = context.program_id;
+    let payer = context.payer.pubkey();
+    let slot = context.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
+    let counter: u32 = 1; // stored 0 + 1
+    let sysvar_ix_index: u8 = 8;
+
+    // auth_payload prefix (14 bytes): slot(8) counter(4) sysvarIdx(1) flags(1)
+    let mut prefix = Vec::with_capacity(14);
+    prefix.extend_from_slice(&slot.to_le_bytes());
+    prefix.extend_from_slice(&counter.to_le_bytes());
+    prefix.push(sysvar_ix_index);
+    prefix.push(0);
+
+    // challenge_hash = SHA256(disc ‖ prefix14 ‖ signed_payload ‖ payer ‖ counter ‖ program_id)
+    let mut h = sha2::Sha256::new();
+    h.update([17u8]);
+    h.update(&prefix);
+    h.update(signed_destination.as_ref());
+    h.update(payer.as_ref());
+    h.update(counter.to_le_bytes());
+    h.update(program_id.as_ref());
+    let challenge_hash: [u8; 32] = h.finalize().into();
+
+    let client_data_json = format!(
+        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\",\"origin\":\"https://{}\",\"crossOrigin\":false}}",
+        base64url_no_pad(&challenge_hash),
+        pk.rp_id
+    );
+    let cdj_hash: [u8; 32] = sha2::Sha256::digest(client_data_json.as_bytes()).into();
+
+    let rp_id_hash: [u8; 32] = sha2::Sha256::digest(pk.rp_id.as_bytes()).into();
+    let mut authenticator_data = Vec::new();
+    authenticator_data.extend_from_slice(&rp_id_hash);
+    authenticator_data.push(0x01); // user present
+    authenticator_data.extend_from_slice(&1u32.to_be_bytes()); // webauthn counter
+
+    let mut message = authenticator_data.clone();
+    message.extend_from_slice(&cdj_hash);
+
+    // The Secp256r1 precompile requires a low-S signature; p256 does not
+    // normalize by default.
+    let sig: Signature = pk.signing_key.sign(&message);
+    let sig = sig.normalize_s().unwrap_or(sig);
+    let sig_bytes: [u8; 64] = sig.to_bytes().into();
+    let pubkey_compressed: [u8; 33] = VerifyingKey::from(&pk.signing_key)
+        .to_encoded_point(true)
+        .as_bytes()
+        .try_into()
+        .unwrap();
+
+    let precompile_ix = build_secp256r1_precompile_ix(&pubkey_compressed, &sig_bytes, &message);
+
+    // Full auth_payload: prefix14 ‖ authDataLen(2) ‖ authData ‖ cdjLen(2) ‖ cdj
+    let mut auth_payload = prefix;
+    auth_payload.extend_from_slice(&(authenticator_data.len() as u16).to_le_bytes());
+    auth_payload.extend_from_slice(&authenticator_data);
+    auth_payload.extend_from_slice(&(client_data_json.len() as u16).to_le_bytes());
+    auth_payload.extend_from_slice(client_data_json.as_bytes());
+
+    let mut data = vec![DISC_MIGRATE, num_tokens];
+    data.extend_from_slice(&auth_payload);
+
+    let migrate_ix = Instruction {
+        program_id,
+        accounts: migrate_accounts,
+        data,
+    };
+    [precompile_ix, migrate_ix]
+}
+
+/// Passkey account prefix — index 9 (Ed25519 signer slot) is unused, filled with
+/// the payer as a non-signer placeholder.
+fn passkey_prefix(
+    context: &TestContext,
+    pk: &V1Passkey,
+    destination: Pubkey,
+    refund_dest: Pubkey,
+) -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new(context.payer.pubkey(), true),
+        AccountMeta::new(pk.wallet, false),
+        AccountMeta::new(pk.authority, false),
+        AccountMeta::new(pk.vault, false),
+        AccountMeta::new(destination, false),
+        AccountMeta::new(refund_dest, false),
+        AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+        AccountMeta::new_readonly(spl_token_id(), false),
+        AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
+        AccountMeta::new_readonly(context.payer.pubkey(), false),
+    ]
+}
+
+#[test]
+fn passkey_migrates_vault_sol_and_token() {
+    let mut context = setup_test();
+    let vault_funds = 1_200_000_000u64;
+    let pk = fabricate_v1_passkey_wallet(&mut context, vault_funds);
+
+    let mint = Pubkey::new_unique();
+    create_mint(&mut context.svm, mint, Pubkey::new_unique(), 1_000_000_000);
+    let source_ata = Pubkey::new_unique();
+    let held = 74_000_000u64; // 74 "USDC"
+    create_token_account(&mut context.svm, source_ata, mint, pk.vault, held);
+
+    let destination = Pubkey::new_unique();
+    let dest_ata = Pubkey::new_unique();
+    create_token_account(&mut context.svm, dest_ata, mint, destination, 0);
+    let refund_dest = Pubkey::new_unique();
+
+    let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
+    accounts.push(AccountMeta::new(source_ata, false));
+    accounts.push(AccountMeta::new(dest_ata, false));
+
+    let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 1);
+    let payer = context.payer.insecure_clone();
+    try_send(&mut context.svm, &payer, &ixs, &[&payer]).expect("passkey migrate must succeed");
+
+    assert_eq!(token_amount(&context, dest_ata), held);
+    assert_eq!(lamports_of(&context, &destination), vault_funds);
+    assert_eq!(lamports_of(&context, &pk.vault), 0);
+    assert_eq!(lamports_of(&context, &pk.wallet), 0);
+    assert_eq!(lamports_of(&context, &pk.authority), 0);
+}
+
+/// The passkey signs approval for one destination. A relayer that swaps in a
+/// different destination breaks the challenge, so the sweep cannot be
+/// redirected — this is the anti-redirect binding, on the path that matters.
+#[test]
+fn passkey_migrate_cannot_be_redirected() {
+    let mut context = setup_test();
+    let pk = fabricate_v1_passkey_wallet(&mut context, 1_000_000_000);
+
+    let signed_destination = Pubkey::new_unique();
+    let attacker_destination = Pubkey::new_unique();
+    let refund_dest = Pubkey::new_unique();
+
+    // Sign for `signed_destination`, but build the account list with the
+    // attacker's destination at index 4.
+    let accounts = passkey_prefix(&context, &pk, attacker_destination, refund_dest);
+    let ixs = build_passkey_migrate(&context, &pk, signed_destination, accounts, 0);
+
+    let payer = context.payer.insecure_clone();
+    let result = try_send(&mut context.svm, &payer, &ixs, &[&payer]);
+    let err = format!("{:?}", result.as_ref().err().unwrap());
+    assert!(
+        err.contains("Custom(3005)"),
+        "expected InvalidMessageHash (3005) from the destination binding, got: {err}"
+    );
+    assert_eq!(lamports_of(&context, &pk.vault), 1_000_000_000);
+    assert_eq!(lamports_of(&context, &attacker_destination), 0);
+}
