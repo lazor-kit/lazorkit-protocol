@@ -22,6 +22,7 @@ pub mod compact;
 pub mod entrypoint;
 pub mod error;
 pub mod instruction;
+pub mod legacy;
 pub mod processor;
 pub mod seeds;
 pub mod state;
