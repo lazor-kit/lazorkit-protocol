@@ -8,6 +8,7 @@ import {
   Connection,
   Keypair,
   LAMPORTS_PER_SOL,
+  PublicKey,
   SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
@@ -20,11 +21,19 @@ import * as path from 'path';
 import {
   LazorKitClient,
   Actions,
+  serializeActions,
   ed25519,
   session,
   ROLE_ADMIN,
   ROLE_SPENDER,
 } from '../../sdk/sdk-legacy/src';
+
+// v2 rank/policy split (H-2): a Delegate (ROLE_SPENDER) MUST carry a spend
+// policy — rank says what it manages, policy says what it may spend. A
+// policy-less Delegate is rejected with DelegateRequiresPolicy (3033).
+const DELEGATE_POLICY = serializeActions([
+  Actions.solLimit(BigInt(0.1 * 1_000_000_000)),
+]);
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 
 const RPC_URL = process.env.RPC_URL || 'https://api.devnet.solana.com';
@@ -39,10 +48,11 @@ interface TxResult {
 }
 
 async function loadPayer(): Promise<Keypair> {
-  const keypairPath = path.resolve(
-    process.env.HOME || '~',
-    '.config/solana/id.json',
-  );
+  // PAYER_KEYPAIR overrides the default CLI keypair — lets this run against a
+  // staging slot with a dedicated funded key without touching ~/.config.
+  const keypairPath = process.env.PAYER_KEYPAIR
+    ? path.resolve(process.env.PAYER_KEYPAIR)
+    : path.resolve(process.env.HOME || '~', '.config/solana/id.json');
   const raw = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
   return Keypair.fromSecretKey(new Uint8Array(raw));
 }
@@ -100,7 +110,15 @@ function record(label: string, result: TxResult) {
 async function main() {
   const connection = new Connection(RPC_URL, 'confirmed');
   const payer = await loadPayer();
-  const client = new LazorKitClient(connection);
+  // LAZORKIT_PROGRAM_ID pins the target program — required for a staging slot,
+  // since RPC-based inference would otherwise resolve devnet to the shared id.
+  const client = new LazorKitClient(
+    connection,
+    process.env.LAZORKIT_PROGRAM_ID
+      ? new PublicKey(process.env.LAZORKIT_PROGRAM_ID)
+      : undefined,
+  );
+  console.log(`Program: ${client.programId.toBase58()}`);
 
   const payerBalance = await connection.getBalance(payer.publicKey);
   console.log(`Payer:   ${payer.publicKey.toBase58()}`);
@@ -278,6 +296,7 @@ async function main() {
       adminSigner: ed25519(ed25519AdminKp.publicKey, ed25519AdminAuthPda),
       newAuthority: { type: 'ed25519', publicKey: ed25519SpenderKp.publicKey },
       role: ROLE_SPENDER,
+      policy: DELEGATE_POLICY,
     });
     const r = await sendAndMeasure(connection, payer, instructions, [
       ed25519AdminKp,
@@ -325,6 +344,7 @@ async function main() {
         rpId: secpSpenderKey.rpId,
       },
       role: ROLE_SPENDER,
+      policy: DELEGATE_POLICY,
     });
     const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
     const { instructions, newAuthorityPda } = client.finalizeAddAuthority(prepared, webauthnResponse);
