@@ -185,6 +185,13 @@ pub fn process(
         if auth.role != 0 {
             return Err(AuthError::PermissionDenied.into());
         }
+        // A policy-bearing (bounded) Owner may not transfer ownership: the new
+        // owner is written with `policy_len = 0`, so a bounded Owner could shed
+        // its own spending bound by transferring to a fresh key it controls.
+        // Same principle as the CreateSession / AddAuthority / Authorize guards.
+        if auth.policy_len != 0 {
+            return Err(AuthError::PermissionDenied.into());
+        }
 
         // Authenticate Current Owner.
         // Sign over payer + new_owner + refund_dest to prevent substitution attacks.

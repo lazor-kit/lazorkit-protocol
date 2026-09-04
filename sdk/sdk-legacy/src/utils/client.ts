@@ -2127,11 +2127,17 @@ export class LazorKitClient {
     });
 
     // signed_payload = destination || v1_wallet || num_tokens || refund_dest
+    //                  || source_ata[0] || … || source_ata[n-1]
+    // The trailing source ATAs bind WHICH token accounts move, not just how many
+    // — without them a relayer could keep the count and swap in dust it created,
+    // stranding the user's real tokens when the vault closes. Order must match
+    // the program's read order (the migrateTokens order used to build the ix).
     const signedPayload = concatBytes([
       v2Vault.toBytes(),
       v1.wallet.toBytes(),
       Uint8Array.from([tokens.length]),
       params.payer.toBytes(),
+      ...migrateTokens.map((t) => t.sourceAta.toBytes()),
     ]);
 
     if (authType === AUTH_TYPE_ED25519) {

@@ -138,11 +138,25 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     // a relayer cannot redirect the reclaimed PDA/ATA rent to itself). Ed25519
     // ignores this — its transaction signature already covers the data byte and
     // every account — but building it for both is harmless.
-    let mut signed_payload = Vec::with_capacity(32 + 32 + 1 + 32);
+    let mut signed_payload = Vec::with_capacity(32 + 32 + 1 + 32 + num_tokens * 32);
     signed_payload.extend_from_slice(destination.key().as_ref());
     signed_payload.extend_from_slice(v1_wallet.key().as_ref());
     signed_payload.push(num_tokens as u8);
     signed_payload.extend_from_slice(refund_dest.key().as_ref());
+    // Bind the exact token accounts that move, not merely how many. Binding the
+    // count alone is not enough: a relayer could keep `num_tokens` unchanged but
+    // swap the source ATAs for dust it created (any party may create a
+    // vault-owned ATA), migrate the dust, and let the unconditional close below
+    // strand the user's real tokens in the now-orphaned vault. Folding each
+    // source ATA key into the signed payload puts them inside the Secp256r1
+    // challenge, so any swap / drop / reorder fails authentication (3005).
+    // Ed25519 already binds every account through its transaction signature.
+    for i in 0..num_tokens {
+        let source_ata = accounts
+            .get(9 + i * 3)
+            .ok_or(ProgramError::NotEnoughAccountKeys)?;
+        signed_payload.extend_from_slice(source_ata.key().as_ref());
+    }
 
     let auth_data = unsafe { v1_authority.borrow_mut_data_unchecked() };
     match auth_header.authority_type {
