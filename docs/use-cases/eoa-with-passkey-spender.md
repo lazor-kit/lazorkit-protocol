@@ -1,10 +1,10 @@
-# EOA Owner + Passkey Spender
+# EOA Owner + Passkey Delegate
 
 A user already has a Solana keypair (an EOA — externally owned account) and
 you want to give them passkey-based "tap-to-sign" UX without taking custody
 of their keys or asking them to migrate. This guide attaches a passkey as a
-**Spender** authority on a LazorKit smart wallet whose **Owner** is the
-existing EOA.
+**Delegate** authority (the constant is `ROLE_SPENDER = 2`) on a LazorKit smart
+wallet whose **Owner** is the existing EOA.
 
 ## Who this is for
 
@@ -44,7 +44,7 @@ graph TD
     Wallet[Wallet PDA]
     Vault["Vault PDA<br/>holds SOL + tokens"]
     OwnerAuth["Authority: Owner<br/>type = Ed25519<br/>= EOA's pubkey"]
-    SpenderAuth["Authority: Spender<br/>type = Secp256r1<br/>= passkey credential"]
+    SpenderAuth["Authority: Delegate<br/>type = Secp256r1<br/>= passkey credential"]
 
     EOA -.signs as.-> OwnerAuth
     Passkey -.signs as.-> SpenderAuth
@@ -96,7 +96,7 @@ sequenceDiagram
     WA-->>App: credentialId, public key
     App->>EOA: sign addAuthority tx
     EOA-->>App: signed
-    App->>LK: addAuthority { adminSigner: EOA, newAuthority: passkey, role: Spender }
+    App->>LK: addAuthority { adminSigner: EOA, newAuthority: passkey, role: Delegate }
     LK-->>App: spenderAuthPda
     end
 
@@ -179,7 +179,7 @@ SDK auto-prepends a `RegisterPayer` instruction on the relayer's first
 fee-paying tx (one-time ~0.00112 SOL FeeRecord rent); subsequent txs skip
 that step.
 
-### 2. EOA adds the passkey as a Spender
+### 2. EOA adds the passkey as a Delegate
 
 The EOA must sign this transaction — it's the authorization for adding the
 new authority.
@@ -259,11 +259,11 @@ proves possession of the credential when the Vault PDA is about to spend.
 These boundaries are enforced on-chain (verified against the program code
 cited beside each row).
 
-| Action | Spender (passkey) | Owner (EOA) | Where it's enforced |
+| Action | Delegate (passkey) | Owner (EOA) | Where it's enforced |
 |---|---|---|---|
 | Execute immediate transactions (transfers, CPI to any program) | ✅ | ✅ | [program/src/processor/execute/immediate.rs:100-149](../../program/src/processor/execute/immediate.rs) |
 | Add another authority | ❌ | ✅ | [program/src/processor/authority/manage.rs:210-212](../../program/src/processor/authority/manage.rs) |
-| Remove an authority | ❌ | ✅ (Admin/Spender only — Owner is unremovable) | [program/src/processor/authority/manage.rs:427-439](../../program/src/processor/authority/manage.rs) |
+| Remove an authority | ❌ | ✅ (Admin/Delegate only — Owner is unremovable) | [program/src/processor/authority/manage.rs:427-439](../../program/src/processor/authority/manage.rs) |
 | Create / revoke sessions | ❌ | ✅ | [program/src/processor/session/create.rs:197-201](../../program/src/processor/session/create.rs) |
 | Use deferred-execution flow (large txs) | ❌ | ✅ (Owner/Admin + secp256r1 only) | [program/src/processor/execute/authorize.rs:126-129](../../program/src/processor/execute/authorize.rs) |
 | Transfer ownership | ❌ | ✅ (Owner only) | [program/src/processor/authority/transfer_ownership.rs:167-169](../../program/src/processor/authority/transfer_ownership.rs) |

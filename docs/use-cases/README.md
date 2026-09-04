@@ -9,7 +9,7 @@ pattern.
 
 | Pattern | Who it's for | Guide |
 |---|---|---|
-| EOA owner + passkey spender | Teams onboarding existing Solana users who want to add a passkey for "tap-to-sign" UX without giving up their EOA key | [eoa-with-passkey-spender.md](./eoa-with-passkey-spender.md) |
+| EOA owner + passkey delegate | Teams onboarding existing Solana users who want to add a passkey for "tap-to-sign" UX without giving up their EOA key | [eoa-with-passkey-spender.md](./eoa-with-passkey-spender.md) |
 
 ## Planned (not yet written)
 

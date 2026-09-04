@@ -147,6 +147,17 @@ The recipe in `docs/reviews/2026-05-23-strict-fee-merge-readiness.md` §
 worktree, load it into a local validator as upgradeable, create real state,
 upgrade in place to the new binary, re-run. Record both SBF SHA256 hashes.
 
+For a rehearsal on **live devnet** at a throwaway program id — e.g. to hand a
+direct integrator a v2 wire-format target before the mainnet swap — build with
+the `staging` cluster feature. It declares a fresh program id alongside
+`mainnet`/`devnet` (`assertions/src/lib.rs`, plus the matching
+`PROTOCOL_INIT_AUTHORITY` arm), so the v2 build (which pins its own id, M-2) can
+run at an id that is not the vanity one. The full v1→v2 migrate path has been
+rehearsed this way on devnet: deploy v1 upgradeable to the staging id (v1 has no
+self-id assertion, so it deploys anywhere), create + fund a real v1 wallet with
+the v1 SDK, `solana program deploy --upgrade` to v2, then `MigrateWallet` — SOL
+swept to the owner-approved destination and the v1 wallet + authority closed.
+
 ### 6. Deploy
 
 ```bash

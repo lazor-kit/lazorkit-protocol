@@ -14,7 +14,7 @@ security_txt! {
     source_code: "https://github.com/lazor-kit/lazorkit-protocol",
     source_revision: default_env!("GITHUB_SHA", ""),
     source_release: default_env!("GITHUB_REF_NAME", ""),
-    auditors: "Accretion Labs (Solana Foundation, Feb 2026, A26SFR1) — https://github.com/lazor-kit/lazorkit-protocol/blob/main/audits/2026-accretion-solana-foundation-lazorkit-audit-A26SFR1.pdf"
+    auditors: "Accretion Labs (Solana Foundation, Feb 2026, A26SFR1) — SCOPE: program-v2 @ 79cfc6c3 only; the fee layer and the instructions added to this deployed artifact since are NOT covered by that report. https://github.com/lazor-kit/lazorkit-protocol/blob/main/audits/2026-accretion-solana-foundation-lazorkit-audit-A26SFR1.pdf"
 }
 
 pub mod auth;
