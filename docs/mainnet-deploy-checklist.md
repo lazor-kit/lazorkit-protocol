@@ -41,12 +41,15 @@ is the human process: keys, comms, and the decisions in section 2.
 - [ ] **Custody confirmed**: the upgrade authority
       (`4fZM6RPR…`) and the ProtocolConfig admin (`24fx48GA…`) are both keys you
       can sign with, ideally in cold storage / multisig.
-- [ ] **Rollout shape chosen** (see `docs/migration-v1-to-v2.md`):
-      - *Immediate in-place* — v2 goes live now; un-migrated v1 wallets can only
-        call `MigrateWallet` until they migrate (a freeze window for normal use;
-        funds stay safe). Simpler, one upgrade.
-      - *v1-hotfix-first* — ship a v1.x migrate-out helper, let users migrate
-        while v1 still works, upgrade to full v2 after. No freeze; two upgrades.
+- [x] **Rollout: immediate in-place upgrade** (decided). One upgrade at the
+      vanity id. Un-migrated v1 wallets can only call `MigrateWallet` until they
+      migrate — a freeze window for normal use; funds stay safe. Two hard
+      preconditions this rollout adds:
+      - [ ] **The migration UI is live and tested** before the upgrade (built on
+            `LazorKitClient.migrateV1Wallet`; see `docs/migration-ui-flow.md`), so
+            a frozen user can migrate immediately.
+      - [ ] **Users/integrator announced** ahead of the window — a v1 wallet needs
+            one signed migration before transacting again.
 - [ ] **User / integrator comms drafted.** Migration is **user-signed** — one
       `MigrateWallet` transaction per wallet, Owner-rank key required. Dormant
       wallets that never return keep their funds in v1 vaults (reachable only via

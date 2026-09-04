@@ -58,23 +58,33 @@ id, `solana program deploy --upgrade` swapping the binary in place (Data Length
 MigrateWallet moving 2 SOL and 74 tokens to the v2 destination and closing the v1
 PDAs. Re-run it against the real binaries before touching mainnet.
 
-## Rollout: two shapes, pick before you deploy
+## Rollout: immediate in-place upgrade (decided)
 
-**A. Immediate in-place upgrade (a short freeze window).** Upgrade the vanity id
-to v2 now. The instant you do, a v1 wallet's normal `Execute` stops working (v2
-rejects the v1 discriminator), so until a user migrates they can *only* call
-`MigrateWallet`. Their funds are never at risk — the vault is untouched until the
-user acts — but their wallet is frozen for everything else. Value is
-concentrated in a small number of wallets (check the survey), so announcing and
-migrating the active users promptly clears most of it quickly.
+**The chosen rollout is a single in-place upgrade at the vanity id.** Reasons:
+one upgrade, no v1 branch to maintain, and it retires the two live-on-v1 issues
+(the anti-CPI takeover and the Token-2022 limit bypass) at once. The cost is a
+freeze window, accepted below.
 
-**B. v1 hotfix first (no freeze).** Ship a v1.x that adds only a migrate-out
-helper, leaving all v1 behaviour intact, and optionally fixes C-1. Users migrate
-over an open window while v1 still works normally; upgrade to full v2 only after
-the vaults are drained. Two mainnet upgrades and a v1 branch, but no user is ever
-frozen. Heavier; choose it if the freeze window in (A) is unacceptable.
+The instant v2 lands, a v1 wallet's normal `Execute` stops working — v2 rejects
+the v1 account discriminators — so until a user migrates they can *only* call
+`MigrateWallet`. **Their funds are never at risk:** the vault is untouched until
+the user acts. What's frozen is normal use of the v1 wallet, not the money.
 
-Either way the migration instruction and its safety properties are identical.
+Because of that freeze, two things MUST be true before the upgrade:
+
+1. **The migration UI is live and tested** (built on `LazorKitClient.migrateV1Wallet`
+   / `docs/migration-ui-flow.md`), so a user hitting the freeze can migrate
+   immediately.
+2. **Users are told first.** Announce the window; a v1 wallet will need one
+   signed migration before it transacts again. Value is concentrated in a small
+   number of wallets (check the survey), so contacting the active holders clears
+   most of it quickly. Dormant wallets keep their funds safely in v1 and migrate
+   whenever their owner returns.
+
+The alternative — a v1 hotfix that adds a migrate-out helper first, so nobody is
+ever frozen — was considered and set aside: it needs two mainnet upgrades and a
+v1 branch, and the freeze window is acceptable given the migration UI is ready.
+The migration instruction and its safety properties are identical either way.
 
 ## Pre-mainnet rehearsal (local validator)
 
