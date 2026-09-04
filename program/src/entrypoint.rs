@@ -148,9 +148,19 @@ fn try_collect_fee<'a>(
     // error.
     let configured = if maybe_config.owner() == program_id {
         let config_data = maybe_config.try_borrow_data()?;
-        ProtocolConfig::check(&config_data).map_err(|_| ProtocolError::ProtocolNotInitialized)?;
-        let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
-        Some((config.creation_fee, config.execution_fee, config.enabled))
+        // A program-owned config that fails validation — a wrong discriminator,
+        // or a future account-version this deploy never migrated it to — is
+        // treated as "unconfigured, skip fee collection", NOT reverted.
+        // Reverting here would freeze every vault-signing path on a config
+        // condition: the exact C-1 failure class. Fail safe — no fee/config
+        // state may ever strand a user's funds.
+        match ProtocolConfig::check(&config_data) {
+            Ok(()) => {
+                let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
+                Some((config.creation_fee, config.execution_fee, config.enabled))
+            },
+            Err(_) => None,
+        }
     } else {
         None
     };
@@ -302,16 +312,14 @@ fn try_collect_fee<'a>(
             .ok_or(ProgramError::ArithmeticOverflow)?;
         match discriminator {
             0 => {
-                record.wallet_count = record
-                    .wallet_count
-                    .checked_add(1)
-                    .ok_or(ProgramError::ArithmeticOverflow)?;
+                // Analytics counters (u32), not consensus. Saturate rather than
+                // revert: a `checked_add` here would brick a high-volume payer's
+                // fee-paying instructions at u32::MAX — a fee-plumbing revert on a
+                // vault-signing path, the same failure class as C-1.
+                record.wallet_count = record.wallet_count.saturating_add(1);
             },
             4 | 7 => {
-                record.tx_count = record
-                    .tx_count
-                    .checked_add(1)
-                    .ok_or(ProgramError::ArithmeticOverflow)?;
+                record.tx_count = record.tx_count.saturating_add(1);
             },
             // Unreachable: the caller already refused anything outside {0,4,7}
             // when it picked the fee. A `unreachable!()` here would compile to a
