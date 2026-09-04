@@ -23,6 +23,12 @@ is the human process: keys, comms, and the decisions in section 2.
 - [ ] A **fresh** v1 survey run privately (`scripts/survey-v1.ts`) — balances and
       wallet set drift. Keep the output off the public repo.
 
+- [ ] **If fees will be enabled at init:** initialise at least one treasury
+      shard BEFORE (or atomically with) enabling fees. Enabling a non-zero fee
+      with no shard reverts every CreateWallet/Execute/ExecuteDeferred until a
+      shard exists (audit MEDIUM — bootstrap freeze). The existing mainnet
+      already has shards, so this applies only to a fresh init.
+
 ## 1. Decisions to confirm (operator / team only)
 
 - [ ] **`PROTOCOL_INIT_AUTHORITY`** for the mainnet build is

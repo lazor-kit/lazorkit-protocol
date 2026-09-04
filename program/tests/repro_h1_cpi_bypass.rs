@@ -319,3 +319,75 @@ fn h1_c_ed25519_execute_should_be_rejected_through_cpi() {
     )
     .expect("H-1c: direct Execute must still work");
 }
+
+/// H-1 was fixed on `Execute` but the same signer-forwarding CPI reaches every
+/// Ed25519-authenticated MANAGEMENT instruction (AddAuthority, RemoveAuthority,
+/// TransferOwnership, CreateSession, RevokeSession, MigrateWallet) — none of
+/// which had the guard. The fix moved the guard into `Ed25519Authenticator`
+/// itself, so all of them are now covered. This proves it on CreateSession: a
+/// wrapper that forwards the owner's signer tries to mint an unrestricted
+/// session, and is rejected.
+#[test]
+fn h1_d_ed25519_management_via_cpi_is_rejected() {
+    let mut context = setup_test();
+    let wrapper = load_fixture_program(&mut context.svm, "malicious-cpi");
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
+
+    let attacker_session = Keypair::new();
+    let (session_pda, _) = Pubkey::find_program_address(
+        &[
+            lazorkit_program::seeds::SESSION,
+            wallet.wallet_pda.as_ref(),
+            attacker_session.pubkey().as_ref(),
+        ],
+        &context.program_id,
+    );
+    let clock: Clock = context.svm.get_sysvar();
+    let expires_at = clock.slot + 100_000;
+
+    let mut data = vec![5u8]; // CreateSession
+    data.extend_from_slice(attacker_session.pubkey().as_ref());
+    data.extend_from_slice(&expires_at.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes()); // unrestricted
+
+    // The victim's owner key is a signer of the OUTER transaction (they signed
+    // something that reached the wrapper); the wrapper forwards that signer into
+    // CreateSession one level down.
+    let inner = Instruction {
+        program_id: context.program_id,
+        accounts: vec![
+            AccountMeta::new(context.payer.pubkey(), true),
+            AccountMeta::new_readonly(wallet.wallet_pda, false),
+            AccountMeta::new(wallet.owner_auth_pda, false),
+            AccountMeta::new(session_pda, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            AccountMeta::new_readonly(wallet.owner.pubkey(), true),
+        ],
+        data,
+    };
+
+    let payer = context.payer.insecure_clone();
+    assert_custom_error(
+        try_send(
+            &mut context.svm,
+            &payer,
+            &[via_cpi(wrapper, inner)],
+            &[&payer, &wallet.owner],
+        ),
+        3002, // PermissionDenied — anti-CPI guard in Ed25519Authenticator
+        "an Ed25519 management instruction must be rejected under CPI",
+    );
+
+    // The attacker's session was not created.
+    assert!(
+        context.svm.get_account(&session_pda).is_none()
+            || context
+                .svm
+                .get_account(&session_pda)
+                .unwrap()
+                .data
+                .is_empty(),
+        "no session should exist",
+    );
+}

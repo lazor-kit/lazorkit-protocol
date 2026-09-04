@@ -576,17 +576,9 @@ fn is_expired(action: &ActionView, current_slot: u64) -> bool {
     action.expires_at != 0 && current_slot > action.expires_at
 }
 
-/// SPL Token program ID
-const SPL_TOKEN_PROGRAM_ID: [u8; 32] = [
-    6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237,
-    95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
-];
-
-/// SPL Token-2022 program ID
-const SPL_TOKEN_2022_PROGRAM_ID: [u8; 32] = [
-    6, 221, 246, 225, 238, 117, 143, 222, 170, 164, 12, 4, 223, 116, 174, 240, 70, 137, 163, 89,
-    77, 149, 128, 12, 61, 73, 196, 253, 210, 164, 82, 159,
-];
+// SPL program ids live in `crate::utils` (single source of truth, pinned by
+// a test) — the Token-2022 constant was previously wrong here.
+use crate::utils::{SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID};
 
 /// Find the total token balance across ALL token accounts for a given mint owned by the vault.
 ///

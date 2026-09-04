@@ -1,5 +1,8 @@
 use pinocchio::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, sysvars::rent::Rent,
+    account_info::AccountInfo,
+    program_error::ProgramError,
+    pubkey::{find_program_address, Pubkey},
+    sysvars::rent::Rent,
     ProgramResult,
 };
 
@@ -69,10 +72,22 @@ pub fn process(
     }
     drop(config_data);
 
-    // Verify shard
-    let shard_data = shard_pda.try_borrow_data()?;
-    TreasuryShard::check(&shard_data).map_err(|_| ProtocolError::InvalidIntegratorRecord)?;
-    drop(shard_data);
+    // Verify shard: type, then re-derive its canonical PDA from its own
+    // shard_id — matching `try_collect_fee`. Not strictly required (only the
+    // admin-gated `initialize_treasury_shard` can mint a program-owned shard, at
+    // canonical addresses), but pinning the address here removes the reliance on
+    // that invariant and keeps every shard read consistent.
+    let shard_id = {
+        let shard_data = shard_pda.try_borrow_data()?;
+        TreasuryShard::check(&shard_data).map_err(|_| ProtocolError::InvalidTreasuryShard)?;
+        let shard = unsafe { &*(shard_data.as_ptr() as *const TreasuryShard) };
+        shard.shard_id
+    };
+    let (expected_shard_key, _) =
+        find_program_address(&[crate::seeds::TREASURY_SHARD, &[shard_id]], program_id);
+    if shard_pda.key() != &expected_shard_key {
+        return Err(ProtocolError::InvalidTreasuryShard.into());
+    }
 
     // Sweep: keep rent-exempt minimum in shard
     let rent = Rent::from_account_info(rent_sysvar)?;

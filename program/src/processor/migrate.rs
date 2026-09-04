@@ -50,19 +50,10 @@ use crate::{
     error::AuthError,
     legacy,
     state::authority::AuthorityAccountHeader,
+    utils::{SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID},
 };
 
-/// SPL Token / Token-2022 program ids, and the token-account field offsets we
-/// read. Same values `execute::actions` uses; repeated here so this money path
-/// is self-contained.
-const SPL_TOKEN_PROGRAM_ID: [u8; 32] = [
-    6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237,
-    95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
-];
-const SPL_TOKEN_2022_PROGRAM_ID: [u8; 32] = [
-    6, 221, 246, 225, 238, 117, 143, 222, 24, 66, 93, 188, 228, 108, 205, 218, 182, 26, 252, 77,
-    131, 185, 13, 39, 254, 189, 249, 40, 216, 161, 139, 252,
-];
+/// Token-account field offsets. SPL program ids come from `crate::utils`.
 const TOKEN_MINT_OFFSET: usize = 0;
 const TOKEN_OWNER_OFFSET: usize = 32;
 const TOKEN_AMOUNT_OFFSET: usize = 64;
@@ -137,15 +128,17 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     // The signature approves *this* migration and only this one: the destination
     // the funds go to (so a relayer cannot redirect the sweep), the wallet being
     // migrated (so a signature for wallet A cannot be replayed against wallet B
-    // the same key also controls), and how many token accounts move (so a relayer
+    // the same key also controls), how many token accounts move (so a relayer
     // cannot drop `num_tokens` to zero, sweep only the SOL, and let the
-    // unconditional close strand the tokens in vault-owned ATAs). Ed25519 ignores
-    // this — its transaction signature already covers the data byte and every
-    // account — but building it for both is harmless.
-    let mut signed_payload = Vec::with_capacity(32 + 32 + 1);
+    // unconditional close strand the tokens), and the rent-refund destination (so
+    // a relayer cannot redirect the reclaimed PDA/ATA rent to itself). Ed25519
+    // ignores this — its transaction signature already covers the data byte and
+    // every account — but building it for both is harmless.
+    let mut signed_payload = Vec::with_capacity(32 + 32 + 1 + 32);
     signed_payload.extend_from_slice(destination.key().as_ref());
     signed_payload.extend_from_slice(v1_wallet.key().as_ref());
     signed_payload.push(num_tokens as u8);
+    signed_payload.extend_from_slice(refund_dest.key().as_ref());
 
     let auth_data = unsafe { v1_authority.borrow_mut_data_unchecked() };
     match auth_header.authority_type {

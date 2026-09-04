@@ -28,6 +28,12 @@ challenge), one instruction:
 3. sweeps the v1 vault's SOL to the destination;
 4. closes the v1 wallet and authority PDAs, refunding their rent.
 
+**The client must enumerate every vault-owned token account.** The signature
+binds `num_tokens`, so a relayer cannot drop tokens to strand them — but the
+wallet+authority are closed at the end, so any vault-owned token account the
+client failed to list is stranded permanently. Enumerate them at migration
+time (`getTokenAccountsByOwner(vault)` for both SPL Token and Token-2022).
+
 **The destination is bound into what the key signs.** A relayer cannot redirect
 the sweep — a swapped destination breaks the challenge (`InvalidMessageHash`,
 3005). The source token account must be the vault's own, the destination token
@@ -153,7 +159,7 @@ const ix = createMigrateWalletIx({
 
 **Secp256r1 passkey.** Produce the auth payload and precompile instruction with
 the existing `finalizeSecp256r1` flow, using `DISC_MIGRATE_WALLET` and a
-`signedPayload` of `concat(destination, v1Wallet, [tokens.length])`. Place the
+`signedPayload` of `concat(destination, v1Wallet, [tokens.length], refundDestination)`. Place the
 precompile instruction immediately before the migrate instruction, and pass the
 fee payer as the non-signing `authSigner` placeholder. The wallet and token-count
 binding is what stops a relayer replaying the signature against another wallet or
