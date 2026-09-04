@@ -57,33 +57,65 @@ async function loadPayer(): Promise<Keypair> {
   return Keypair.fromSecretKey(new Uint8Array(raw));
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Public devnet RPC (api.devnet.solana.com) rate-limits and load-balances
+// across nodes, so a valid blockhash from one node is "not found" on another
+// and bursts get 429s. These are transient — a program rejection (custom
+// program error) is NOT, and must surface immediately so negative tests catch it.
+function isTransientRpcError(e: any): boolean {
+  const m = String(e?.message || e);
+  return (
+    m.includes('Blockhash not found') ||
+    m.includes('block height exceeded') ||
+    m.includes('429') ||
+    m.includes('Too Many Requests') ||
+    m.includes('node is behind') ||
+    m.includes('Transaction was not confirmed') ||
+    m.includes('failed to get') ||
+    m.includes('fetch failed') ||
+    m.includes('ETIMEDOUT') ||
+    m.includes('socket hang up')
+  );
+}
+
 async function sendAndMeasure(
   connection: Connection,
   payer: Keypair,
   instructions: TransactionInstruction[],
   extraSigners: Signer[] = [],
 ): Promise<TxResult> {
-  const tx = new Transaction();
-  for (const ix of instructions) tx.add(ix);
-
-  const { blockhash } = await connection.getLatestBlockhash('confirmed');
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = payer.publicKey;
   const allSigners = [payer, ...extraSigners];
-  tx.sign(...allSigners);
-  const txSize = tx.serialize().length;
+  let lastErr: any;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      await sleep(300); // gentle throttle to stay under the rate limit
+      const tx = new Transaction();
+      for (const ix of instructions) tx.add(ix);
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = payer.publicKey;
+      tx.sign(...allSigners);
+      const txSize = tx.serialize().length;
 
-  const sig = await sendAndConfirmTransaction(connection, tx, allSigners, {
-    commitment: 'confirmed',
-  });
-
-  const txInfo = await connection.getTransaction(sig, {
-    commitment: 'confirmed',
-    maxSupportedTransactionVersion: 0,
-  });
-  const cu = txInfo?.meta?.computeUnitsConsumed ?? 0;
-
-  return { sig, cu, txSize };
+      const sig = await sendAndConfirmTransaction(connection, tx, allSigners, {
+        commitment: 'confirmed',
+      });
+      const txInfo = await connection.getTransaction(sig, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      });
+      const cu = txInfo?.meta?.computeUnitsConsumed ?? 0;
+      return { sig, cu, txSize };
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientRpcError(e)) throw e; // program error → surface now
+      const backoff = 600 * 2 ** attempt;
+      console.log(`  (transient RPC error — retry ${attempt + 1}/6 in ${backoff}ms)`);
+      await sleep(backoff);
+    }
+  }
+  throw lastErr;
 }
 
 function printRow(label: string, result: TxResult, extra = '') {
