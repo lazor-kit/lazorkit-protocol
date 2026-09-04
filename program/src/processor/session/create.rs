@@ -195,8 +195,17 @@ pub fn process(
         return Err(ProgramError::InvalidAccountData);
     }
     // Only Admin (1) or Owner (0) can create sessions.
-    // Spender (2) cannot create sessions.
+    // A Delegate (2) cannot create sessions.
     if auth_header.role != 0 && auth_header.role != 1 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+    // A policy-bearing (bounded) authority may not create a session. A session
+    // carries its OWN action buffer, chosen by the caller and allowed to be
+    // empty (unrestricted) — so a bounded Admin could otherwise mint an
+    // unbounded session and spend past its own cap. Same principle as the
+    // guards in `manage.rs` (AddAuthority) and `authorize.rs` (deferred): a
+    // bounded actor is kept off paths that cannot enforce its bound.
+    if auth_header.policy_len != 0 {
         return Err(AuthError::PermissionDenied.into());
     }
 

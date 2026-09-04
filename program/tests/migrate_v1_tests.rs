@@ -491,14 +491,19 @@ fn build_passkey_migrate(
     prefix.push(sysvar_ix_index);
     prefix.push(0);
 
-    // signed_payload = destination ‖ v1_wallet ‖ num_tokens ‖ refund_dest — the
-    // program's order. refund_dest is accounts[5] in the passkey prefix.
+    // signed_payload = destination ‖ v1_wallet ‖ num_tokens ‖ refund_dest ‖
+    //                  source_ata[0..num_tokens] — the program's order. refund_dest
+    //                  is accounts[5]; the token triples start at accounts[9], so
+    //                  each source ATA is accounts[9 + i*3].
     let refund_dest = migrate_accounts[5].pubkey;
     let mut signed_payload = Vec::new();
     signed_payload.extend_from_slice(signed_destination.as_ref());
     signed_payload.extend_from_slice(pk.wallet.as_ref());
     signed_payload.push(num_tokens);
     signed_payload.extend_from_slice(refund_dest.as_ref());
+    for i in 0..num_tokens as usize {
+        signed_payload.extend_from_slice(migrate_accounts[9 + i * 3].pubkey.as_ref());
+    }
 
     // challenge_hash = SHA256(disc ‖ prefix14 ‖ signed_payload ‖ payer ‖ counter ‖ program_id)
     let mut h = sha2::Sha256::new();
@@ -717,6 +722,75 @@ fn passkey_migrate_relayer_cannot_drop_tokens() {
         token_amount(&context, source_ata),
         50_000_000,
         "tokens stay put; nothing stranded"
+    );
+    assert_eq!(
+        lamports_of(&context, &pk.vault),
+        1_000_000_000,
+        "SOL untouched"
+    );
+}
+
+/// HIGH: the signature binds WHICH token accounts move, not just how many. A
+/// relayer cannot keep `num_tokens` and swap the approved source ATA for dust it
+/// created, which would migrate the dust and strand the real token on close.
+#[test]
+fn passkey_migrate_relayer_cannot_swap_token_set() {
+    let mut context = setup_test();
+    let pk = fabricate_v1_passkey_wallet(&mut context, 1_000_000_000);
+
+    // The token the owner actually approved.
+    let mint_a = Pubkey::new_unique();
+    create_mint(
+        &mut context.svm,
+        mint_a,
+        Pubkey::new_unique(),
+        1_000_000_000,
+    );
+    let source_a = Pubkey::new_unique();
+    create_token_account(&mut context.svm, source_a, mint_a, pk.vault, 74_000_000);
+    let destination = Pubkey::new_unique();
+    let dest_a = Pubkey::new_unique();
+    create_token_account(&mut context.svm, dest_a, mint_a, destination, 0);
+    let refund_dest = Pubkey::new_unique();
+
+    // Dust the relayer manufactured: a second vault-owned token account it would
+    // migrate instead, leaving `source_a` behind to be stranded on close.
+    let mint_b = Pubkey::new_unique();
+    create_mint(
+        &mut context.svm,
+        mint_b,
+        Pubkey::new_unique(),
+        1_000_000_000,
+    );
+    let source_b = Pubkey::new_unique();
+    create_token_account(&mut context.svm, source_b, mint_b, pk.vault, 1);
+    let dest_b = Pubkey::new_unique();
+    create_token_account(&mut context.svm, dest_b, mint_b, destination, 0);
+
+    // Owner signs a migration of source_a (num_tokens = 1).
+    let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
+    accounts.push(AccountMeta::new(source_a, false));
+    accounts.push(AccountMeta::new(dest_a, false));
+    accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
+    let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 1);
+
+    // Relayer swaps in the dust triple, keeping num_tokens = 1 and the passkey
+    // precompile that committed to source_a.
+    let precompile = ixs[0].clone();
+    let mut tampered = ixs[1].clone();
+    tampered.accounts[9] = AccountMeta::new(source_b, false);
+    tampered.accounts[10] = AccountMeta::new(dest_b, false);
+
+    let payer = context.payer.insecure_clone();
+    assert_custom_error(
+        try_send(&mut context.svm, &payer, &[precompile, tampered], &[&payer]),
+        3005,
+        "swapping the source ATA after signing must break the challenge",
+    );
+    assert_eq!(
+        token_amount(&context, source_a),
+        74_000_000,
+        "the approved token stays put; nothing stranded"
     );
     assert_eq!(
         lamports_of(&context, &pk.vault),
