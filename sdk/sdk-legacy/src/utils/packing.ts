@@ -101,7 +101,12 @@ export function computeAccountsHash(
     parts.push(new Uint8Array([accountFlags(meta.isSigner, meta.isWritable)]));
   };
   for (const ix of instructions) {
-    push(accountMetas[ix.programIdIndex], `program_id_index ${ix.programIdIndex}`);
+    // Mask the forward-signer bit off the program-id index before lookup, matching
+    // the on-chain preimage walk (compact.rs).
+    push(
+      accountMetas[decodeAccountIndex(ix.programIdIndex).index],
+      `program_id_index ${ix.programIdIndex}`,
+    );
     for (const byte of ix.accountIndexes) {
       const { index } = decodeAccountIndex(byte);
       push(accountMetas[index], `account_index ${index}`);

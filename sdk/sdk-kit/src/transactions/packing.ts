@@ -110,7 +110,10 @@ export function computeAccountsHash(
 ): Uint8Array {
   const parts: Uint8Array[] = [];
   for (const ix of instructions) {
-    const program = accountMetas[ix.programIdIndex];
+    // Mask the forward-signer bit off the program-id index before lookup, the
+    // same way the on-chain preimage walk does. A program id never carries the
+    // bit today, so this only keeps the SDK and program byte-identical if one ever does.
+    const program = accountMetas[decodeAccountIndex(ix.programIdIndex).index];
     if (!program) {
       throw new Error(
         `compact ix references program_id_index ${ix.programIdIndex} but only ${accountMetas.length} accounts were supplied`,

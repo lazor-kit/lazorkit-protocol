@@ -60,17 +60,19 @@ impl From<AuthError> for ProgramError {
 pub enum ProtocolError {
     ProtocolAlreadyInitialized = 4001,
     InvalidProtocolAdmin = 4002,
-    ProtocolDisabled = 4003,
+    // 4003 (ProtocolDisabled) retired: a disabled protocol now *skips* fee
+    // collection rather than erroring — see the C-1 note in
+    // `entrypoint::try_collect_fee`.
     InvalidIntegratorRecord = 4004,
     InsufficientFeeBalance = 4005,
     IntegratorAlreadyRegistered = 4006,
     InvalidTreasury = 4007,
-    // Strict-fee enforcement errors (entrypoint::try_collect_fee).
-    // The commercial binary requires every fee-eligible instruction
-    // (disc 0/4/7) to carry a valid `[ProtocolConfig, FeeRecord,
-    // TreasuryShard, SystemProgram]` suffix and to result in a
-    // successful payer→shard transfer. Any deviation returns one
-    // of the codes below; there is no silent-skip path.
+    // Fee-suffix validation errors (entrypoint::try_collect_fee). A fee-eligible
+    // instruction (disc 0/4/7) must carry a `[ProtocolConfig, FeeRecord,
+    // TreasuryShard, SystemProgram]` suffix; a MALFORMED suffix returns one of
+    // the codes below. An UNCONFIGURED protocol (not initialised / disabled /
+    // zero fee) is different: collection is skipped and the instruction proceeds
+    // (the C-1 fix), so there is no error code for "not charging".
     /// Caller passed fewer than 5 accounts, or the trailing
     /// `SystemProgram` sentinel is missing.
     FeeAccountsRequired = 4008,
@@ -83,11 +85,8 @@ pub enum ProtocolError {
     /// `FeeRecord` PDA address does not match the canonical seed for
     /// the payer, or the account is owned by a foreign program.
     InvalidFeeRecord = 4011,
-    /// `ProtocolConfig.creation_fee` (or `execution_fee`) is `0` —
-    /// admin must update via `update_protocol` to a non-zero value.
-    /// Strict mode rejects zero-fee config to prevent silent
-    /// degradation to the pre-strict opt-in behaviour.
-    FeeNotConfigured = 4012,
+    // 4012 (FeeNotConfigured) retired with the C-1 fix: a zero fee is not an
+    // error, it means "do not charge" and the instruction proceeds.
     /// An account carries the right discriminator but a `version` byte this
     /// binary does not implement. Distinct from `InvalidAccountData` so an
     /// operator can tell "wrong account" from "account written by a different

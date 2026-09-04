@@ -102,8 +102,19 @@ pub fn process(
         return Err(AuthError::InvalidAuthenticationKind.into());
     }
 
-    // Only Owner or Admin can authorize (not Spender)
+    // Only Owner or Admin can authorize (not Delegate)
     if authority_header.role > 1 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
+    // A policy-bearing authority may not use the deferred path. `ExecuteDeferred`
+    // does not run the action engine — the pre/post spending checks that
+    // `immediate.rs` runs for any authority with a policy — so a bounded Admin's
+    // policy could not be honoured here, and it could spend without limit via
+    // Authorize + ExecuteDeferred. Same principle as the escalation guard in
+    // `manage.rs`: a bounded actor is kept off paths that cannot enforce its
+    // bound. (Delegates are already excluded above; this covers a bounded Admin.)
+    if authority_header.policy_len != 0 {
         return Err(AuthError::PermissionDenied.into());
     }
 

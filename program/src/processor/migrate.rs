@@ -124,10 +124,29 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // The passkey (or Ed25519 key) approves the destination, and nothing else
-    // routes the funds. Binding the destination into the signed challenge is
-    // what stops a relayer redirecting the sweep.
-    let signed_payload = destination.key().as_ref();
+    // Only an Owner may migrate. Migration moves every lamport and token out of
+    // the vault and closes the wallet — the most Owner-level action there is.
+    // Without this, ANY authority whose key signs — a bounded Delegate capped at
+    // 0.001 SOL, an Admin — could drain and close the entire wallet, defeating
+    // the spending policy that is the only thing limiting a non-Owner. `role` is
+    // the v1 rank byte, at the same offset v2 uses (0 = Owner).
+    if auth_header.role != 0 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
+    // The signature approves *this* migration and only this one: the destination
+    // the funds go to (so a relayer cannot redirect the sweep), the wallet being
+    // migrated (so a signature for wallet A cannot be replayed against wallet B
+    // the same key also controls), and how many token accounts move (so a relayer
+    // cannot drop `num_tokens` to zero, sweep only the SOL, and let the
+    // unconditional close strand the tokens in vault-owned ATAs). Ed25519 ignores
+    // this — its transaction signature already covers the data byte and every
+    // account — but building it for both is harmless.
+    let mut signed_payload = Vec::with_capacity(32 + 32 + 1);
+    signed_payload.extend_from_slice(destination.key().as_ref());
+    signed_payload.extend_from_slice(v1_wallet.key().as_ref());
+    signed_payload.push(num_tokens as u8);
+
     let auth_data = unsafe { v1_authority.borrow_mut_data_unchecked() };
     match auth_header.authority_type {
         0 => {
@@ -135,7 +154,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
                 accounts,
                 auth_data,
                 &[],
-                signed_payload,
+                &signed_payload,
                 &[17],
                 program_id,
             )?;
@@ -145,7 +164,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
                 accounts,
                 auth_data,
                 auth_payload,
-                signed_payload,
+                &signed_payload,
                 &[17],
                 program_id,
             )?;
