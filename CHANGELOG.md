@@ -108,7 +108,8 @@ practice a test deployment.
 
 **Before upgrading mainnet**, in this order:
 
-1. Run `scripts/survey-v1.ts` and commit the report.
+1. Run `scripts/survey-v1.ts` and keep its report private (it lists real user
+   wallets and balances — operational intel, not repo content).
 2. Sweep any v1 vault still holding SOL through the legitimate Owner path **on
    the current binary**. After the upgrade those vaults are unreachable.
 3. Confirm `PROTOCOL_INIT_AUTHORITY` for the mainnet build. It defaults to the

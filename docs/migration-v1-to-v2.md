@@ -2,10 +2,10 @@
 
 ## Why this exists
 
-The [v1 survey](surveys/v1-2026-08-29.md) found mainnet is a live deployment, not
-a test slot: 127 wallets, 58 holding value (5.6 SOL plus USDC, BONK and other
-SPL tokens), 119 of 139 authorities passkeys on users' own devices, traffic
-daily. Keeping the vanity program id `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi`
+Mainnet is a live deployment with real users — wallets holding SOL and SPL
+tokens, most controlled by passkeys on users' own devices. Run
+`scripts/survey-v1.ts` for the current on-chain picture (keep its output private;
+it is operational intelligence, not repo content). Keeping the vanity program id
 and upgrading in place means v2's `lk2:`-namespaced seeds leave every v1 vault at
 an address the new binary owns but no longer understands.
 
@@ -58,9 +58,9 @@ PDAs. Re-run it against the real binaries before touching mainnet.
 to v2 now. The instant you do, a v1 wallet's normal `Execute` stops working (v2
 rejects the v1 discriminator), so until a user migrates they can *only* call
 `MigrateWallet`. Their funds are never at risk — the vault is untouched until the
-user acts — but their wallet is frozen for everything else. Given the survey's
-concentration (top 10 wallets hold 84% of value), announce, then migrate the
-active users promptly.
+user acts — but their wallet is frozen for everything else. Value is
+concentrated in a small number of wallets (check the survey), so announcing and
+migrating the active users promptly clears most of it quickly.
 
 **B. v1 hotfix first (no freeze).** Ship a v1.x that adds only a migrate-out
 helper, leaving all v1 behaviour intact, and optionally fixes C-1. Users migrate
@@ -124,9 +124,9 @@ solana program deploy --program-id LazorjRF... \
 > clobber the v2 artifact. Keep them separate, and verify the two `.so` sizes
 > differ before deploying.
 
-Before the real upgrade, also: run the [survey](surveys/v1-2026-08-29.md) again
-for a current picture, and confirm the mainnet upgrade-authority and
-ProtocolConfig-admin keys are the ones you hold.
+Before the real upgrade, also: re-run `scripts/survey-v1.ts` for a current
+picture, and confirm the mainnet upgrade-authority and ProtocolConfig-admin keys
+are the ones you hold.
 
 ## Building the migration transaction
 
@@ -162,7 +162,7 @@ dropping tokens to strand them; **only an Owner-rank authority may migrate.**
 ## What was rejected, and why
 
 Not built: an admin/operator function that sweeps user vaults without the user's
-key. It is theft of funds the operator holds no key to — the survey proves 58
-independent users hold the only keys — and it is the exact backdoor class this
-version exists to remove. Every legitimate migration keeps the user's key on the
+key. It is theft of funds the operator holds no key to — the survey shows the
+vaults are controlled by independent users' own keys — and it is the exact
+backdoor class this version exists to remove. Every legitimate migration keeps the user's key on the
 authorizing side and the user's funds on the destination side.
