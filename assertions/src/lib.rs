@@ -1,6 +1,6 @@
 #![allow(unexpected_cfgs)]
 #[cfg(target_os = "solana")]
-use pinocchio::syscalls::{sol_curve_validate_point, sol_get_stack_height, sol_memcmp_};
+use pinocchio::syscalls::sol_memcmp_;
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
@@ -101,26 +101,3 @@ sol_assert_return!(check_any_pda, u8, seeds: &[&[u8]], target_key: &Pubkey, prog
 sol_assert!(check_zero_data, account: &AccountInfo |
   account.data_len() == 0
 );
-
-#[cfg(target_os = "solana")]
-pub fn is_on_curve(point: &[u8]) -> bool {
-    let mut intermediate = MaybeUninit::<u8>::uninit();
-    unsafe { sol_curve_validate_point(0, point.as_ptr(), intermediate.as_mut_ptr()) == 0 }
-}
-
-#[cfg(not(target_os = "solana"))]
-pub fn is_on_curve(_point: &[u8]) -> bool {
-    unimplemented!()
-}
-
-#[cfg(target_os = "solana")]
-#[inline(always)]
-pub fn get_stack_height(expected: u64) -> bool {
-    unsafe { sol_get_stack_height() == expected }
-}
-
-#[cfg(not(target_os = "solana"))]
-#[inline(always)]
-pub fn get_stack_height(_expected: u64) -> bool {
-    unimplemented!()
-}

@@ -363,6 +363,69 @@ pub enum ProgramIx {
     #[account(4, name = "system_program", desc = "System Program")]
     #[account(5, name = "rent_sysvar", desc = "Rent Sysvar")]
     InitializeTreasuryShard { shard_id: u8 },
+
+    /// Propose a new protocol admin (step 1 of 2). The all-zero key cancels a
+    /// pending rotation.
+    #[account(0, signer, name = "admin", desc = "Current protocol admin")]
+    #[account(1, writable, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    ProposeAdminRotation { new_admin: [u8; 32] },
+
+    /// Accept a proposed admin rotation (step 2 of 2). The incoming admin signs,
+    /// proving the key exists.
+    #[account(0, signer, name = "pending_admin", desc = "The proposed new admin")]
+    #[account(1, writable, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    AcceptAdminRotation,
+
+    /// Migrate a v1 wallet's SOL and SPL/Token-2022 balances to its v2 vault and
+    /// close the v1 PDAs, authorized by the wallet's own v1 Owner. Accounts 9..
+    /// are a variable run of (source_ata, dest_ata, token_program) triples — one
+    /// per token, `num_tokens` of them. Instruction data is
+    /// `[num_tokens(1)][auth_payload]`, the auth payload being empty for an
+    /// Ed25519 owner or the WebAuthn assertion blob for a passkey.
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Payer; receives reclaimed rent"
+    )]
+    #[account(
+        1,
+        writable,
+        name = "v1_wallet",
+        desc = "v1 Wallet PDA (closed on success)"
+    )]
+    #[account(
+        2,
+        writable,
+        name = "v1_authority",
+        desc = "v1 Owner Authority PDA (closed on success)"
+    )]
+    #[account(3, writable, name = "v1_vault", desc = "v1 Vault PDA (swept)")]
+    #[account(
+        4,
+        writable,
+        name = "destination",
+        desc = "SOL sink; token dest ATAs must be owned by it"
+    )]
+    #[account(
+        5,
+        writable,
+        name = "refund_dest",
+        desc = "Reclaimed v1 PDA/ATA rent destination"
+    )]
+    #[account(6, name = "system_program", desc = "System Program")]
+    #[account(
+        7,
+        name = "instructions_sysvar",
+        desc = "Instructions Sysvar (Secp256r1 introspection)"
+    )]
+    #[account(
+        8,
+        name = "auth_signer",
+        desc = "Ed25519 owner signer (must sign for Ed25519 auth; placeholder for passkeys)"
+    )]
+    MigrateWallet { num_tokens: u8 },
 }
 
 // `ProgramIx` above is the only instruction enum. A second hand-written
