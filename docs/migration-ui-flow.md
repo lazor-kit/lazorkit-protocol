@@ -9,6 +9,12 @@ After the v2 upgrade lands, a v1 wallet's normal operations revert (v2 rejects
 the old account discriminators). The user's funds are safe in the v1 vault, but
 they must migrate once before transacting again. This flow makes that one action.
 
+A working reference implementation of everything below is in
+[`examples/react-migration/`](../examples/react-migration/) — a `useV1Migration`
+hook, a `MigrateWalletCard` component, and the passkey glue, all built on
+`migrateV1Wallet`. Adopt or restyle it; the sequence and UX notes here explain
+what it does and why.
+
 ## 1. Detect
 
 On app load, check whether the connected identity still has a v1 wallet.
