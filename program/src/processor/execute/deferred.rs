@@ -2,6 +2,7 @@ use crate::{
     compact::{compute_accounts_hash, parse_compact_instructions_ref_with_len},
     error::AuthError,
     state::deferred::DeferredExecAccount,
+    utils::get_stack_height,
 };
 use pinocchio::{
     account_info::AccountInfo,
@@ -33,6 +34,14 @@ pub fn process(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    // Anti-CPI guard, matching `immediate.rs`. ExecuteDeferred is already
+    // hash-locked to what the passkey signed and single-use, so a wrapper gains
+    // nothing by re-entering it — but keep the guard for parity, so the two
+    // vault-signing entry points are constrained identically.
+    if get_stack_height() > 1 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
     // Parse accounts
     let payer = accounts.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
     let payer_key = payer.key();

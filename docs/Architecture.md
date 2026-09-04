@@ -476,6 +476,22 @@ vault deltas and token-authority state. The action types are shared — `SolLimi
 An authority with `policy_len == 0` is unbounded and spends like an Owner. That
 is intended for Owner and Admin; it is refused for Delegate.
 
+**A policy bounds only the dimensions its actions cover.** The post-action
+evaluation checks the limits that are *present*: if a policy has a
+`ProgramWhitelist` but no `SolLimit`, SOL spend is not capped; if it caps SOL but
+not a token, that token is not capped. "Delegate requires a policy" means the
+buffer must be non-empty and well-formed — not that the delegate is
+spend-limited on every asset. A granter who wants a bounded delegate must write a
+value cap (`SolLimit`/`SolMaxPerTx`/`Token*`) for each asset class the delegate
+can reach; the SDK should surface this. A whitelist-only policy is a legitimate
+shape (restrict *which* programs, unlimited amount), so this is a granter choice,
+not a defect — but it is a choice, and worth stating plainly.
+
+Two execution paths do **not** run the policy engine, and both refuse a
+policy-bearing authority rather than silently ignoring its limits:
+`AddAuthority` (a bounded authority may not grant) and `Authorize`/deferred
+execution (which has no action engine, so a bounded Admin is kept off it).
+
 ## Execute signer forwarding
 
 An inner instruction sometimes legitimately needs a signature that is not the

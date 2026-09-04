@@ -78,10 +78,12 @@ pub fn process_instruction(
 ///
 ///   `[protocol_config, fee_record, treasury_shard, system_program]`
 ///
-/// at positions `[n-4, n-3, n-2, n-1]`. Anything else returns a custom
-/// `ProtocolError` — there is no silent skip path. This is the strict
-/// counterpart to the original opt-in implementation; see
-/// `docs/proposals/2026-05-strict-fee-enforcement.md` for rationale.
+/// at positions `[n-4, n-3, n-2, n-1]`. A malformed suffix (missing accounts, a
+/// non-canonical config) is rejected — but when the protocol is simply not
+/// configured to charge, collection is *skipped*, not rejected (item 3 below).
+/// That skip is the C-1 fix: reverting a fund-moving instruction on a config
+/// flag would let an admin freeze every user's funds. An earlier design rejected
+/// in all three unconfigured cases; this is deliberately not that.
 ///
 /// Behaviour summary:
 ///   1. Reject (4008) if fewer than 5 accounts or sentinel `system_program`

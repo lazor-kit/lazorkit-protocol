@@ -791,10 +791,12 @@ export interface MigrateTokenPair {
  * the fee payer as a non-signer placeholder for a passkey (whose approval rides
  * in `authPayload` + a preceding Secp256r1 precompile instruction).
  *
- * The passkey's `authPayload` must be signed over the destination — build it
- * with the existing `finalizeSecp256r1` flow using `DISC_MIGRATE_WALLET` and a
- * `signedPayload` of `destination.toBuffer()`, and place the returned precompile
- * instruction immediately before this one in the transaction.
+ * The passkey's `authPayload` must be signed over the migration intent — build
+ * it with the existing `finalizeSecp256r1` flow using `DISC_MIGRATE_WALLET` and a
+ * `signedPayload` of `concat(destination, v1Wallet, [tokens.length])` (32 + 32 +
+ * 1 bytes), and place the returned precompile instruction immediately before this
+ * one. Binding the wallet and the token count stops a relayer replaying the
+ * signature against another wallet or dropping tokens to strand them.
  */
 export function createMigrateWalletIx(params: {
   payer: PublicKey;

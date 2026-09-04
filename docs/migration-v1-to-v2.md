@@ -153,9 +153,11 @@ const ix = createMigrateWalletIx({
 
 **Secp256r1 passkey.** Produce the auth payload and precompile instruction with
 the existing `finalizeSecp256r1` flow, using `DISC_MIGRATE_WALLET` and a
-`signedPayload` of `destination.toBuffer()`. Place the precompile instruction
-immediately before the migrate instruction, and pass the fee payer as the
-non-signing `authSigner` placeholder.
+`signedPayload` of `concat(destination, v1Wallet, [tokens.length])`. Place the
+precompile instruction immediately before the migrate instruction, and pass the
+fee payer as the non-signing `authSigner` placeholder. The wallet and token-count
+binding is what stops a relayer replaying the signature against another wallet or
+dropping tokens to strand them; **only an Owner-rank authority may migrate.**
 
 ## What was rejected, and why
 

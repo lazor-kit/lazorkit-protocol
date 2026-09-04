@@ -491,11 +491,17 @@ fn build_passkey_migrate(
     prefix.push(sysvar_ix_index);
     prefix.push(0);
 
+    // signed_payload = destination ‖ v1_wallet ‖ num_tokens — matches the program.
+    let mut signed_payload = Vec::new();
+    signed_payload.extend_from_slice(signed_destination.as_ref());
+    signed_payload.extend_from_slice(pk.wallet.as_ref());
+    signed_payload.push(num_tokens);
+
     // challenge_hash = SHA256(disc ‖ prefix14 ‖ signed_payload ‖ payer ‖ counter ‖ program_id)
     let mut h = sha2::Sha256::new();
     h.update([17u8]);
     h.update(&prefix);
-    h.update(signed_destination.as_ref());
+    h.update(&signed_payload);
     h.update(payer.as_ref());
     h.update(counter.to_le_bytes());
     h.update(program_id.as_ref());
@@ -628,4 +634,187 @@ fn passkey_migrate_cannot_be_redirected() {
     );
     assert_eq!(lamports_of(&context, &pk.vault), 1_000_000_000);
     assert_eq!(lamports_of(&context, &attacker_destination), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Regression tests for the independent-review findings
+// ─────────────────────────────────────────────────────────────────────────
+
+/// HIGH: only an Owner may migrate. A bounded Delegate (or an Admin) whose key
+/// signs must NOT be able to drain and close the whole wallet — that would
+/// defeat the spending policy that is the only thing limiting a non-Owner.
+#[test]
+fn migrate_refuses_a_non_owner_authority() {
+    for rank in [1u8 /* Admin */, 2u8 /* Delegate */] {
+        let mut context = setup_test();
+        let v1 = fabricate_v1_ed25519_wallet(&mut context, 1_000_000_000);
+        let mut adata = context.svm.get_account(&v1.authority).unwrap().data;
+        adata[2] = rank;
+        set_program_account(&mut context, v1.authority, adata);
+
+        let destination = Pubkey::new_unique();
+        let refund_dest = Pubkey::new_unique();
+        let ix = solana_sdk::instruction::Instruction {
+            program_id: context.program_id,
+            accounts: migrate_prefix(&context, &v1, destination, refund_dest),
+            data: vec![DISC_MIGRATE, 0],
+        };
+        let payer = context.payer.insecure_clone();
+        assert_custom_error(
+            try_send(&mut context.svm, &payer, &[ix], &[&payer, &v1.owner]),
+            3002,
+            &format!("rank {rank} must not be able to migrate"),
+        );
+        assert_eq!(
+            lamports_of(&context, &v1.vault),
+            1_000_000_000,
+            "vault untouched when a non-Owner tries to migrate"
+        );
+    }
+}
+
+/// MEDIUM: a passkey signs how many token accounts it is migrating. A relayer
+/// that drops `num_tokens` to 0 — to sweep the SOL and let the close strand the
+/// tokens — breaks the challenge.
+#[test]
+fn passkey_migrate_relayer_cannot_drop_tokens() {
+    let mut context = setup_test();
+    let pk = fabricate_v1_passkey_wallet(&mut context, 1_000_000_000);
+
+    let mint = Pubkey::new_unique();
+    create_mint(&mut context.svm, mint, Pubkey::new_unique(), 1_000_000_000);
+    let source_ata = Pubkey::new_unique();
+    create_token_account(&mut context.svm, source_ata, mint, pk.vault, 50_000_000);
+    let destination = Pubkey::new_unique();
+    let dest_ata = Pubkey::new_unique();
+    create_token_account(&mut context.svm, dest_ata, mint, destination, 0);
+    let refund_dest = Pubkey::new_unique();
+
+    // The owner signs a migration of 1 token.
+    let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
+    accounts.push(AccountMeta::new(source_ata, false));
+    accounts.push(AccountMeta::new(dest_ata, false));
+    let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 1);
+
+    // The relayer strips the token pair and rewrites num_tokens to 0, keeping the
+    // passkey-signed precompile (which committed to num_tokens = 1).
+    let precompile = ixs[0].clone();
+    let mut tampered = ixs[1].clone();
+    tampered.data[1] = 0; // num_tokens 1 -> 0
+    tampered.accounts.truncate(10); // drop the token pair
+
+    let payer = context.payer.insecure_clone();
+    assert_custom_error(
+        try_send(&mut context.svm, &payer, &[precompile, tampered], &[&payer]),
+        3005,
+        "dropping num_tokens after signing must break the challenge",
+    );
+    assert_eq!(
+        token_amount(&context, source_ata),
+        50_000_000,
+        "tokens stay put; nothing stranded"
+    );
+    assert_eq!(
+        lamports_of(&context, &pk.vault),
+        1_000_000_000,
+        "SOL untouched"
+    );
+}
+
+/// LOW: the signature binds the wallet being migrated, so a passkey assertion
+/// for one wallet cannot be replayed against another wallet the same key
+/// controls.
+#[test]
+fn passkey_migrate_signature_is_wallet_bound() {
+    let mut context = setup_test();
+    let pk_a = fabricate_v1_passkey_wallet(&mut context, 1_000_000_000);
+
+    // A second wallet controlled by the SAME passkey (same signing key + rpId,
+    // fresh credential/user seed → a distinct authority PDA storing the same key).
+    let program_id = context.program_id;
+    let user_seed_b = rand::random::<[u8; 32]>();
+    let pubkey_compressed = VerifyingKey::from(&pk_a.signing_key)
+        .to_encoded_point(true)
+        .as_bytes()
+        .to_vec();
+    let credential_b = rand::random::<[u8; 32]>();
+    let rp_id_hash: [u8; 32] = sha2::Sha256::digest(pk_a.rp_id.as_bytes()).into();
+    let (wallet_b, wb_bump) =
+        Pubkey::find_program_address(&[V1_WALLET_SEED, &user_seed_b], &program_id);
+    let (vault_b, _) =
+        Pubkey::find_program_address(&[V1_VAULT_SEED, wallet_b.as_ref()], &program_id);
+    let (auth_b, ab_bump) = Pubkey::find_program_address(
+        &[V1_AUTHORITY_SEED, wallet_b.as_ref(), &credential_b],
+        &program_id,
+    );
+    let mut wdata = vec![0u8; 8];
+    wdata[0] = 1;
+    wdata[1] = wb_bump;
+    wdata[2] = 1;
+    set_program_account(&mut context, wallet_b, wdata);
+    let mut adata = vec![0u8; 145];
+    adata[0] = 2;
+    adata[1] = 1;
+    adata[2] = 0;
+    adata[3] = ab_bump;
+    adata[4] = 1;
+    wallet_b
+        .to_bytes()
+        .iter()
+        .enumerate()
+        .for_each(|(i, b)| adata[16 + i] = *b);
+    adata[48..80].copy_from_slice(&credential_b);
+    adata[80..113].copy_from_slice(&pubkey_compressed);
+    adata[113..145].copy_from_slice(&rp_id_hash);
+    set_program_account(&mut context, auth_b, adata);
+    context
+        .svm
+        .set_account(
+            vault_b,
+            solana_sdk::account::Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: solana_sdk::system_program::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let pk_b = V1Passkey {
+        signing_key: pk_a.signing_key.clone(),
+        rp_id: pk_a.rp_id.clone(),
+        wallet: wallet_b,
+        vault: vault_b,
+        authority: auth_b,
+    };
+
+    // Sign a migration of wallet A to `destination`…
+    let destination = Pubkey::new_unique();
+    let refund_dest = Pubkey::new_unique();
+    let accounts_a = passkey_prefix(&context, &pk_a, destination, refund_dest);
+    let ixs_a = build_passkey_migrate(&context, &pk_a, destination, accounts_a, 0);
+
+    // …then replay that precompile against wallet B (same destination, same key).
+    let precompile = ixs_a[0].clone();
+    let migrate_b = solana_sdk::instruction::Instruction {
+        program_id,
+        accounts: passkey_prefix(&context, &pk_b, destination, refund_dest),
+        data: ixs_a[1].data.clone(),
+    };
+    let payer = context.payer.insecure_clone();
+    assert_custom_error(
+        try_send(
+            &mut context.svm,
+            &payer,
+            &[precompile, migrate_b],
+            &[&payer],
+        ),
+        3005,
+        "a signature for wallet A must not migrate wallet B",
+    );
+    assert_eq!(
+        lamports_of(&context, &vault_b),
+        1_000_000_000,
+        "wallet B untouched"
+    );
 }
