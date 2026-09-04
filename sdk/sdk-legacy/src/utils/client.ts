@@ -21,6 +21,17 @@ import {
   findFeeRecordPda,
   findTreasuryShardPda,
 } from './pdas';
+import {
+  deriveV1Accounts,
+  readV1WalletState,
+  enumerateV1VaultTokens,
+  type V1Accounts,
+  type V1VaultToken,
+} from './v1';
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountIdempotentIx,
+} from './spl';
 import { readAuthorityCounter, readAuthorityPubkey } from './secp256r1';
 import {
   packCompactInstructions,
@@ -44,6 +55,7 @@ import {
   createRegisterPayerIx,
   createWithdrawTreasuryIx,
   createInitializeTreasuryShardIx,
+  createMigrateWalletIx,
   AUTH_TYPE_ED25519,
   AUTH_TYPE_SECP256R1,
   DISC_ADD_AUTHORITY,
@@ -53,6 +65,7 @@ import {
   DISC_CREATE_SESSION,
   DISC_AUTHORIZE,
   DISC_REVOKE_SESSION,
+  DISC_MIGRATE_WALLET,
   ROLE_OWNER,
 } from './instructions';
 import {
@@ -2040,5 +2053,146 @@ export class LazorKitClient {
       programId: this.programId,
     });
     return { instructions: [ix] };
+  }
+
+  /**
+   * Orchestrate a full v1 -> v2 migration for one wallet, authorized by the v1
+   * owner. Returns the setup instructions (create the v2 wallet if it does not
+   * exist yet, and a destination token account for every token being moved) and
+   * the MigrateWallet step.
+   *
+   * Send `setupInstructions` first, then the migrate:
+   *  - Ed25519: sign `migrate.instruction` with the payer and the owner key.
+   *  - Secp256r1: have the passkey sign `migrate.challenge`, pass the WebAuthn
+   *    response to `migrate.finalize`, and send the returned
+   *    `[precompile, migrate]`.
+   *
+   * Only an Owner-rank v1 authority may migrate; throws otherwise, or if no v1
+   * wallet exists for `userSeed`. All vault-owned token accounts (SPL Token and
+   * Token-2022) are enumerated and migrated in one call.
+   */
+  async migrateV1Wallet(params: {
+    payer: PublicKey;
+    userSeed: Uint8Array;
+    owner: CreateWalletOwner;
+  }): Promise<{
+    v1: V1Accounts;
+    v2Vault: PublicKey;
+    tokens: V1VaultToken[];
+    setupInstructions: TransactionInstruction[];
+    migrate:
+      | { type: 'ed25519'; instruction: TransactionInstruction }
+      | {
+          type: 'secp256r1';
+          challenge: Uint8Array;
+          finalize: (response: WebAuthnResponse) => TransactionInstruction[];
+        };
+  }> {
+    const { authType, credentialOrPubkey } = resolveOwnerFields(params.owner);
+
+    const v1 = deriveV1Accounts(params.userSeed, credentialOrPubkey, this.programId);
+    const state = await readV1WalletState(this.connection, v1);
+    if (!state) throw new Error('no v1 wallet exists for this userSeed');
+    if (state.ownerRole !== ROLE_OWNER) {
+      throw new Error('MigrateWallet requires an Owner-rank v1 authority');
+    }
+
+    const [v2Wallet] = this.findWallet(params.userSeed);
+    const [v2Vault] = this.findVault(v2Wallet);
+
+    const tokens = await enumerateV1VaultTokens(this.connection, v1.vault);
+
+    const setupInstructions: TransactionInstruction[] = [];
+    const v2WalletInfo = await this.connection.getAccountInfo(v2Wallet);
+    if (!v2WalletInfo) {
+      const created = await this.createWallet({
+        payer: params.payer,
+        userSeed: params.userSeed,
+        owner: params.owner,
+      });
+      setupInstructions.push(...created.instructions);
+    }
+    const migrateTokens = tokens.map((t) => {
+      const destAta = getAssociatedTokenAddress(t.mint, v2Vault, t.tokenProgram);
+      setupInstructions.push(
+        createAssociatedTokenAccountIdempotentIx({
+          payer: params.payer,
+          ata: destAta,
+          owner: v2Vault,
+          mint: t.mint,
+          tokenProgram: t.tokenProgram,
+        }),
+      );
+      return { sourceAta: t.ata, destAta, tokenProgram: t.tokenProgram };
+    });
+
+    // signed_payload = destination || v1_wallet || num_tokens || refund_dest
+    const signedPayload = concatBytes([
+      v2Vault.toBytes(),
+      v1.wallet.toBytes(),
+      Uint8Array.from([tokens.length]),
+      params.payer.toBytes(),
+    ]);
+
+    if (authType === AUTH_TYPE_ED25519) {
+      const instruction = createMigrateWalletIx({
+        payer: params.payer,
+        v1Wallet: v1.wallet,
+        v1Authority: v1.authority,
+        v1Vault: v1.vault,
+        destination: v2Vault,
+        refundDestination: params.payer,
+        authSigner: (params.owner as { publicKey: PublicKey }).publicKey,
+        authSignerIsSigner: true,
+        tokens: migrateTokens,
+        programId: this.programId,
+      });
+      return {
+        v1,
+        v2Vault,
+        tokens,
+        setupInstructions,
+        migrate: { type: 'ed25519', instruction },
+      };
+    }
+
+    // Secp256r1 passkey.
+    const owner = params.owner as { compressedPubkey: Uint8Array };
+    const counter = (await readAuthorityCounter(this.connection, v1.authority)) + 1;
+    const slot = BigInt(await this.connection.getSlot());
+    const prepared = prepareSecp256r1({
+      discriminator: Uint8Array.from([DISC_MIGRATE_WALLET]),
+      signedPayload,
+      sysvarIxIndex: 7,
+      slot,
+      counter,
+      payer: params.payer,
+      programId: this.programId,
+      publicKeyBytes: owner.compressedPubkey,
+    });
+    const finalize = (response: WebAuthnResponse): TransactionInstruction[] => {
+      const { authPayload, precompileIx } = finalizeSecp256r1(prepared, response);
+      const migrateIx = createMigrateWalletIx({
+        payer: params.payer,
+        v1Wallet: v1.wallet,
+        v1Authority: v1.authority,
+        v1Vault: v1.vault,
+        destination: v2Vault,
+        refundDestination: params.payer,
+        authSigner: params.payer,
+        authSignerIsSigner: false,
+        tokens: migrateTokens,
+        authPayload,
+        programId: this.programId,
+      });
+      return [precompileIx, migrateIx];
+    };
+    return {
+      v1,
+      v2Vault,
+      tokens,
+      setupInstructions,
+      migrate: { type: 'secp256r1', challenge: prepared.challenge, finalize },
+    };
   }
 }

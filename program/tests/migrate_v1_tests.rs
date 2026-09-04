@@ -144,7 +144,6 @@ fn migrate_prefix(
         AccountMeta::new(destination, false),
         AccountMeta::new(refund_dest, false),
         AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-        AccountMeta::new_readonly(spl_token_id(), false),
         AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
         AccountMeta::new_readonly(v1.owner.pubkey(), true),
     ]
@@ -219,6 +218,7 @@ fn migrates_vault_sol_and_an_spl_token() {
     let mut accounts = migrate_prefix(&context, &v1, destination, refund_dest);
     accounts.push(AccountMeta::new(source_ata, false));
     accounts.push(AccountMeta::new(dest_ata, false));
+    accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
 
     let ix = Instruction {
         program_id: context.program_id,
@@ -263,7 +263,7 @@ fn migrate_without_the_owner_signature_is_refused() {
 
     // The owner is listed but NOT a signer.
     let mut accounts = migrate_prefix(&context, &v1, destination, refund_dest);
-    accounts[9] = AccountMeta::new_readonly(v1.owner.pubkey(), false);
+    accounts[8] = AccountMeta::new_readonly(v1.owner.pubkey(), false);
 
     let ix = Instruction {
         program_id: context.program_id,
@@ -294,7 +294,7 @@ fn migrate_with_the_wrong_key_is_refused() {
     let refund_dest = Pubkey::new_unique();
 
     let mut accounts = migrate_prefix(&context, &v1, destination, refund_dest);
-    accounts[9] = AccountMeta::new_readonly(attacker.pubkey(), true);
+    accounts[8] = AccountMeta::new_readonly(attacker.pubkey(), true);
 
     let ix = Instruction {
         program_id: context.program_id,
@@ -482,7 +482,7 @@ fn build_passkey_migrate(
     let payer = context.payer.pubkey();
     let slot = context.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
     let counter: u32 = 1; // stored 0 + 1
-    let sysvar_ix_index: u8 = 8;
+    let sysvar_ix_index: u8 = 7;
 
     // auth_payload prefix (14 bytes): slot(8) counter(4) sysvarIdx(1) flags(1)
     let mut prefix = Vec::with_capacity(14);
@@ -573,7 +573,6 @@ fn passkey_prefix(
         AccountMeta::new(destination, false),
         AccountMeta::new(refund_dest, false),
         AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-        AccountMeta::new_readonly(spl_token_id(), false),
         AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
         AccountMeta::new_readonly(context.payer.pubkey(), false),
     ]
@@ -599,6 +598,7 @@ fn passkey_migrates_vault_sol_and_token() {
     let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
     accounts.push(AccountMeta::new(source_ata, false));
     accounts.push(AccountMeta::new(dest_ata, false));
+    accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
 
     let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 1);
     let payer = context.payer.insecure_clone();
@@ -697,6 +697,7 @@ fn passkey_migrate_relayer_cannot_drop_tokens() {
     let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
     accounts.push(AccountMeta::new(source_ata, false));
     accounts.push(AccountMeta::new(dest_ata, false));
+    accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
     let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 1);
 
     // The relayer strips the token pair and rewrites num_tokens to 0, keeping the
@@ -704,7 +705,7 @@ fn passkey_migrate_relayer_cannot_drop_tokens() {
     let precompile = ixs[0].clone();
     let mut tampered = ixs[1].clone();
     tampered.data[1] = 0; // num_tokens 1 -> 0
-    tampered.accounts.truncate(10); // drop the token pair
+    tampered.accounts.truncate(9); // drop the token triple
 
     let payer = context.payer.insecure_clone();
     assert_custom_error(
@@ -820,4 +821,123 @@ fn passkey_migrate_signature_is_wallet_bound() {
         1_000_000_000,
         "wallet B untouched"
     );
+}
+
+/// The reason token accounts carry their own program: a vault holding BOTH SPL
+/// Token and Token-2022 assets migrates in one call. A single fixed
+/// token-program account could not express this.
+#[test]
+fn migrates_mixed_spl_and_token_2022_in_one_call() {
+    use solana_sdk::account::Account;
+    let token_2022 = Pubkey::try_from("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
+
+    // Fabricate a token account owned by an arbitrary token program.
+    let set_token = |context: &mut TestContext,
+                     addr: Pubkey,
+                     mint: Pubkey,
+                     owner: Pubkey,
+                     amount: u64,
+                     program: Pubkey| {
+        let mut data = vec![0u8; 165];
+        data[0..32].copy_from_slice(mint.as_ref());
+        data[32..64].copy_from_slice(owner.as_ref());
+        data[64..72].copy_from_slice(&amount.to_le_bytes());
+        data[108] = 1; // initialized
+        context
+            .svm
+            .set_account(
+                addr,
+                Account {
+                    lamports: 2_039_280,
+                    data,
+                    owner: program,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+    let set_mint = |context: &mut TestContext, mint: Pubkey, program: Pubkey| {
+        let mut data = vec![0u8; 82];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes());
+        data[44] = 6;
+        data[45] = 1;
+        context
+            .svm
+            .set_account(
+                mint,
+                Account {
+                    lamports: 1_461_600,
+                    data,
+                    owner: program,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+
+    let mut context = setup_test();
+    let v1 = fabricate_v1_ed25519_wallet(&mut context, 1_000_000_000);
+    let destination = Pubkey::new_unique();
+    let refund_dest = Pubkey::new_unique();
+
+    // Classic SPL token.
+    let mint_a = Pubkey::new_unique();
+    create_mint(
+        &mut context.svm,
+        mint_a,
+        Pubkey::new_unique(),
+        1_000_000_000,
+    );
+    let src_a = Pubkey::new_unique();
+    let dst_a = Pubkey::new_unique();
+    create_token_account(&mut context.svm, src_a, mint_a, v1.vault, 40_000_000);
+    create_token_account(&mut context.svm, dst_a, mint_a, destination, 0);
+
+    // Token-2022.
+    let mint_b = Pubkey::new_unique();
+    set_mint(&mut context, mint_b, token_2022);
+    let src_b = Pubkey::new_unique();
+    let dst_b = Pubkey::new_unique();
+    set_token(
+        &mut context,
+        src_b,
+        mint_b,
+        v1.vault,
+        33_000_000,
+        token_2022,
+    );
+    set_token(&mut context, dst_b, mint_b, destination, 0, token_2022);
+
+    let mut accounts = migrate_prefix(&context, &v1, destination, refund_dest);
+    // triple A (classic), triple B (token-2022)
+    accounts.push(AccountMeta::new(src_a, false));
+    accounts.push(AccountMeta::new(dst_a, false));
+    accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
+    accounts.push(AccountMeta::new(src_b, false));
+    accounts.push(AccountMeta::new(dst_b, false));
+    accounts.push(AccountMeta::new_readonly(token_2022, false));
+
+    let ix = solana_sdk::instruction::Instruction {
+        program_id: context.program_id,
+        accounts,
+        data: vec![DISC_MIGRATE, 2],
+    };
+    let payer = context.payer.insecure_clone();
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, &v1.owner])
+        .expect("mixed SPL + Token-2022 migration must succeed");
+
+    assert_eq!(token_amount(&context, dst_a), 40_000_000, "SPL token moved");
+    assert_eq!(
+        token_amount(&context, dst_b),
+        33_000_000,
+        "Token-2022 moved"
+    );
+    assert_eq!(
+        lamports_of(&context, &destination),
+        1_000_000_000,
+        "SOL swept"
+    );
+    assert_eq!(lamports_of(&context, &v1.authority), 0, "authority closed");
 }

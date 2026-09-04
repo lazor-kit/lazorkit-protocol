@@ -2,6 +2,7 @@ export * from './accounts';
 export * from './actions';
 export * from './pdas';
 export * from './v1';
+export * from './spl';
 export * from './secp256r1';
 export * from './packing';
 export * from './errors';
