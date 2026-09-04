@@ -34,6 +34,12 @@ pub fn process(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    // Operational invariant (audit MEDIUM — bootstrap freeze): if fees are
+    // enabled with a non-zero amount while NO treasury shard exists, every
+    // fee-eligible instruction reverts (try_collect_fee can't find a shard).
+    // Initialise at least one treasury shard BEFORE enabling fees. This is a
+    // deploy-ordering rule, not enforceable here (this instruction has no
+    // shard account); the deploy checklist carries it.
     if instruction_data.len() < 81 {
         return Err(ProgramError::InvalidInstructionData);
     }

@@ -142,7 +142,10 @@ pub fn process(
 
     // Compute expiry
     let clock = Clock::get()?;
-    let expires_at = clock.slot + expiry_offset as u64;
+    let expires_at = clock
+        .slot
+        .checked_add(expiry_offset as u64)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
 
     // Derive DeferredExec PDA
     let counter_bytes = counter_for_seed.to_le_bytes();

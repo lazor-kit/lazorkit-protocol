@@ -793,10 +793,11 @@ export interface MigrateTokenPair {
  *
  * The passkey's `authPayload` must be signed over the migration intent — build
  * it with the existing `finalizeSecp256r1` flow using `DISC_MIGRATE_WALLET` and a
- * `signedPayload` of `concat(destination, v1Wallet, [tokens.length])` (32 + 32 +
- * 1 bytes), and place the returned precompile instruction immediately before this
- * one. Binding the wallet and the token count stops a relayer replaying the
- * signature against another wallet or dropping tokens to strand them.
+ * `signedPayload` of `concat(destination, v1Wallet, [tokens.length], refundDestination)`
+ * (32 + 32 + 1 + 32 bytes), and place the returned precompile instruction
+ * immediately before this one. Binding wallet, token count, and refund keeps a
+ * relayer from replaying the signature against another wallet, dropping tokens to
+ * strand them, or redirecting the reclaimed rent.
  */
 export function createMigrateWalletIx(params: {
   payer: PublicKey;

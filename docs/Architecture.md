@@ -476,6 +476,12 @@ vault deltas and token-authority state. The action types are shared — `SolLimi
 An authority with `policy_len == 0` is unbounded and spends like an Owner. That
 is intended for Owner and Admin; it is refused for Delegate.
 
+**A session with zero actions is likewise unbounded** — no actions means no
+policy engine runs, so the session key can spend the vault freely until
+expiry. Creating one still requires Owner/Admin authorization, but "session"
+does not imply "limited": attach actions, and the SDK should refuse to build
+a zero-action session without an explicit opt-in.
+
 **A policy bounds only the dimensions its actions cover.** The post-action
 evaluation checks the limits that are *present*: if a policy has a
 `ProgramWhitelist` but no `SolLimit`, SOL spend is not capped; if it caps SOL but

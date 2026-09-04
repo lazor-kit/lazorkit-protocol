@@ -491,11 +491,14 @@ fn build_passkey_migrate(
     prefix.push(sysvar_ix_index);
     prefix.push(0);
 
-    // signed_payload = destination ‖ v1_wallet ‖ num_tokens — matches the program.
+    // signed_payload = destination ‖ v1_wallet ‖ num_tokens ‖ refund_dest — the
+    // program's order. refund_dest is accounts[5] in the passkey prefix.
+    let refund_dest = migrate_accounts[5].pubkey;
     let mut signed_payload = Vec::new();
     signed_payload.extend_from_slice(signed_destination.as_ref());
     signed_payload.extend_from_slice(pk.wallet.as_ref());
     signed_payload.push(num_tokens);
+    signed_payload.extend_from_slice(refund_dest.as_ref());
 
     // challenge_hash = SHA256(disc ‖ prefix14 ‖ signed_payload ‖ payer ‖ counter ‖ program_id)
     let mut h = sha2::Sha256::new();
