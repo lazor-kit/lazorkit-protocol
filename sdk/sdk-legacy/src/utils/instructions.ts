@@ -780,6 +780,9 @@ export interface MigrateTokenPair {
   sourceAta: PublicKey;
   /** A token account owned by `destination` for the same mint. */
   destAta: PublicKey;
+  /** The token program that owns both accounts (SPL Token or Token-2022). Each
+   *  token carries its own, so one call can migrate a mix of the two. */
+  tokenProgram: PublicKey;
 }
 
 /**
@@ -810,7 +813,6 @@ export function createMigrateWalletIx(params: {
   authSignerIsSigner: boolean;
   tokens?: MigrateTokenPair[];
   authPayload?: Uint8Array;
-  tokenProgram?: PublicKey;
   programId: PublicKey;
 }): TransactionInstruction {
   const tokens = params.tokens ?? [];
@@ -822,13 +824,13 @@ export function createMigrateWalletIx(params: {
     { pubkey: params.destination, isSigner: false, isWritable: true },
     { pubkey: params.refundDestination, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    { pubkey: params.tokenProgram ?? SPL_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
     { pubkey: params.authSigner, isSigner: params.authSignerIsSigner, isWritable: false },
   ];
   for (const t of tokens) {
     keys.push({ pubkey: t.sourceAta, isSigner: false, isWritable: true });
     keys.push({ pubkey: t.destAta, isSigner: false, isWritable: true });
+    keys.push({ pubkey: t.tokenProgram, isSigner: false, isWritable: false });
   }
 
   const data = Buffer.from(

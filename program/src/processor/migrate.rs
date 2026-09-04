@@ -24,11 +24,16 @@
 //!  4. [writable]         destination (SOL sink; token ATAs must be owned by it)
 //!  5. [writable]         refund destination for reclaimed v1 PDA rent
 //!  6. []                 system program
-//!  7. []                 SPL token program (only read when num_tokens > 0)
-//!  8. []                 sysvar instructions (Secp256r1 only)
-//!  9. [signer]           Ed25519 signer (Ed25519 only; ignored for passkeys)
-//! 10..                   per token: [writable] source ATA, [writable] dest ATA
+//!  7. []                 sysvar instructions (Secp256r1 only)
+//!  8. [signer]           Ed25519 signer (Ed25519 only; ignored for passkeys)
+//!  9..                   per token, a triple:
+//!                          [writable] source ATA, [writable] dest ATA,
+//!                          []         token program (SPL Token or Token-2022)
 //! ```
+//!
+//! The token program travels with each token, so one call can migrate a mix of
+//! SPL Token and Token-2022 assets — which real vaults hold, and which a single
+//! fixed token-program account could not.
 //!
 //! Instruction data: `[num_tokens(1)][auth_payload(variable)]` — the auth
 //! payload is empty for an Ed25519 authority, and the WebAuthn assertion blob
@@ -78,7 +83,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let destination = next()?;
     let refund_dest = next()?;
     let system_program = next()?;
-    let token_program = next()?;
     let _sysvar_ix = next()?;
     let _auth_signer = next()?;
 
@@ -181,11 +185,14 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     ];
 
     // ── SPL tokens: move each fully, then close the emptied source ──────
-    let mut rest = &accounts[10..];
+    // Each token is a (source, dest, token_program) triple, so a vault holding
+    // both SPL Token and Token-2022 migrates in one call.
+    let mut rest = &accounts[9..];
     for _ in 0..num_tokens {
         let source_ata = rest.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let dest_ata = rest.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
-        rest = &rest[2..];
+        let token_program = rest.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
+        rest = &rest[3..];
 
         let token_owner = token_program.key().as_ref();
         if token_owner != &SPL_TOKEN_PROGRAM_ID && token_owner != &SPL_TOKEN_2022_PROGRAM_ID {

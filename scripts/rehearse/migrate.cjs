@@ -38,7 +38,11 @@ const OUT = process.env.OUT_DIR;
     refundDestination: new PublicKey(m.refundDest),
     authSigner: owner.publicKey,
     authSignerIsSigner: true,
-    tokens: [{ sourceAta: new PublicKey(m.sourceAta), destAta: new PublicKey(m.destAta) }],
+    tokens: [{
+      sourceAta: new PublicKey(m.sourceAta),
+      destAta: new PublicKey(m.destAta),
+      tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+    }],
     programId,
   });
 
