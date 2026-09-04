@@ -13,7 +13,9 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRATCH="${SCRATCH:-${TMPDIR:-/tmp}/lazorkit-rehearse}"
 mkdir -p "$SCRATCH"
 OUT_DIR="$SCRATCH/rehearse"
-PROGRAM_ID="4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS"   # devnet id (v2 M-2 pins this)
+# The program id the binaries are compiled for (v2 M-2 pins this). Devnet by
+# default; pass the vanity id for a --features mainnet rehearsal.
+PROGRAM_ID="${PROGRAM_ID:-4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS}"
 # The two binaries to swap between. Build v2 from HEAD and v1 from the commit
 # before the seed rename (see docs/migration-v1-to-v2.md), then point these at
 # them — or drop them in $SCRATCH as lazorkit_v{1,2}.so.
