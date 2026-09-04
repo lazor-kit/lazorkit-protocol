@@ -44,9 +44,13 @@ Proven end-to-end in `program/tests/migrate_v1_tests.rs` against the real progra
 - authorization negatives: no signature, wrong key, redirected destination
   (3005), and a v2-shaped account refused through the v1 path.
 
-Not covered by those tests, because it is a runtime guarantee rather than program
-logic: the mechanics of an in-place `solana program deploy --upgrade`. Rehearse
-that on a local validator before touching mainnet — the steps are below.
+The in-place `solana program deploy --upgrade` mechanics — a runtime guarantee
+rather than program logic — are rehearsed live by `scripts/rehearse/run.sh`,
+which was run green: a fresh validator with v1 deployed upgradeable at the vanity
+id, `solana program deploy --upgrade` swapping the binary in place (Data Length
+135704 → 147832, confirmed by `solana program show` before/after), then
+MigrateWallet moving 2 SOL and 74 tokens to the v2 destination and closing the v1
+PDAs. Re-run it against the real binaries before touching mainnet.
 
 ## Rollout: two shapes, pick before you deploy
 
@@ -68,8 +72,25 @@ Either way the migration instruction and its safety properties are identical.
 
 ## Pre-mainnet rehearsal (local validator)
 
-Build both binaries and prove the in-place upgrade preserves accounts and that
-v2 signs old-seed vaults:
+`scripts/rehearse/run.sh` automates the whole thing — it preloads v1-shaped
+accounts, deploys v1 upgradeable, upgrades in place to v2, and runs MigrateWallet,
+asserting the funds landed. Build the two binaries and point the script at them:
+
+```bash
+# v2 from HEAD; v1 from the commit before the seed rename, to a separate target.
+( cd program && cargo build-sbf --features devnet )
+cp target/deploy/lazorkit_program.so /tmp/lazorkit-rehearse/lazorkit_v2.so
+git worktree add --detach /tmp/lk-v1 <v1-commit>
+( cd /tmp/lk-v1/program && CARGO_TARGET_DIR=/tmp/lk-v1/target cargo build-sbf --features devnet )
+cp /tmp/lk-v1/target/deploy/lazorkit_program.so /tmp/lazorkit-rehearse/lazorkit_v1.so
+
+V1_SO=/tmp/lazorkit-rehearse/lazorkit_v1.so \
+V2_SO=/tmp/lazorkit-rehearse/lazorkit_v2.so \
+  scripts/rehearse/run.sh
+```
+
+The manual equivalent, and the mainnet procedure (which uses `--features mainnet`
+and real keys):
 
 ```bash
 # 1. Build the current v1 (the commit before the seed rename) and v2.
