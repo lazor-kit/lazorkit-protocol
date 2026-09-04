@@ -25,11 +25,17 @@ pub const MAX_PROTOCOL_FEE_LAMPORTS: u64 = 10_000_000;
 /// protocol without a shared secret. Devnet's protocol config therefore offers
 /// no security guarantee — say so in any devnet-facing docs. Mainnet uses a key
 /// held offline.
-#[cfg(all(feature = "mainnet", not(feature = "devnet")))]
+#[cfg(all(feature = "mainnet", not(feature = "devnet"), not(feature = "staging")))]
 pub const PROTOCOL_INIT_AUTHORITY: Pubkey =
     pinocchio_pubkey::pubkey!("4fZM6RPRLkeW8T5dDctZjWaqidFDACyW41Kqztj7uL5V");
 
-#[cfg(all(feature = "devnet", not(feature = "mainnet")))]
+#[cfg(all(feature = "devnet", not(feature = "mainnet"), not(feature = "staging")))]
+pub const PROTOCOL_INIT_AUTHORITY: Pubkey =
+    pinocchio_pubkey::pubkey!("9AmBA2C7VwtoQXXowpqBsLC4azNXm81BCSXZNiQM6BsW");
+
+// Staging reuses the committed devnet test authority — it is a throwaway devnet
+// slot, so its protocol config carries no security guarantee (same as devnet).
+#[cfg(all(feature = "staging", not(feature = "mainnet"), not(feature = "devnet")))]
 pub const PROTOCOL_INIT_AUTHORITY: Pubkey =
     pinocchio_pubkey::pubkey!("9AmBA2C7VwtoQXXowpqBsLC4azNXm81BCSXZNiQM6BsW");
 
