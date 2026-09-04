@@ -507,3 +507,155 @@ fn h2_c_owner_and_admin_still_execute_without_a_policy() {
 
     assert_eq!(lamports_of(&context, &recipient), 200_000_000);
 }
+
+/// `CreateSession` authorized by an arbitrary authority PDA + its Ed25519 signer.
+#[allow(clippy::result_large_err)]
+fn create_session_as(
+    context: &mut TestContext,
+    wallet: &WalletFixture,
+    authorizer_pda: Pubkey,
+    authorizer_key: &Keypair,
+    actions: &[u8],
+) -> Result<Pubkey, litesvm::types::FailedTransactionMetadata> {
+    let session = Keypair::new();
+    let session_pda = session_pda_for(context.program_id, wallet, &session);
+    let clock: solana_sdk::clock::Clock = context.svm.get_sysvar();
+    let expires_at = clock.slot + 100_000;
+
+    let mut data = vec![5u8]; // CreateSession
+    data.extend_from_slice(session.pubkey().as_ref());
+    data.extend_from_slice(&expires_at.to_le_bytes());
+    data.extend_from_slice(&(actions.len() as u16).to_le_bytes());
+    data.extend_from_slice(actions);
+
+    let ix = Instruction {
+        program_id: context.program_id,
+        accounts: vec![
+            AccountMeta::new(context.payer.pubkey(), true),
+            AccountMeta::new_readonly(wallet.wallet_pda, false),
+            AccountMeta::new(authorizer_pda, false),
+            AccountMeta::new(session_pda, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            AccountMeta::new_readonly(authorizer_key.pubkey(), true),
+        ],
+        data,
+    };
+    let payer = context.payer.insecure_clone();
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, authorizer_key])?;
+    Ok(session_pda)
+}
+
+/// The CreateSession policy-escalation guard (final-review HIGH). A bounded
+/// (policy-bearing) Admin passes the role gate but must be refused a session:
+/// a session carries its own action buffer, so an unrestricted one would let the
+/// Admin spend past its own cap. Locks `session/create.rs`'s `policy_len != 0`
+/// reject against a future refactor.
+#[test]
+fn bounded_admin_cannot_create_session() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
+
+    // A legitimate v2 config: an Admin carrying a 1-SOL lifetime spend policy.
+    let admin = Keypair::new();
+    let admin_pda = owner_adds(
+        &mut context,
+        &wallet,
+        &admin,
+        RANK_ADMIN,
+        &action_sol_limit(1_000_000_000),
+    )
+    .expect("owner may add a bounded Admin");
+
+    assert_custom_error(
+        create_session_as(&mut context, &wallet, admin_pda, &admin, &[]),
+        ERR_PERMISSION_DENIED,
+        "a bounded Admin must not be able to create a session",
+    );
+
+    // The guard fires only on a policy: the unbounded Owner still creates sessions.
+    let owner_key = wallet.owner.insecure_clone();
+    create_session_as(
+        &mut context,
+        &wallet,
+        wallet.owner_auth_pda,
+        &owner_key,
+        &[],
+    )
+    .expect("an unbounded Owner may still create a session");
+}
+
+/// `TransferOwnership` ix authorized by `current_owner_pda`. The policy guard is
+/// checked before authentication, so no valid owner signature is needed to reach
+/// it — this exercises exactly that guard.
+fn transfer_ownership_ix(
+    context: &TestContext,
+    wallet: &WalletFixture,
+    current_owner_pda: Pubkey,
+    new_owner_key: &Keypair,
+    refund_dest: Pubkey,
+) -> Instruction {
+    let (new_owner_pda, _) = Pubkey::find_program_address(
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet.wallet_pda.as_ref(),
+            new_owner_key.pubkey().as_ref(),
+        ],
+        &context.program_id,
+    );
+    let mut data = vec![3u8, 0u8]; // TransferOwnership, auth_type = Ed25519
+    data.extend_from_slice(new_owner_key.pubkey().as_ref());
+
+    Instruction {
+        program_id: context.program_id,
+        accounts: vec![
+            AccountMeta::new(context.payer.pubkey(), true),
+            AccountMeta::new_readonly(wallet.wallet_pda, false),
+            AccountMeta::new(current_owner_pda, false),
+            AccountMeta::new(new_owner_pda, false),
+            AccountMeta::new(refund_dest, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+        ],
+        data,
+    }
+}
+
+/// The TransferOwnership sibling of the CreateSession guard (final-review HIGH).
+/// A bounded (policy-bearing) Owner may not transfer ownership — the new owner is
+/// written `policy_len = 0`, so a bounded Owner could otherwise shed its bound by
+/// transferring to a fresh key it controls. Locks `transfer_ownership.rs`'s
+/// `policy_len != 0` reject.
+#[test]
+fn bounded_owner_cannot_transfer_ownership() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
+
+    // A bounded Owner: rank Owner carrying a spend policy — permitted to create.
+    let bounded_owner = Keypair::new();
+    let bounded_owner_pda = owner_adds(
+        &mut context,
+        &wallet,
+        &bounded_owner,
+        RANK_OWNER,
+        &action_sol_limit(1_000_000_000),
+    )
+    .expect("owner may add a second, bounded Owner");
+
+    let new_owner = Keypair::new();
+    let refund_dest = Pubkey::new_unique();
+    let ix = transfer_ownership_ix(
+        &context,
+        &wallet,
+        bounded_owner_pda,
+        &new_owner,
+        refund_dest,
+    );
+
+    let payer = context.payer.insecure_clone();
+    assert_custom_error(
+        try_send(&mut context.svm, &payer, &[ix], &[&payer]),
+        ERR_PERMISSION_DENIED,
+        "a bounded Owner must not be able to transfer ownership",
+    );
+}
