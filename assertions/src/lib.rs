@@ -9,22 +9,35 @@ use pinocchio::{
 };
 use pinocchio_pubkey::declare_id;
 
-// LazorKit Program ID — chosen at build time via the `mainnet` / `devnet`
-// cargo features. Exactly one must be enabled; otherwise the build fails
-// loudly via the `compile_error!` below. This prevents accidental cross-
+// LazorKit Program ID — chosen at build time via the `mainnet` / `devnet` /
+// `staging` cargo features. Exactly one must be enabled; otherwise the build
+// fails loudly via the `compile_error!` below. This prevents accidental cross-
 // cluster deploys (a binary compiled with one ID malfunctions if deployed
-// to a slot at the other ID — every internal `crate::ID` check fails).
-#[cfg(all(feature = "mainnet", not(feature = "devnet")))]
+// to a slot at another ID — every internal `crate::ID` check fails).
+//
+// `staging` is a throwaway devnet slot for integration rehearsals (e.g. giving
+// a direct integrator a v2 wire-format target to test against before the
+// mainnet swap). Its ID is a fresh keypair, not a vanity address.
+#[cfg(all(feature = "mainnet", not(feature = "devnet"), not(feature = "staging")))]
 declare_id!("LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi");
 
-#[cfg(all(feature = "devnet", not(feature = "mainnet")))]
+#[cfg(all(feature = "devnet", not(feature = "mainnet"), not(feature = "staging")))]
 declare_id!("4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS");
+
+#[cfg(all(feature = "staging", not(feature = "mainnet"), not(feature = "devnet")))]
+declare_id!("HQ584adp8ub2FzrTx1fdNmXmrL5yuyVndafPB3x4NYG3");
 
 #[cfg(any(
     all(feature = "mainnet", feature = "devnet"),
-    all(not(feature = "mainnet"), not(feature = "devnet"))
+    all(feature = "mainnet", feature = "staging"),
+    all(feature = "devnet", feature = "staging"),
+    all(
+        not(feature = "mainnet"),
+        not(feature = "devnet"),
+        not(feature = "staging")
+    )
 ))]
-compile_error!("LazorKit: pick exactly one cluster — `--features mainnet` OR `--features devnet`");
+compile_error!("LazorKit: pick exactly one cluster — `--features mainnet` | `devnet` | `staging`");
 
 #[allow(unused_imports)]
 use std::mem::MaybeUninit;

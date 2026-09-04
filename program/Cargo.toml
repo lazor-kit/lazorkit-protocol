@@ -13,6 +13,7 @@ crate-type = ["cdylib", "lib"]
 [features]
 mainnet = ["assertions/mainnet"]
 devnet  = ["assertions/devnet"]
+staging = ["assertions/staging"]
 
 [dependencies]
 pinocchio = { workspace = true }
