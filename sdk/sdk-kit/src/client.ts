@@ -320,6 +320,16 @@ function assertAddAuthorityRole(
         'manages nothing. Build one with serializeActions([...]).',
     );
   }
+  // …and only a Delegate may carry one (PolicyRankMismatch, 3035). A bounded
+  // Owner or Admin holds powers no engine can bound — and a bounded Owner was
+  // a dead end, able to remove the unbounded Owner and then widen nothing.
+  if (role !== ROLE_SPENDER && policy && policy.length > 0) {
+    throw new Error(
+      'Only ROLE_SPENDER (Delegate) may carry a policy. A capped spender is a ' +
+        'Delegate; a manager is an Admin. To give one person both, issue two ' +
+        'authorities.',
+    );
+  }
 }
 
 /// A session with no actions is not "a session with no limits" — it is a key
@@ -678,7 +688,8 @@ export class LazorKit {
     newAuthority: CreateWalletOwner;
     role: number;
     /** Action buffer bounding what this authority may spend. Required for
-     *  ROLE_DELEGATE; optional for Admin. */
+     *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
+     *  carry one, so a policy always means a bounded spender. */
     policy?: Uint8Array;
     /** Opt in to creating another Owner. An Owner can manage and revoke every
      *  authority on the wallet, this one included, so it is never the default. */
@@ -735,7 +746,8 @@ export class LazorKit {
     newAuthority: CreateWalletOwner;
     role: number;
     /** Action buffer bounding what this authority may spend. Required for
-     *  ROLE_DELEGATE; optional for Admin. */
+     *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
+     *  carry one, so a policy always means a bounded spender. */
     policy?: Uint8Array;
     /** Opt in to creating another Owner. An Owner can manage and revoke every
      *  authority on the wallet, this one included, so it is never the default. */
