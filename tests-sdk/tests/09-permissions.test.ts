@@ -255,6 +255,8 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderKp.publicKey, spenderAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
 
     // Error 3002 = PermissionDenied
@@ -351,6 +353,8 @@ describe('Permission Boundaries', () => {
         },
         sessionKey: sessionKp.publicKey,
         expiresAt: currentSlot + 9000n,
+        // Deliberately unrestricted: this test exercises the actionless session.
+        unrestricted: true,
       });
       const response = await fakeWebAuthnSign(
         secpSpenderKey,

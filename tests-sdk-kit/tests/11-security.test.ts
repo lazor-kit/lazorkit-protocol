@@ -117,6 +117,8 @@ describe('Security', () => {
         },
         sessionKey: sessionSigner.address,
         expiresAt: currentSlot + 9000n,
+        // Deliberately unrestricted: this test exercises the actionless session.
+        unrestricted: true,
       });
       const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
       const { instructions } = client.finalizeCreateSession(prepared, response);

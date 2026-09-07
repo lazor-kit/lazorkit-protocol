@@ -89,6 +89,8 @@ describe('Session Actions', () => {
       sessionKey: sessionKp.publicKey,
       expiresAt,
       actions,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
@@ -148,6 +150,8 @@ describe('Session Actions', () => {
           sessionKey: sessionKp.publicKey,
           expiresAt: currentSlot + 50_000n,
           // no actions field at all
+          // Deliberately unrestricted: this test exercises the actionless session.
+          unrestricted: true,
         });
       await sendTx(ctx, createIxs, [ownerKp]);
 

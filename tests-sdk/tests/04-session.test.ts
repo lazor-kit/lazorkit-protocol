@@ -49,6 +49,8 @@ describe('CreateSession', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthorityPda),
       sessionKey: sessionKp.publicKey,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
 
     await sendTx(ctx, instructions, [ownerKp]);
@@ -75,6 +77,8 @@ describe('CreateSession', () => {
       adminSigner: ed25519(randomKp.publicKey, ownerAuthorityPda),
       sessionKey: sessionKp.publicKey,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
 
     await sendTxExpectError(ctx, instructions, [randomKp]);
