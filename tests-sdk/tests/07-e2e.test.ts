@@ -214,6 +214,8 @@ describe('E2E Company Workflow', () => {
       adminSigner: ed25519(adminKp.publicKey, adminAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
 
     await sendTx(ctx, instructions, [adminKp]);

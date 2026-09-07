@@ -71,6 +71,8 @@ describe('Session Execute', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
@@ -106,6 +108,8 @@ describe('Session Execute', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
@@ -136,6 +140,8 @@ describe('Session Execute', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
@@ -171,6 +177,8 @@ describe('Session Execute', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 

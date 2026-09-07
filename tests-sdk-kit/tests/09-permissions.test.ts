@@ -231,6 +231,8 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderSigner.address, spenderAuthPda),
       sessionKey: sessionSigner.address,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTxExpectError(ctx, instructions, [spenderSigner], 3002);
   });
@@ -316,6 +318,8 @@ describe('Permission Boundaries', () => {
         },
         sessionKey: sessionSigner.address,
         expiresAt: currentSlot + 9000n,
+        // Deliberately unrestricted: this test exercises the actionless session.
+        unrestricted: true,
       });
       const response = await fakeWebAuthnSign(secpSpenderKey, prepared.challenge);
       const { instructions } = client.finalizeCreateSession(prepared, response);

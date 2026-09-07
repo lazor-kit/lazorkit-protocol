@@ -481,6 +481,8 @@ async function main() {
       adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
       sessionKey: ed25519SessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     const r = await sendAndMeasure(connection, payer, instructions, [
       ed25519OwnerKp,
@@ -503,6 +505,8 @@ async function main() {
       secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       sessionKey: secpSessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
     const { instructions, sessionPda } = client.finalizeCreateSession(prepared, webauthnResponse);

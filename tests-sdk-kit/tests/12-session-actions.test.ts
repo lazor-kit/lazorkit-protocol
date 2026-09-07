@@ -82,6 +82,8 @@ describe('Session Actions', () => {
       sessionKey: sessionSigner.address,
       expiresAt,
       actions,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerSigner]);
     return { sessionSigner, sessionPda };
@@ -123,6 +125,8 @@ describe('Session Actions', () => {
         adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
         sessionKey: sessionSigner.address,
         expiresAt: currentSlot + 50_000n,
+        // Deliberately unrestricted: this test exercises the actionless session.
+        unrestricted: true,
       });
       await sendTx(ctx, createIxs, [ownerSigner]);
 
