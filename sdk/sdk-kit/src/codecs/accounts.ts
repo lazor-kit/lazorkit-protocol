@@ -12,6 +12,7 @@ import {
   getBytesDecoder,
   getStructDecoder,
   getU8Decoder,
+  getU16Decoder,
   getU32Decoder,
   getU64Decoder,
   type Address,
@@ -42,6 +43,10 @@ export interface AuthorityAccountData {
   bump: number;
   version: number;
   counter: number;
+  /** Bytes of spending policy after the key material. 0 = unbounded. */
+  policyLen: number;
+  /** Convenience: does this authority carry a spending policy? */
+  isBounded: boolean;
   wallet: Address;
 }
 
@@ -56,8 +61,9 @@ const authorityHeaderDecoder = getStructDecoder([
   // 3 bytes pad to align u32 on offset 8
   ['_padHi', fixDecoderSize(getBytesDecoder(), 3)],
   ['counter', getU32Decoder()],
-  // 4 bytes pad to align Pubkey on offset 16
-  ['_padLo', fixDecoderSize(getBytesDecoder(), 4)],
+  ['policyLen', getU16Decoder()],
+  // 2 bytes pad to align Pubkey on offset 16
+  ['_padLo', fixDecoderSize(getBytesDecoder(), 2)],
   ['wallet', getAddressDecoder()],
 ]);
 
@@ -77,6 +83,8 @@ export function decodeAuthorityAccount(
     bump: decoded.bump,
     version: decoded.version,
     counter: decoded.counter,
+    policyLen: decoded.policyLen,
+    isBounded: decoded.policyLen > 0,
     wallet: decoded.wallet,
   };
 }
@@ -152,6 +160,10 @@ export interface WalletAccountData {
   discriminator: number;
   bump: number;
   version: number;
+  /** Authorities on this wallet holding rank Owner. The program refuses to
+   *  remove the last one, and a wallet with a single Owner is unrecoverable
+   *  if that Owner's key is lost. */
+  ownerCount: number;
 }
 
 export const WALLET_HEADER_SIZE = 8;
@@ -160,7 +172,9 @@ const walletHeaderDecoder = getStructDecoder([
   ['discriminator', getU8Decoder()],
   ['bump', getU8Decoder()],
   ['version', getU8Decoder()],
-  ['_pad', fixDecoderSize(getBytesDecoder(), 5)],
+  // 1 byte pad to align u32 on offset 4
+  ['_pad', fixDecoderSize(getBytesDecoder(), 1)],
+  ['ownerCount', getU32Decoder()],
 ]);
 
 export function decodeWalletAccount(
@@ -176,5 +190,6 @@ export function decodeWalletAccount(
     discriminator: decoded.discriminator,
     bump: decoded.bump,
     version: decoded.version,
+    ownerCount: decoded.ownerCount,
   };
 }

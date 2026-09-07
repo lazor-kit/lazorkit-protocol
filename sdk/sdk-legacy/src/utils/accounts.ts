@@ -31,7 +31,15 @@ export class AuthorityAccount implements AuthorityAccountData {
     public readonly version: number,
     public readonly counter: number,
     public readonly wallet: PublicKey,
+    /** Bytes of spending policy after the key material. 0 = unbounded. */
+    public readonly policyLen: number = 0,
   ) {}
+
+  /** Does this authority carry a spending policy? Rank says what it may
+   *  manage, this says whether what it may *spend* is bounded. */
+  get isBounded(): boolean {
+    return this.policyLen > 0;
+  }
 
   static fromBuffer(data: Buffer): AuthorityAccount {
     if (data.length < 48) throw new Error('Authority account data too short');
@@ -42,9 +50,19 @@ export class AuthorityAccount implements AuthorityAccountData {
     const version = data[4];
     // padding: 3 bytes (5..8)
     const counter = data.readUInt32LE(8);
-    // padding: 4 bytes (12..16)
+    const policyLen = data.readUInt16LE(12);
+    // padding: 2 bytes (14..16)
     const wallet = new PublicKey(data.subarray(16, 48));
-    return new AuthorityAccount(discriminator, authorityType, role, bump, version, counter, wallet);
+    return new AuthorityAccount(
+      discriminator,
+      authorityType,
+      role,
+      bump,
+      version,
+      counter,
+      wallet,
+      policyLen,
+    );
   }
 
   static async fromAccountAddress(
