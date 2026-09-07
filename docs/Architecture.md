@@ -493,10 +493,20 @@ can reach; the SDK should surface this. A whitelist-only policy is a legitimate
 shape (restrict *which* programs, unlimited amount), so this is a granter choice,
 not a defect — but it is a choice, and worth stating plainly.
 
-Two execution paths do **not** run the policy engine, and both refuse a
-policy-bearing authority rather than silently ignoring its limits:
-`AddAuthority` (a bounded authority may not grant) and `Authorize`/deferred
-execution (which has no action engine, so a bounded Admin is kept off it).
+Four instructions refuse a policy-bearing authority outright rather than
+silently ignoring its limits, because none of them can enforce a policy:
+`AddAuthority` (a bounded authority may not grant), `Authorize`/deferred
+execution (no action engine), `CreateSession` (a session carries its own action
+buffer, which may be empty, so a bounded Admin could otherwise mint an unbounded
+key) and `TransferOwnership` (the new owner is written `policy_len = 0`, so a
+bounded Owner could otherwise shed its own bound).
+
+The rule those four implement is worth stating directly, because it is narrower
+than "a bounded authority may only Execute": **a bounded authority may narrow
+the authority set but never widen it.** `RemoveAuthority` and `RevokeSession`
+deliberately carry no policy check — a bounded Admin can still revoke a Delegate
+or kill a session, which takes power away and can never grant it. It cannot then
+recreate what it removed.
 
 ## Execute signer forwarding
 
