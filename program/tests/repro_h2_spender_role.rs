@@ -11,12 +11,14 @@
 //! doing two jobs:
 //!
 //!   - **rank** — Owner / Admin / Delegate — governs management only
-//!   - **policy** — an action buffer — governs spending, and any authority may
-//!     carry one
+//!   - **policy** — an action buffer — governs spending
 //!
-//! A Delegate must now carry a policy (3033), which makes the tier's name true:
-//! it manages nothing and spends only what its policy allows. The same engine
-//! that has always bounded sessions bounds it, through the same code path.
+//! A Delegate must carry a policy (3033) and only a Delegate may (3035), so
+//! `policy_len != 0` is exactly `rank == Delegate`. That makes the tier's name
+//! true — it manages nothing and spends only what its policy allows — and keeps
+//! a bounded actor from existing at a rank whose other powers no engine can
+//! bound. The same engine that has always bounded sessions bounds it, through
+//! the same code path.
 //!
 //! Run:  cargo test --features devnet -p lazorkit-program --test repro_h2_spender_role
 
@@ -38,6 +40,8 @@ const ERR_SOL_LIMIT_EXCEEDED: u32 = 3024;
 const ERR_DELEGATE_REQUIRES_POLICY: u32 = 3033;
 /// `AuthError::PolicyBearingAuthorityCannotDelegate`
 const ERR_POLICY_BEARING_CANNOT_DELEGATE: u32 = 3034;
+/// `AuthError::PolicyRankMismatch`
+const ERR_POLICY_RANK_MISMATCH: u32 = 3035;
 
 const RANK_ADMIN: u8 = 1;
 const RANK_DELEGATE: u8 = 2;
@@ -241,56 +245,68 @@ fn h2_a_control_delegate_is_blocked_from_privileged_instructions() {
 /// could mint a Delegate capped at 100, and the cap on the Admin would mean
 /// nothing.
 #[test]
-fn h2_a_a_bounded_admin_cannot_mint_authorities() {
+fn h2_a_a_only_a_delegate_may_carry_a_policy() {
     let mut context = setup_test();
     let wallet = create_ed25519_wallet(&mut context, 500_000_000);
 
-    // An Admin that is itself bounded. Rank alone would let it add a Delegate.
-    let admin = Keypair::new();
-    let admin_auth = owner_adds(
-        &mut context,
-        &wallet,
-        &admin,
-        RANK_ADMIN,
-        &spend_limit_policy(1_000_000),
-    )
-    .expect("an Admin may carry a policy");
+    // A policy above rank Delegate is refused outright, so `policy_len != 0`
+    // means exactly `rank == Delegate` for every authority on chain.
+    //
+    // A bounded Admin used to be legal and was the shape every escalation guard
+    // was written against: it could mint a wider Delegate, mint an unbounded
+    // session, or (as an Owner) shed its bound by transferring ownership. A
+    // bounded Owner was worse — it could remove the unbounded Owner and then
+    // widen nothing, leaving a wallet that could never be managed again with
+    // the funds still inside. Making the state unreachable retires the whole
+    // class; the downstream guards stay as defence in depth.
+    let bounded_admin = Keypair::new();
+    assert_custom_error(
+        owner_adds(
+            &mut context,
+            &wallet,
+            &bounded_admin,
+            RANK_ADMIN,
+            &spend_limit_policy(1_000_000),
+        )
+        .map(|_| unreachable!()),
+        ERR_POLICY_RANK_MISMATCH,
+        "an Admin must not be able to carry a policy",
+    );
 
     advance(&mut context.svm);
-    let victim = Keypair::new();
-    let result = add_ed25519_authority(
-        &mut context,
-        &wallet,
-        admin_auth,
-        &admin,
-        &victim,
-        RANK_DELEGATE,
-        &spend_limit_policy(100_000_000_000),
-    );
+    let bounded_owner = Keypair::new();
     assert_custom_error(
-        result.map(|_| unreachable!()),
-        ERR_POLICY_BEARING_CANNOT_DELEGATE,
-        "H-2a: a bounded Admin must not be able to grant a larger allowance",
+        owner_adds(
+            &mut context,
+            &wallet,
+            &bounded_owner,
+            RANK_OWNER,
+            &spend_limit_policy(1_000_000),
+        )
+        .map(|_| unreachable!()),
+        ERR_POLICY_RANK_MISMATCH,
+        "an Owner must not be able to carry a policy",
     );
 
-    // An unbounded Admin still may — the rule is about the granter carrying a
-    // policy, not about rank.
+    // The two legal shapes are unaffected: an unbounded Admin, and a Delegate
+    // that carries a policy.
     advance(&mut context.svm);
     let plain_admin = Keypair::new();
     let plain_admin_auth = owner_adds(&mut context, &wallet, &plain_admin, RANK_ADMIN, &[])
-        .expect("add unbounded Admin");
+        .expect("an Admin without a policy is still fine");
+
     advance(&mut context.svm);
-    let ok = Keypair::new();
+    let delegate = Keypair::new();
     add_ed25519_authority(
         &mut context,
         &wallet,
         plain_admin_auth,
         &plain_admin,
-        &ok,
+        &delegate,
         RANK_DELEGATE,
         &spend_limit_policy(1_000_000),
     )
-    .expect("H-2a: an unbounded Admin may still mint a Delegate");
+    .expect("an unbounded Admin may still mint a bounded Delegate");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -546,27 +562,55 @@ fn create_session_as(
     Ok(session_pda)
 }
 
+/// Attach a policy to an authority account that already exists, by rewriting
+/// its bytes directly.
+///
+/// `AddAuthority` refuses this shape now (3035), so it is unreachable through
+/// the program — which is the point: the downstream guards must still hold if a
+/// bounded Owner or Admin ever arrives by some other route (a future
+/// instruction, a migration, a bug). Fabricating the account is the only way to
+/// exercise them, the same technique `migrate_v1_tests` uses for v1 accounts.
+fn force_policy_onto_authority(context: &mut TestContext, authority: Pubkey, policy: &[u8]) {
+    let existing = context
+        .svm
+        .get_account(&authority)
+        .expect("authority must exist");
+    let mut data = existing.data.clone();
+    // `policy_len: u16` sits at offset 12 of AuthorityAccountHeader.
+    data[12..14].copy_from_slice(&(policy.len() as u16).to_le_bytes());
+    data.extend_from_slice(policy);
+    let lamports = existing.lamports + (policy.len() as u64) * 7_000;
+    context
+        .svm
+        .set_account(
+            authority,
+            solana_sdk::account::Account {
+                lamports,
+                data,
+                owner: context.program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .expect("rewrite authority with a policy");
+}
+
 /// The CreateSession policy-escalation guard (final-review HIGH). A bounded
 /// (policy-bearing) Admin passes the role gate but must be refused a session:
-/// a session carries its own action buffer, so an unrestricted one would let the
-/// Admin spend past its own cap. Locks `session/create.rs`'s `policy_len != 0`
-/// reject against a future refactor.
+/// a session carries its own action buffer, so an unrestricted one would let
+/// the Admin spend past its own cap.
 #[test]
 fn bounded_admin_cannot_create_session() {
     let mut context = setup_test();
     let wallet = create_ed25519_wallet(&mut context, 500_000_000);
 
-    // A legitimate v2 config: an Admin carrying a 1-SOL lifetime spend policy.
     let admin = Keypair::new();
-    let admin_pda = owner_adds(
-        &mut context,
-        &wallet,
-        &admin,
-        RANK_ADMIN,
-        &action_sol_limit(1_000_000_000),
-    )
-    .expect("owner may add a bounded Admin");
+    let admin_pda =
+        owner_adds(&mut context, &wallet, &admin, RANK_ADMIN, &[]).expect("owner may add an Admin");
+    // …then force it bounded, a shape AddAuthority itself now refuses.
+    force_policy_onto_authority(&mut context, admin_pda, &action_sol_limit(1_000_000_000));
 
+    advance(&mut context.svm);
     assert_custom_error(
         create_session_as(&mut context, &wallet, admin_pda, &admin, &[]),
         ERR_PERMISSION_DENIED,
@@ -631,17 +675,19 @@ fn bounded_owner_cannot_transfer_ownership() {
     let mut context = setup_test();
     let wallet = create_ed25519_wallet(&mut context, 500_000_000);
 
-    // A bounded Owner: rank Owner carrying a spend policy — permitted to create.
+    // A second Owner, then forced bounded — a shape AddAuthority now refuses
+    // (3035), so this guard is defence in depth. See
+    // `force_policy_onto_authority`.
     let bounded_owner = Keypair::new();
-    let bounded_owner_pda = owner_adds(
+    let bounded_owner_pda = owner_adds(&mut context, &wallet, &bounded_owner, RANK_OWNER, &[])
+        .expect("owner may add a second Owner");
+    force_policy_onto_authority(
         &mut context,
-        &wallet,
-        &bounded_owner,
-        RANK_OWNER,
+        bounded_owner_pda,
         &action_sol_limit(1_000_000_000),
-    )
-    .expect("owner may add a second, bounded Owner");
+    );
 
+    advance(&mut context.svm);
     let new_owner = Keypair::new();
     let refund_dest = Pubkey::new_unique();
     let ix = transfer_ownership_ix(

@@ -493,8 +493,22 @@ can reach; the SDK should surface this. A whitelist-only policy is a legitimate
 shape (restrict *which* programs, unlimited amount), so this is a granter choice,
 not a defect — but it is a choice, and worth stating plainly.
 
+**Only a Delegate may carry a policy.** `AddAuthority` requires one for rank
+Delegate (3033) and refuses one above it (3035), and the three sites that write
+an authority — wallet creation, AddAuthority, TransferOwnership — are the only
+ones that set `policy_len`. So `policy_len != 0` means exactly `rank ==
+Delegate` for every authority the program will ever write. A bounded Owner was
+otherwise a dead end: it could remove the unbounded Owner, and then widen
+nothing — no AddAuthority, no CreateSession, no TransferOwnership, no
+Authorize — so when its allowance ran out the wallet was unmanageable with its
+funds still inside. A bounded Admin was the shape every escalation guard below
+was written against. A capped spender is a Delegate; a manager is an Admin; one
+key is no longer both.
+
 Four instructions refuse a policy-bearing authority outright rather than
-silently ignoring its limits, because none of them can enforce a policy:
+silently ignoring its limits, because none of them can enforce a policy. With
+the rank rule above they are now defence in depth against a bounded authority
+arriving by some other route, rather than a live gate:
 `AddAuthority` (a bounded authority may not grant), `Authorize`/deferred
 execution (no action engine), `CreateSession` (a session carries its own action
 buffer, which may be empty, so a bounded Admin could otherwise mint an unbounded

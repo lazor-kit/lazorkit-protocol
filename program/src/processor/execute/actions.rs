@@ -501,10 +501,19 @@ pub fn evaluate_post_actions(
                     let window = read_u64(&session_data[abs_data_offset..], 16);
                     let last_reset = read_u64(&session_data[abs_data_offset..], 24);
 
+                    // The window restarts at the spend that opened it, not at a
+                    // grid boundary. Snapping `last_reset` back to
+                    // `(current_slot / window) * window` made the window expire
+                    // early by however far into it the spend fell: a spend at
+                    // `kW + W - 1` reset and pinned `last_reset = kW`, so a
+                    // spend two slots later at `kW + W + 1` satisfied
+                    // `W + 1 > W` and reset again — two full allowances inside
+                    // a second, against a cap the granter wrote as one per
+                    // window. Recording the spend's own slot makes the
+                    // worst-case rate equal the nominal cap.
                     let (new_spent, new_last_reset) =
                         if current_slot.saturating_sub(last_reset) > window {
-                            let aligned = (current_slot / window) * window;
-                            (sol_spent, aligned)
+                            (sol_spent, current_slot)
                         } else {
                             (spent.saturating_add(sol_spent), last_reset)
                         };
@@ -549,10 +558,13 @@ pub fn evaluate_post_actions(
                     let window = read_u64(&session_data[abs_data_offset..], 48);
                     let last_reset = read_u64(&session_data[abs_data_offset..], 56);
 
+                    // Same fix as SolRecurringLimit above: restart the window at
+                    // the spend that opened it, not at a grid boundary, so a
+                    // spend landing late in a window cannot immediately open a
+                    // second one.
                     let (new_spent, new_last_reset) =
                         if current_slot.saturating_sub(last_reset) > window {
-                            let aligned = (current_slot / window) * window;
-                            (token_spent, aligned)
+                            (token_spent, current_slot)
                         } else {
                             (spent.saturating_add(token_spent), last_reset)
                         };
@@ -954,10 +966,66 @@ mod tests {
         );
         assert!(result.is_ok());
 
-        // Verify last_reset was aligned to window boundary
+        // The new window starts at the spend that opened it, not at the grid
+        // boundary below it. Snapping back to 100 here would leave the window
+        // half spent already, so the next spend at 201 would reset a second
+        // time — two full allowances inside one nominal window.
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
         let last_reset = read_u64(&session_data[abs_offset..], 24);
-        assert_eq!(last_reset, 100); // (150 / 100) * 100 = 100
+        assert_eq!(last_reset, 150);
+    }
+
+    /// The window may not restart twice in quick succession. With a grid-aligned
+    /// reset, a spend landing at the end of a window pinned `last_reset` to the
+    /// window's start, so a spend two slots later cleared `> window` again and
+    /// the cap was worth double what the granter wrote.
+    #[test]
+    fn test_sol_recurring_limit_cannot_double_reset_across_a_boundary() {
+        // limit 1 SOL per 100-slot window.
+        let data = build_sol_recurring(1_000_000, 0, 100, 0);
+        let actions = build_action(2, 0, &data);
+        let mut session_data = build_session_data(&actions);
+
+        // Spend the full allowance late in the first window (slot 199).
+        eval_post(
+            &mut session_data,
+            &[],
+            &Pubkey::default(),
+            5_000_000,
+            4_000_000,
+            &[],
+            199,
+        )
+        .expect("first window's allowance");
+
+        // Two slots later the old code reset again (199 -> aligned 100, and
+        // 201 - 100 = 101 > 100). It must not: only 2 slots of a 100-slot
+        // window have elapsed.
+        let result = eval_post(
+            &mut session_data,
+            &[],
+            &Pubkey::default(),
+            4_000_000,
+            3_000_000,
+            &[],
+            201,
+        );
+        assert!(
+            result.is_err(),
+            "a second full allowance 2 slots later must be refused"
+        );
+
+        // A spend past the real window boundary is allowed again.
+        eval_post(
+            &mut session_data,
+            &[],
+            &Pubkey::default(),
+            4_000_000,
+            3_000_000,
+            &[],
+            300,
+        )
+        .expect("the window genuinely elapsed");
     }
 
     #[test]

@@ -326,6 +326,26 @@ pub fn process_add_authority(
         return Err(AuthError::DelegateRequiresPolicy.into());
     }
 
+    // …and only a Delegate may carry one, so `policy_len != 0` is exactly
+    // `rank == Delegate` for every authority the program will ever write.
+    //
+    // A bounded Owner was reachable before this and was a one-way trip into a
+    // dead wallet. Nothing stopped a policy being attached to rank 0, and
+    // `RemoveAuthority` reads no policy, so a bounded Owner could remove the
+    // unbounded one (or simply outlive a lost device) and become the sole
+    // Owner. From there every widening path is shut — AddAuthority 3034,
+    // CreateSession 3002, TransferOwnership 3002, Authorize 3002 — and no
+    // instruction rewrites a policy buffer, so when its allowance ran out the
+    // vault was inert with the funds still inside.
+    //
+    // Forbidding a policy above rank Delegate also retires the bounded-Admin
+    // shape, and with it the asymmetry that a bounded Admin could revoke
+    // Delegates and sessions it could never recreate. A capped spender is a
+    // Delegate; a manager is an Admin; the two are no longer one key.
+    if args.new_role != RANK_DELEGATE && !policy.is_empty() {
+        return Err(AuthError::PolicyRankMismatch.into());
+    }
+
     // An authority that is itself bounded may not mint authorities.
     //
     // Comparing two policies to check the grant is no broader than the granter's

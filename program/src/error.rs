@@ -47,6 +47,12 @@ pub enum AuthError {
     /// Comparing two policies to prove the grant is no broader than the
     /// granter's is hard; refusing the grant sidesteps it.
     PolicyBearingAuthorityCannotDelegate = 3034,
+    /// A policy was attached to an Owner or an Admin. Only a Delegate may carry
+    /// one, so `policy_len != 0` means exactly `rank == Delegate`. A bounded
+    /// Owner was a dead end — it could remove the unbounded Owner and then
+    /// widen nothing, leaving the wallet unmanageable with its funds inside —
+    /// and a bounded Admin could revoke what it could not recreate.
+    PolicyRankMismatch = 3035,
 }
 
 impl From<AuthError> for ProgramError {
