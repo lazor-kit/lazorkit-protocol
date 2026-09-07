@@ -83,10 +83,12 @@ use crate::{
 ///
 /// Layout:
 /// - `authority_type`: 0 for Ed25519, 1 for Secp256r1.
-/// - `new_role`: Role to assign (1=Admin, 2=Spender).
+/// - `new_role`: Rank to assign (0=Owner, 1=Admin, 2=Delegate).
 ///
-/// `Owner` is intentionally excluded here. Ownership changes must use
-/// `TransferOwnership`, which atomically closes the old owner authority.
+/// An Owner may grant `Owner`: a person with several devices holds several
+/// passkeys, and making each an Owner is what lets a surviving device revoke a
+/// lost one — see `can_add`. `TransferOwnership` is the different operation of
+/// *moving* ownership, closing the old owner authority atomically.
 /// - `_padding`: Reserved to align to 8-byte boundary.
 #[repr(C, align(8))]
 #[derive(NoPadding)]
