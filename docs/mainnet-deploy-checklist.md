@@ -41,6 +41,16 @@ is the human process: keys, comms, and the decisions in section 2.
 - [ ] **Custody confirmed**: the upgrade authority
       (`4fZM6RPR…`) and the ProtocolConfig admin (`24fx48GA…`) are both keys you
       can sign with, ideally in cold storage / multisig.
+- [ ] **When the upgrade authority moves to the Squads vault.** Recommended:
+      after v2 has run cleanly for a few days, so a rollback during the window
+      needs one key, not a quorum. Both the transfer and a vault-approved
+      upgrade are rehearsed — see [Multisig rehearsal](#multisig-rehearsal).
+      Once transferred, every upgrade needs the vault. The extend before it
+      does not: while `enable_extend_program_checked` is inactive (devnet and
+      mainnet, 2026-09-11) the loader's plain `ExtendProgram` needs no
+      authority, and the runtime refuses it via CPI, so any payer sends it
+      top-level first. The `PROTOCOL_INIT_AUTHORITY` key is still needed until
+      `InitializeProtocol` has run, whoever holds the upgrade authority.
 - [x] **Rollout: immediate in-place upgrade** (decided). One upgrade at the
       vanity id. Un-migrated v1 wallets can only call `MigrateWallet` until they
       migrate — a freeze window for normal use; funds stay safe. Two hard
@@ -95,10 +105,19 @@ is the human process: keys, comms, and the decisions in section 2.
         --upgrade-authority <mainnet-upgrade-authority.json> \
         --url <mainnet-rpc>
       ```
+      The deploy extends the program data first. v1 is 137904 bytes and v2
+      149296: an 11392-byte growth, above the loader's 10240-byte minimum, so
+      the automatic extend succeeds. A later build that grows by less fails with
+      `ExtendProgram requires a minimum of 10240 additional bytes` — run
+      `solana program extend <id> 10240` first (hit on staging, 2026-09-11).
 - [ ] `solana program show LazorjRF…` — confirm Data Length changed to the v2
       size and the slot advanced. Record the upgrade signature.
 - [ ] C-1 is now dead. Verify: a `CreateWallet`/`Execute` no longer reverts when
       fees are unconfigured.
+- [ ] Until `InitializeProtocol` runs, SDK builds before `93bfb6b` omit the fee
+      suffix and fail every `CreateWallet`/`Execute` with 4008. Ship the
+      integrator an SDK at or after `93bfb6b` before the window, or run
+      `InitializeProtocol` (plus a treasury shard if fees will be on) inside it.
 
 ## 6. Post-deploy
 
@@ -146,6 +165,62 @@ V1_SO=<v1-mainnet.so> V2_SO=<v2-mainnet.so> \
 Result: `Data Length 135704 → 148352` in place, vault SOL + token migrated to the
 v2 destination, v1 wallet + authority closed. `REHEARSAL PASSED`.
 
+## Multisig rehearsal
+
+Run on devnet on 2026-09-11 with
+[`scripts/rehearse/squads-upgrade.cjs`](../scripts/rehearse/squads-upgrade.cjs),
+against a throwaway program id holding the live v1 binary: the same shape as
+mainnet, 137904 bytes growing to 149296.
+
+| step | result |
+|---|---|
+| deploy the live v1 dump (`8ad5abf5…`), authority = a single key | ok |
+| Squads v4 multisig, 2 of 3, no time lock | multisig `2p5oQ9E8…`, vault `ApQ1Twr4…` |
+| `set-upgrade-authority --new-upgrade-authority <vault> --skip-new-upgrade-authority-signer-check` | authority = vault |
+| the old key tries to take it back | refused on-chain: `Incorrect upgrade authority provided` |
+| `write-buffer` v2, `set-buffer-authority` to the vault | ok |
+| top-level `ExtendProgram`, 11392 bytes, signed by a payer that is not the authority | ok |
+| vault transaction `[Upgrade]`: propose, 2 approvals, execute | 137904 → 149296 bytes, on-chain == local build |
+| SDK from `93bfb6b`: `createWallet` on the upgraded, uninitialised program | lands; the old suffix-less shape fails 4008 |
+| vault transaction `[SetAuthority → key]` | authority back on the key |
+
+What it found, and what carries to mainnet:
+
+- **The extend cannot go through the vault.** The first attempt put
+  `ExtendProgramChecked` inside the vault transaction and execution failed:
+  `BPFLoaderUpgradeab1e… not supported by inner instructions`. The runtime
+  feature `enable_extend_program_checked` is inactive on devnet and mainnet, so
+  via CPI the loader accepts only `Upgrade`, `SetAuthority` and `Close`, and the
+  plain `ExtendProgram` needs no authority at all. Extend top-level from any
+  payer first, then let the vault execute `Upgrade`. Re-check on the day:
+  `solana feature status 2oMRZEDWT2tqtYMofhmmfQ8SsjqUFzT6sYXppQDavxwz -um`. The
+  script reads the feature account and picks the path itself.
+- **`@sqds/multisig` 2.1.4 `rpc.proposalCreate` drops `rentPayer`,** so the
+  proposer pays the proposal rent. A member wallet with no SOL fails with
+  `insufficient lamports 0, need 2468880`. The script builds the instruction
+  itself; in the Squads app, fund whoever proposes.
+- **An approved vault transaction stays executable.** The failed first attempt
+  left transaction #1 approved; it is dead now only because its buffer was
+  consumed by the retry. On mainnet, reject any approved upgrade that failed.
+- **Write buffers through the TPU client.** On the public RPC, `--use-rpc` died
+  twice on 429s (`Data writes to account failed: Max retries exceeded`), each
+  time leaving a buffer holding rent. The TPU client wrote the same 149 KB first
+  try. Reclaim a stray buffer with `solana program close <buffer>`.
+
+With a real multisig, members approve from their own wallets:
+
+```bash
+solana program write-buffer lazorkit_program.so -um
+solana program set-buffer-authority <buffer> --new-buffer-authority <vault> -um
+PROPOSE_ONLY=1 RPC_URL=<mainnet-rpc> PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+  PAYER=<payer.json> MEMBERS=<proposer.json> MULTISIG=<multisig address> \
+  node scripts/rehearse/squads-upgrade.cjs upgrade <buffer>
+# then approve and execute in the Squads app
+```
+
+`MULTISIG` is the multisig account the Squads app shows, not its vault. The
+proposer must be a member with the Initiate permission.
+
 ## Deploy log template
 
 ```
@@ -156,6 +231,7 @@ v1 .so sha256:                  <hash>
 v2 .so sha256:                  <hash>
 survey run (private) at slot:   <slot>   funded vaults: <n>   total: <sol>
 upgrade authority:              4fZM6RPR…   (confirmed held: y/n)
+upgrade authority after:        <key or vault>   multisig threshold: <m of n>
 protocol admin:                 24fx48GA…   (confirmed held: y/n)
 pre-upgrade  Data Length/slot:  <n> / <slot>
 upgrade tx signature:           <sig>

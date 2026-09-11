@@ -170,6 +170,29 @@ Then re-initialise: `InitializeProtocol`, `InitializeTreasuryShard` per shard.
 A `PROTOCOL_VERSION` bump moves those PDAs, so they are fresh accounts, not
 existing ones — which is the whole point.
 
+Two things the deploy command hides:
+
+- **The loader extends by at least 10240 bytes.** `solana program deploy` grows
+  the program data first when the new binary is larger, and the loader refuses
+  an extension smaller than 10240 bytes (`ExtendProgram requires a minimum of
+  10240 additional bytes`). A build that grows by less must be preceded by
+  `solana program extend <id> 10240`.
+- **With a multisig upgrade authority, only `Upgrade` goes through the vault.**
+  While the runtime feature `enable_extend_program_checked`
+  (`2oMRZEDWT2tqtYMofhmmfQ8SsjqUFzT6sYXppQDavxwz`) is inactive — as on devnet
+  and mainnet, 2026-09-11 — the runtime refuses the loader's extend
+  instructions via CPI, and the plain `ExtendProgram` it allows top-level needs
+  no authority. So any payer extends first, then the vault executes `Upgrade`.
+  Once the feature activates, the plain instruction is rejected and
+  `ExtendProgramChecked` needs the authority and may be invoked via CPI, so it
+  moves into the vault transaction. `scripts/rehearse/squads-upgrade.cjs` picks
+  the path from the feature account; the steps and a devnet run are in
+  [`mainnet-deploy-checklist.md`](mainnet-deploy-checklist.md#multisig-rehearsal).
+
+Until `InitializeProtocol` runs, clients must still send the fee suffix on
+discriminators 0/4/7 — the program requires it and skips the charge. SDK builds
+from `93bfb6b` on always do.
+
 ---
 
 ## Things deliberately not available
