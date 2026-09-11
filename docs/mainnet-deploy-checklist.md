@@ -118,14 +118,22 @@ Proven on a local validator with the `--features mainnet` binaries at the real
 vanity id — v1 deployed upgradeable, upgraded in place to v2, then `MigrateWallet`
 moved SOL + an SPL token and closed the v1 PDAs.
 
-| binary | size | SHA-256 (this rehearsal build — **re-record at deploy**) |
-|---|---|---|
-| v1 (`bdeffd7`, `--features mainnet`) | 135704 | `7bab37e2cea5ade7f66de2847def76cff1e799dd2d6558c7a70055a9845bcaee` |
-| v2 (release, `--features mainnet`) | 148352 | `880fd4024a919413d30d611693abda7eb70760bb6489a989ca2d95edf8cffd8e` |
+Latest run: **2026-09-11**, against the program that is actually live.
 
-> These hashes are for the rehearsal builds on one machine and toolchain. The
-> real deploy must rebuild and record its own — treat a hash mismatch as a
-> blocking discrepancy, not a rounding error.
+| binary | size | SHA-256 — **re-record at deploy** |
+|---|---|---|
+| v1 — the live mainnet program, `solana program dump` (last deployed slot 416478802) | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
+| v2 — `6f4cb94`, `--features mainnet`, solana-cli 4.0.3 | 149296 | `e22f176df7b3a597e6abc16bec3fcfc1bb6301cf8d72c9cc7e34c30969546752` |
+
+> Use the **dump** as v1, not a rebuild. The first rehearsal used a rebuild of
+> `bdeffd7` (135704 bytes, `7bab37e2…`), which is not byte-identical to what is
+> deployed — the live ELF is 137904 bytes with no padding. The dump is exact,
+> and it is also the rollback artifact for §3: an upgrade back to it restores
+> the current program byte for byte.
+>
+> The v2 hash is from one machine and toolchain. The real deploy must rebuild
+> and record its own — treat a hash mismatch as a blocking discrepancy, not a
+> rounding error.
 
 Command used:
 
