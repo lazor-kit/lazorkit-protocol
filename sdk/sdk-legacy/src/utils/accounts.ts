@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 /**
  * Hand-written account deserializers for LazorKit on-chain accounts.
  * Replaces Solita-generated account classes.

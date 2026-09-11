@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import {
   Connection,
   PublicKey,
@@ -5,7 +6,7 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   TransactionInstruction,
 } from '@solana/web3.js';
-import { randomFillSync } from 'crypto';
+import { randomBytes } from '@noble/hashes/utils';
 import {
   ACCOUNT_DISCRIMINATOR,
   PROGRAM_ID_DEVNET,
@@ -430,6 +431,8 @@ export class LazorKitClient {
 
   readonly connection: Connection;
   readonly programId: PublicKey;
+  /** Whether fee-eligible instructions carry the protocol-fee suffix. */
+  readonly protocolFees: boolean;
 
   /**
    * Construct a client. The program ID is inferred from the connection's RPC
@@ -445,9 +448,14 @@ export class LazorKitClient {
    * const client = new LazorKitClient(connection, PROGRAM_ID_MAINNET);
    * ```
    */
-  constructor(connection: Connection, programId?: PublicKey) {
+  constructor(
+    connection: Connection,
+    programId?: PublicKey,
+    options: LazorKitClientOptions = {},
+  ) {
     this.connection = connection;
     this.programId = programId ?? inferProgramIdFromRpc(connection);
+    this.protocolFees = options.protocolFees ?? true;
   }
 
   // ─── PDA helpers ─────────────────────────────────────────────────
@@ -516,12 +524,19 @@ export class LazorKitClient {
   /**
    * Auto-resolve protocol fee accounts for a payer.
    *
-   * Returns the 4 accounts to append whenever the protocol is initialized and enabled.
+   * Returns the 4 accounts to append to every fee-eligible instruction (disc 0, 4, 7).
    * The `feeRecordPda` is always the canonical PDA derived from the payer. Under strict
    * fee enforcement, every successful fee-paying instruction must create or update this
    * record; there is no "pay fee but skip accounting" path.
    *
-   * Returns undefined only if the protocol isn't initialized or is disabled.
+   * The program requires this suffix whether or not a fee is charged: it rejects a
+   * fee-eligible instruction without it (4008 FeeAccountsRequired) before it reads the
+   * config, and strips it again when the protocol is uninitialised or disabled. So the
+   * accounts are returned even then — omitting them is what broke every CreateWallet /
+   * Execute between an upgrade and `InitializeProtocol`, or while fees were paused.
+   *
+   * Returns undefined only for a client built with `{ protocolFees: false }`, for a
+   * binary without the fee layer.
    */
   async resolveProtocolFee(payer: PublicKey): Promise<
     | {
@@ -531,18 +546,24 @@ export class LazorKitClient {
       }
     | undefined
   > {
+    if (!this.protocolFees) return undefined;
     const config = await this.getProtocolConfig();
-    if (!config || !config.enabled) return undefined;
 
     const [protocolConfigPda] = this.findProtocolConfig();
     const [feeRecordPda] = this.findFeeRecord(payer);
     // CSPRNG to avoid predictable shard selection. Not a direct exploit vector
     // (fees still land in a valid shard), but violates "no Math.random in
     // crypto-adjacent code" hygiene.
-    const randBuf = new Uint8Array(4);
-    randomFillSync(randBuf);
-    const randU32 = (randBuf[0] | (randBuf[1] << 8) | (randBuf[2] << 16) | (randBuf[3] << 24)) >>> 0;
-    const shardId = randU32 % config.numShards;
+    //
+    // A shard is only read when a fee is actually charged. Uninitialised or
+    // disabled, the program strips the suffix without touching the shard or
+    // the record (entrypoint `try_collect_fee`), so shard 0 serves.
+    let shardId = 0;
+    if (config && config.enabled && config.numShards > 0) {
+      const randBuf = randomBytes(4);
+      const randU32 = (randBuf[0] | (randBuf[1] << 8) | (randBuf[2] << 16) | (randBuf[3] << 24)) >>> 0;
+      shardId = randU32 % config.numShards;
+    }
     const [treasuryShardPda] = this.findTreasuryShard(shardId);
     return { protocolConfigPda, feeRecordPda, treasuryShardPda };
   }
@@ -571,6 +592,12 @@ export class LazorKitClient {
   > {
     const accounts = await this.resolveProtocolFee(payer);
     if (!accounts) return undefined;
+
+    // Only a live fee touches the FeeRecord. Uninitialised or disabled, the
+    // program never reads it, and RegisterPayer needs a live config — so there
+    // is nothing to register.
+    const config = await this.getProtocolConfig();
+    if (!config || !config.enabled) return { accounts };
 
     const key = payer.toBase58();
     if (this._registeredPayers.has(key)) {
@@ -2376,4 +2403,16 @@ export class LazorKitClient {
       migrate: { type: 'secp256r1', challenge: prepared.challenge, finalize },
     };
   }
+}
+
+/** Options for {@link LazorKitClient}. */
+export interface LazorKitClientOptions {
+  /**
+   * Append the `[ProtocolConfig, FeeRecord, TreasuryShard, SystemProgram]` suffix
+   * to fee-eligible instructions (CreateWallet, Execute, ExecuteDeferred).
+   * Default `true` — this program requires the suffix on those instructions
+   * even when no fee is charged. Set `false` only for a build without the fee
+   * layer.
+   */
+  protocolFees?: boolean;
 }

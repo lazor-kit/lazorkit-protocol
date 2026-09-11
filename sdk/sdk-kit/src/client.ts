@@ -13,10 +13,11 @@
  * keypairs or signers directly (Secp256r1 signing is delegated through
  * a callback contract).
  */
-import { randomFillSync } from 'node:crypto';
+import { randomBytes } from '@noble/hashes/utils';
 import {
   AccountRole,
   getAddressEncoder,
+  getBase64Encoder,
   type AccountMeta,
   type Address,
   type Base58EncodedBytes,
@@ -100,6 +101,7 @@ import type {
 } from './types.js';
 
 const addressEncoder = getAddressEncoder();
+const base64Encoder = getBase64Encoder();
 
 // ─── Sysvar instruction indexes (auto-computed from account layouts) ──
 
@@ -388,10 +390,13 @@ export class LazorKit {
 
   readonly rpc: LazorKitRpc;
   readonly programId: Address;
+  /** Whether fee-eligible instructions carry the protocol-fee suffix. */
+  readonly protocolFees: boolean;
 
-  constructor(rpc: LazorKitRpc, programId: Address) {
+  constructor(rpc: LazorKitRpc, programId: Address, options: LazorKitOptions = {}) {
     this.rpc = rpc;
     this.programId = programId;
+    this.protocolFees = options.protocolFees ?? true;
   }
 
   // ─── PDA helpers (sync wrappers around the module-level fns) ─────
@@ -431,7 +436,7 @@ export class LazorKit {
       this._protocolConfig = null;
       return null;
     }
-    const data = new Uint8Array(Buffer.from(info.value.data[0], 'base64'));
+    const data = new Uint8Array(base64Encoder.encode(info.value.data[0]));
     if (data.length < 88 || data[0] !== ACCOUNT_DISCRIMINATOR.PROTOCOL_CONFIG) {
       this._protocolConfig = null;
       return null;
@@ -445,21 +450,32 @@ export class LazorKit {
   }
 
   /**
-   * Returns the four fee accounts required by fee-eligible instructions when
-   * protocol fees are initialized and enabled. The FeeRecord address is always
-   * canonical for the payer, and the program requires every successful fee
-   * payment to update that record.
+   * Returns the four fee accounts every fee-eligible instruction (disc 0, 4, 7)
+   * must carry. The program requires the suffix whether or not a fee is
+   * charged: it rejects the instruction without it (4008 FeeAccountsRequired)
+   * before reading the config, and strips it when the protocol is
+   * uninitialised or disabled. Omitting it is what broke every CreateWallet /
+   * Execute between an upgrade and `InitializeProtocol`, or while fees were
+   * paused. The FeeRecord address is always canonical for the payer.
+   *
+   * Returns undefined only for a client built with `{ protocolFees: false }`,
+   * for a binary without the fee layer.
    */
   async resolveProtocolFee(payer: Address): Promise<ProtocolFeeAccounts | undefined> {
+    if (!this.protocolFees) return undefined;
     const config = await this.getProtocolConfig();
-    if (!config || !config.enabled) return undefined;
     const [protocolConfigPda] = await this.findProtocolConfig();
     const [feeRecordPda] = await this.findFeeRecord(payer);
-    const randBuf = new Uint8Array(4);
-    randomFillSync(randBuf);
-    const randU32 =
-      (randBuf[0]! | (randBuf[1]! << 8) | (randBuf[2]! << 16) | (randBuf[3]! << 24)) >>> 0;
-    const shardId = randU32 % config.numShards;
+    // A shard is only read when a fee is actually charged. Uninitialised or
+    // disabled, the program strips the suffix without touching the shard or
+    // the record (entrypoint `try_collect_fee`), so shard 0 serves.
+    let shardId = 0;
+    if (config && config.enabled && config.numShards > 0) {
+      const randBuf = randomBytes(4);
+      const randU32 =
+        (randBuf[0]! | (randBuf[1]! << 8) | (randBuf[2]! << 16) | (randBuf[3]! << 24)) >>> 0;
+      shardId = randU32 % config.numShards;
+    }
     const [treasuryShardPda] = await this.findTreasuryShard(shardId);
     return { protocolConfigPda, feeRecordPda, treasuryShardPda };
   }
@@ -470,12 +486,18 @@ export class LazorKit {
     const accounts = await this.resolveProtocolFee(payer);
     if (!accounts) return undefined;
 
+    // Only a live fee touches the FeeRecord. Uninitialised or disabled, the
+    // program never reads it, and RegisterPayer needs a live config — so there
+    // is nothing to register.
+    const config = await this.getProtocolConfig();
+    if (!config || !config.enabled) return { accounts };
+
     if (this._registeredPayers.has(payer)) return { accounts };
 
     const info = await this.rpc.getAccountInfo(accounts.feeRecordPda, { encoding: 'base64' }).send();
     let exists = false;
     if (info.value) {
-      const data = new Uint8Array(Buffer.from(info.value.data[0], 'base64'));
+      const data = new Uint8Array(base64Encoder.encode(info.value.data[0]));
       exists = data.length > 0 && data[0] === ACCOUNT_DISCRIMINATOR.FEE_RECORD;
     }
     if (exists) {
@@ -596,7 +618,7 @@ export class LazorKit {
   ): Promise<WalletAuthorityRecord[]> {
     assertByteLength(credential, 32, 'credential');
     const typeValue = authorityType === 'ed25519' ? AUTH_TYPE_ED25519 : AUTH_TYPE_SECP256R1;
-    const discAndType = Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY, typeValue]);
+    const discAndType = new Uint8Array([ACCOUNT_DISCRIMINATOR.AUTHORITY, typeValue]);
 
     const accounts = await this.rpc
       .getProgramAccounts(this.programId, {
@@ -615,7 +637,7 @@ export class LazorKit {
           {
             memcmp: {
               offset: 48n,
-              bytes: bs58Encode(Buffer.from(credential)) as Base58EncodedBytes,
+              bytes: bs58Encode(credential) as Base58EncodedBytes,
               encoding: 'base58',
             },
           },
@@ -627,7 +649,7 @@ export class LazorKit {
     // kit returns a Readonly array — iterate via index access.
     for (let idx = 0; idx < accounts.length; idx++) {
       const { pubkey, account } = accounts[idx]!;
-      const data = new Uint8Array(Buffer.from(account.data[0], 'base64'));
+      const data = new Uint8Array(base64Encoder.encode(account.data[0]));
       const walletBytes = data.slice(16, 48);
       const walletPda = addressFromBytes(walletBytes);
       const [vaultPda] = await this.findVault(walletPda);
@@ -1710,3 +1732,15 @@ export { LazorKit as LazorKitClient };
 
 /** Default-export the well-known program IDs for explicit ergonomic init. */
 export { PROGRAM_ID_DEVNET, PROGRAM_ID_MAINNET };
+
+/** Options for {@link LazorKit}. */
+export interface LazorKitOptions {
+  /**
+   * Append the `[ProtocolConfig, FeeRecord, TreasuryShard, SystemProgram]` suffix
+   * to fee-eligible instructions (CreateWallet, Execute, ExecuteDeferred).
+   * Default `true` — this program requires the suffix on those instructions
+   * even when no fee is charged. Set `false` only for a build without the fee
+   * layer.
+   */
+  protocolFees?: boolean;
+}

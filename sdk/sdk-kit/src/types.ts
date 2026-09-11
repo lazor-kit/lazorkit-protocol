@@ -1,3 +1,4 @@
+import { getBase64Decoder, getBase64Encoder } from '@solana/kit';
 /**
  * Shared input/output types for the LazorKit kit-flavored SDK.
  *
@@ -151,6 +152,9 @@ export interface DeferredPayloadJson {
   }[];
 }
 
+const base64Encoder = getBase64Encoder();
+const base64Decoder = getBase64Decoder();
+
 export function serializeDeferredPayload(p: DeferredPayload): string {
   const json: DeferredPayloadJson = {
     version: DEFERRED_PAYLOAD_VERSION,
@@ -159,7 +163,7 @@ export function serializeDeferredPayload(p: DeferredPayload): string {
     compactInstructions: p.compactInstructions.map((ix) => ({
       programIdIndex: ix.programIdIndex,
       accountIndexes: ix.accountIndexes,
-      data: Buffer.from(ix.data).toString('base64'),
+      data: base64Decoder.decode(ix.data),
     })),
     remainingAccounts: p.remainingAccounts.map((a) => ({
       address: a.address,
@@ -194,7 +198,7 @@ export function deserializeDeferredPayload(serialized: string): DeferredPayload 
     compactInstructions: json.compactInstructions.map((ix) => ({
       programIdIndex: ix.programIdIndex,
       accountIndexes: ix.accountIndexes,
-      data: new Uint8Array(Buffer.from(ix.data, 'base64')),
+      data: new Uint8Array(base64Encoder.encode(ix.data)),
     })),
     remainingAccounts: json.remainingAccounts.map((a) => ({
       address: a.address as Address,

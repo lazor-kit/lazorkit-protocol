@@ -3,7 +3,7 @@
 // These cover the surface that does NOT require an RPC round-trip:
 //   - PDA helpers
 //   - reclaimDeferred (pure tx assembly)
-//   - createWallet (Ed25519, no fee accounts)
+//   - createWallet (Ed25519): fee suffix present with no config; opt-out omits it
 //
 // Anything requiring `getAccountInfo` / `getSlot` is covered by the
 // E2E suite under tests-sdk-kit/ against a live validator.
@@ -76,10 +76,12 @@ describe('LazorKit class', () => {
   });
 });
 
-describe('createWallet — Ed25519 owner, fee disabled (no RPC needed)', () => {
-  it('builds a single CreateWallet instruction with derived PDAs', async () => {
-    // For the no-fee path, getProtocolConfig must return null. Wire a
-    // mockRpc that returns { value: null } from getAccountInfo.
+describe('createWallet — Ed25519 owner, protocol not initialised', () => {
+  it('still appends the fee suffix, because the program requires it on disc 0', async () => {
+    // getProtocolConfig finds no account: the window between an upgrade and
+    // InitializeProtocol, or a paused protocol. The program rejects a
+    // CreateWallet without the four-account suffix (4008) before it reads the
+    // config, and strips it when nothing is charged — so it must be sent.
     const fakeRpc = {
       getAccountInfo: () => ({ send: async () => ({ value: null }) }),
     };
@@ -90,12 +92,41 @@ describe('createWallet — Ed25519 owner, fee disabled (no RPC needed)', () => {
       userSeed,
       owner: { type: 'ed25519', publicKey: KP },
     });
+    // No RegisterPayer: with no live fee there is nothing to register.
     expect(result.instructions).toHaveLength(1);
     expect(result.walletPda).toBeTypeOf('string');
     expect(result.vaultPda).toBeTypeOf('string');
     expect(result.authorityPda).toBeTypeOf('string');
-    // Discriminator at byte 0.
-    expect(result.instructions[0]!.data?.[0]).toBe(0); // DISC_CREATE_WALLET
+    const ix = result.instructions[0]!;
+    expect(ix.data?.[0]).toBe(0); // DISC_CREATE_WALLET
+
+    const [configPda] = await lk.findProtocolConfig();
+    const [feeRecordPda] = await lk.findFeeRecord(PAYER);
+    const [shard0] = await lk.findTreasuryShard(0);
+    expect(ix.accounts!.slice(-4).map((a) => a.address)).toEqual([
+      configPda,
+      feeRecordPda,
+      shard0,
+      '11111111111111111111111111111111',
+    ]);
+  });
+
+  it('omits the suffix, with no RPC at all, only when built with { protocolFees: false }', async () => {
+    const throwingRpc = {
+      getAccountInfo: () => ({
+        send: async () => {
+          throw new Error('a fee-less client must not probe the protocol config');
+        },
+      }),
+    };
+    const lk = new LazorKit(throwingRpc as never, PROGRAM_ID_DEVNET, { protocolFees: false });
+    const result = await lk.createWallet({
+      payer: PAYER,
+      userSeed: new Uint8Array(32).fill(0x78),
+      owner: { type: 'ed25519', publicKey: KP },
+    });
+    const [configPda] = await lk.findProtocolConfig();
+    expect(result.instructions[0]!.accounts!.map((a) => a.address)).not.toContain(configPda);
   });
 
   it('rejects an all-zero Ed25519 owner key', async () => {

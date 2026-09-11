@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 /**
  * Hand-written instruction builders that produce the exact raw binary format
  * the LazorKit program expects. Solita-generated builders use beet which adds
