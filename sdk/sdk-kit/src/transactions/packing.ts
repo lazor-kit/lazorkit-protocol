@@ -6,7 +6,7 @@
  * instruction data, and the hashes feed into the deferred-execution
  * signed payload.
  */
-import { createHash } from 'node:crypto';
+import { sha256 } from '@noble/hashes/sha2';
 import {
   getAddressEncoder,
   type AccountMeta,
@@ -134,7 +134,7 @@ export function computeAccountsHash(
     }
   }
   const data = concatBytes(parts);
-  return new Uint8Array(createHash('sha256').update(data).digest());
+  return sha256(data);
 }
 
 /**
@@ -147,7 +147,7 @@ export function computeInstructionsHash(
   instructions: ReadonlyArray<CompactInstruction>,
 ): Uint8Array {
   const packed = packCompactInstructions(instructions);
-  return new Uint8Array(createHash('sha256').update(packed).digest());
+  return sha256(packed);
 }
 
 function concatBytes(parts: ReadonlyArray<Uint8Array>): Uint8Array {

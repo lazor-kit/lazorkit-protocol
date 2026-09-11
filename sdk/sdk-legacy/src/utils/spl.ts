@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 // Minimal SPL Token / Associated Token Account helpers. sdk-legacy depends only
 // on @solana/web3.js, so the few things the migration flow needs from spl-token
 // are derived by hand here rather than pulling the package in.

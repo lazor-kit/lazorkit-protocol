@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 // v1 account derivation, for the one flow that must reach the retired v1 world:
 // migration. v2 renamed every seed (`lk2:` prefix) so its address space is
 // disjoint from v1's; these bare-seed derivations reach the *old* addresses, and

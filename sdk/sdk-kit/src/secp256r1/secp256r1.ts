@@ -6,9 +6,10 @@
  * adapted to use kit's Address branding and to read account data from a
  * kit-style RPC client.
  */
-import { createHash } from 'node:crypto';
+import { sha256 } from '@noble/hashes/sha2';
 import {
   getAddressEncoder,
+  getBase64Encoder,
   type Address,
   type Rpc,
   type GetAccountInfoApi,
@@ -16,6 +17,7 @@ import {
 import { ACCOUNT_DISCRIMINATOR } from '../constants.js';
 
 const addressEncoder = getAddressEncoder();
+const base64Encoder = getBase64Encoder();
 
 // ─── WebAuthn authenticator data helper ──────────────────────────────
 
@@ -27,7 +29,7 @@ const addressEncoder = getAddressEncoder();
  * - Counter: 0 (LazorKit uses its own odometer counter, not WebAuthn's)
  */
 export function generateAuthenticatorData(rpId: string): Uint8Array {
-  const rpIdHash = createHash('sha256').update(rpId).digest();
+  const rpIdHash = sha256(rpId);
   const data = new Uint8Array(37);
   data.set(rpIdHash, 0);
   data[32] = 0x01; // User Present flag
@@ -116,7 +118,7 @@ export async function readAuthorityPubkey(
 }
 
 function base64ToBytes(b64: string): Uint8Array {
-  return new Uint8Array(Buffer.from(b64, 'base64'));
+  return new Uint8Array(base64Encoder.encode(b64));
 }
 
 // ─── Auth payload builders ───────────────────────────────────────────
@@ -209,12 +211,12 @@ export function buildSecp256r1Challenge(params: {
   const counterBuf = new Uint8Array(4);
   new DataView(counterBuf.buffer).setUint32(0, params.counter, true);
 
-  const hash = createHash('sha256');
+  const hash = sha256.create();
   hash.update(params.discriminator);
   hash.update(params.authPayload);
   hash.update(params.signedPayload);
   hash.update(addressEncoder.encode(params.payer) as Uint8Array);
   hash.update(counterBuf);
   hash.update(addressEncoder.encode(params.programId) as Uint8Array);
-  return new Uint8Array(hash.digest());
+  return hash.digest();
 }

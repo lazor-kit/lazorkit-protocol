@@ -1,5 +1,5 @@
 import { type AccountMeta } from '@solana/web3.js';
-import { createHash } from 'crypto';
+import { sha256 } from '@noble/hashes/sha2';
 import { concatBytes } from './bytes';
 
 export interface CompactInstruction {
@@ -113,7 +113,7 @@ export function computeAccountsHash(
     }
   }
   const data = concatBytes(parts);
-  return new Uint8Array(createHash('sha256').update(data).digest());
+  return sha256(data);
 }
 
 /**
@@ -124,6 +124,6 @@ export function computeInstructionsHash(
   instructions: CompactInstruction[],
 ): Uint8Array {
   const packed = packCompactInstructions(instructions);
-  return new Uint8Array(createHash('sha256').update(packed).digest());
+  return sha256(packed);
 }
 
