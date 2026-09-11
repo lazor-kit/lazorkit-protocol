@@ -629,6 +629,39 @@ fn bounded_admin_cannot_create_session() {
     .expect("an unbounded Owner may still create a session");
 }
 
+/// The AddAuthority escalation guard (`manage.rs`, 3034). A bounded Admin passes
+/// `can_add(Admin, Delegate)` on rank alone, so without this it could mint a
+/// Delegate with a wider allowance than its own. AddAuthority no longer produces
+/// a bounded Admin (3035), so this is defence in depth and the account is
+/// fabricated — see `force_policy_onto_authority`.
+#[test]
+fn bounded_admin_cannot_mint_authorities() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 500_000_000);
+
+    let admin = Keypair::new();
+    let admin_pda =
+        owner_adds(&mut context, &wallet, &admin, RANK_ADMIN, &[]).expect("owner may add an Admin");
+    force_policy_onto_authority(&mut context, admin_pda, &spend_limit_policy(1_000_000));
+
+    advance(&mut context.svm);
+    let wider = Keypair::new();
+    assert_custom_error(
+        add_ed25519_authority(
+            &mut context,
+            &wallet,
+            admin_pda,
+            &admin,
+            &wider,
+            RANK_DELEGATE,
+            &spend_limit_policy(100_000_000_000),
+        )
+        .map(|_| unreachable!()),
+        ERR_POLICY_BEARING_CANNOT_DELEGATE,
+        "a bounded Admin must not be able to grant a larger allowance",
+    );
+}
+
 /// `TransferOwnership` ix authorized by `current_owner_pda`. The policy guard is
 /// checked before authentication, so no valid owner signature is needed to reach
 /// it — this exercises exactly that guard.
