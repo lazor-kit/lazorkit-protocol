@@ -20,7 +20,7 @@ gating only the first. That is why "Spender" named a tier with full control of
 the vault.
 
 v2 ships every fix and the new permission model as one in-place upgrade at the
-existing program ID. **v1 accounts are abandoned, not migrated.**
+existing program ID. v1 wallets cross over with one Owner-signed `MigrateWallet`.
 
 ### Critical and high
 
@@ -79,6 +79,26 @@ existing program ID. **v1 accounts are abandoned, not migrated.**
 - **Golden vectors** for the accounts-hash wire format
   ([`test-vectors/accounts-hash.json`](test-vectors/accounts-hash.json)),
   asserted against by the program and both SDKs.
+- **`MigrateWallet`** (discriminator 17). One Owner-signed transaction moves a
+  v1 wallet's vault SOL and every token account it names into a v2 wallet, then
+  closes the v1 wallet and authority. The signed payload binds the destination
+  and the exact token-account set, so a relayer cannot redirect or drop assets.
+  No operator path exists: a wallet whose owner never signs stays in v1.
+
+### SDK
+
+- **Both SDKs run in the browser** with no Node polyfills. Hashing and
+  randomness come from `@noble/hashes`; the legacy SDK imports `Buffer` from the
+  `buffer` package and the kit SDK uses `@solana/kit` codecs.
+- **The fee suffix is always sent** on `CreateWallet`, `Execute` and
+  `ExecuteDeferred`. The program requires it (4008) even when no fee is charged,
+  and the SDK used to omit it whenever the protocol config was missing or
+  disabled — which broke every client between an upgrade and
+  `InitializeProtocol`. `{ protocolFees: false }` omits it, for a build without
+  the fee layer.
+- **`migrateV1Wallet`** and the v1 readers (`deriveV1Accounts`,
+  `readV1WalletState`, `enumerateV1VaultTokens`) in `@lazorkit/sdk-legacy`; see
+  [`docs/migration-ui-flow.md`](docs/migration-ui-flow.md).
 
 ### Breaking — protocol v2
 
@@ -102,20 +122,22 @@ existing program ID. **v1 accounts are abandoned, not migrated.**
 
 ### Migration
 
-There is no account migration path, and none is needed: the protocol had one
-integrator running minimal traffic and no finished product, so mainnet was in
-practice a test deployment.
+v1 wallets still hold user funds, so the upgrade ships with a way across. After
+it lands a v1 wallet can do one thing — `MigrateWallet`, signed by its Owner —
+and its funds are safe in the v1 vault until then. Nobody else can move them.
 
-**Before upgrading mainnet**, in this order:
+**Before upgrading mainnet** work through
+[`docs/mainnet-deploy-checklist.md`](docs/mainnet-deploy-checklist.md). In short:
 
 1. Run `scripts/survey-v1.ts` and keep its report private (it lists real user
    wallets and balances — operational intel, not repo content).
-2. Sweep any v1 vault still holding SOL through the legitimate Owner path **on
-   the current binary**. After the upgrade those vaults are unreachable.
+2. Have the migration UI live — built on `migrateV1Wallet`, see
+   [`docs/migration-ui-flow.md`](docs/migration-ui-flow.md) — and announce the
+   window: a v1 wallet needs one signed migration before it transacts again.
 3. Confirm `PROTOCOL_INIT_AUTHORITY` for the mainnet build. It defaults to the
    existing deployer key and gates `InitializeProtocol` permanently.
-4. Rehearse locally: load the old `.so` into a validator as upgradeable,
-   smoke-test, upgrade in place, re-run. Record both SBF SHA-256 hashes.
+4. Rehearse with the live v1 binary (`solana program dump`), not a rebuild, and
+   record both SBF SHA-256 hashes.
 
 For clients:
 
