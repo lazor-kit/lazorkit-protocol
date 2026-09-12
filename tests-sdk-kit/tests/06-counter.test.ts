@@ -41,6 +41,7 @@ import {
   setupTest,
   sendTx,
   airdrop,
+  delegatePolicy,
   getSlot,
   resolveFeeAccts,
   type TestContext,
@@ -108,7 +109,9 @@ describe('Counter Edge Cases', () => {
     );
 
     const slot1 = await getSlot(ctx);
-    const dataPayload = new Uint8Array(2 + 6 + 32);
+    // Trailing two bytes are policy_len = 0 — createAddAuthorityIx always emits
+    // them and the program hashes them, so a hand-built payload must match.
+    const dataPayload = new Uint8Array(2 + 6 + 32 + 2);
     dataPayload[0] = AUTH_TYPE_ED25519;
     dataPayload[1] = ROLE_ADMIN;
     dataPayload.set(adminPubkeyBytes, 8);
@@ -244,16 +247,20 @@ describe('Counter Edge Cases', () => {
     );
     const slot = await getSlot(ctx);
 
+    const spenderPolicy = delegatePolicy();
     const rpIdBytes = new TextEncoder().encode(key2.rpId);
-    const dataPayload = new Uint8Array(
-      2 + 6 + 32 + 33 + 1 + rpIdBytes.length,
-    );
+    // `[policy_len u16 LE][policy]` trails the key material and is part of the
+    // signed region, so this hand-built payload has to carry it too.
+    const policyStart = 2 + 6 + 32 + 33 + 1 + rpIdBytes.length;
+    const dataPayload = new Uint8Array(policyStart + 2 + spenderPolicy.length);
     dataPayload[0] = AUTH_TYPE_SECP256R1;
     dataPayload[1] = ROLE_SPENDER;
     dataPayload.set(key2.credentialIdHash, 8);
     dataPayload.set(key2.publicKeyBytes, 40);
     dataPayload[73] = rpIdBytes.length;
     dataPayload.set(rpIdBytes, 74);
+    new DataView(dataPayload.buffer).setUint16(policyStart, spenderPolicy.length, true);
+    dataPayload.set(spenderPolicy, policyStart + 2);
 
     const signedPayloadAdd = new Uint8Array(dataPayload.length + 32);
     signedPayloadAdd.set(dataPayload, 0);
@@ -284,6 +291,7 @@ describe('Counter Edge Cases', () => {
         newAuthorityPda: auth2Pda,
         newType: AUTH_TYPE_SECP256R1,
         newRole: ROLE_SPENDER,
+        policy: spenderPolicy,
         credentialOrPubkey: key2.credentialIdHash,
         secp256r1Pubkey: key2.publicKeyBytes,
         rpId: key2.rpId,

@@ -23,6 +23,7 @@ import {
   ed25519,
 } from '@lazorkit/sdk';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -82,6 +83,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(adminSigner.address, adminAuthPda),
       newAuthority: { type: 'ed25519', publicKey: spenderSigner.address },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     spenderAuthPda = addSpenderResult.newAuthorityPda;
     await sendTx(ctx, addSpenderResult.instructions, [adminSigner]);
@@ -95,6 +97,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderSigner.address, spenderAuthPda),
       newAuthority: { type: 'ed25519', publicKey: newSigner.address },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     await sendTxExpectError(ctx, instructions, [spenderSigner], 3002);
   });
@@ -123,7 +126,9 @@ describe('Permission Boundaries', () => {
     await sendTx(ctx, instructions, [ownerSigner]);
   });
 
-  it('owner cannot add another owner through AddAuthority', async () => {
+  // A person with several devices holds several passkeys, and each of them is an
+  // Owner — that is what lets a surviving device revoke a lost one.
+  it('owner can add another owner through AddAuthority', async () => {
     const newOwnerSigner = await generateKeyPairSigner();
     const newOwnerKey = addressEncoder.encode(newOwnerSigner.address) as Uint8Array;
     const [newOwnerAuthPda] = await client.findAuthority(walletPda, newOwnerKey);
@@ -139,7 +144,34 @@ describe('Permission Boundaries', () => {
       programId: client.programId,
     });
 
-    await sendTxExpectError(ctx, [ix], [ownerSigner], 3002);
+    await sendTx(ctx, [ix], [ownerSigner]);
+    const auth = await ctx.rpc.getAccountInfo(newOwnerAuthPda, { encoding: 'base64' }).send();
+    expect(Buffer.from(auth.value!.data[0], 'base64')[2]).toBe(ROLE_OWNER);
+  });
+
+  // The client keeps the safe default: creating an Owner is an explicit opt-in,
+  // not something a mistyped role constant can do.
+  it('the client refuses role 0 unless allowOwner is passed', async () => {
+    const newOwnerSigner = await generateKeyPairSigner();
+    await expect(
+      client.addAuthority({
+        payer: ctx.payer.address,
+        walletPda,
+        adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
+        newAuthority: { type: 'ed25519', publicKey: newOwnerSigner.address },
+        role: ROLE_OWNER,
+      }),
+    ).rejects.toThrow(/allowOwner/);
+
+    const { instructions } = await client.addAuthority({
+      payer: ctx.payer.address,
+      walletPda,
+      adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
+      newAuthority: { type: 'ed25519', publicKey: newOwnerSigner.address },
+      role: ROLE_OWNER,
+      allowOwner: true,
+    });
+    await sendTx(ctx, instructions, [ownerSigner]);
   });
 
   it('admin cannot remove owner', async () => {
@@ -199,6 +231,8 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderSigner.address, spenderAuthPda),
       sessionKey: sessionSigner.address,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTxExpectError(ctx, instructions, [spenderSigner], 3002);
   });
@@ -243,6 +277,7 @@ describe('Permission Boundaries', () => {
           rpId: secpSpenderKey.rpId,
         },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
       const addResult = client.finalizeAddAuthority(prepared, response);
@@ -262,6 +297,7 @@ describe('Permission Boundaries', () => {
         },
         newAuthority: { type: 'ed25519', publicKey: newSigner.address },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(secpSpenderKey, prepared.challenge);
       const { instructions } = client.finalizeAddAuthority(prepared, response);
@@ -282,6 +318,8 @@ describe('Permission Boundaries', () => {
         },
         sessionKey: sessionSigner.address,
         expiresAt: currentSlot + 9000n,
+        // Deliberately unrestricted: this test exercises the actionless session.
+        unrestricted: true,
       });
       const response = await fakeWebAuthnSign(secpSpenderKey, prepared.challenge);
       const { instructions } = client.finalizeCreateSession(prepared, response);

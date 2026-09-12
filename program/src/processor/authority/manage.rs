@@ -9,12 +9,73 @@ use pinocchio::{
     ProgramResult,
 };
 
+/// Rank values. Owner manages everything, Admin manages Delegates, a Delegate
+/// manages nothing and must carry a policy.
+pub const RANK_OWNER: u8 = 0;
+pub const RANK_ADMIN: u8 = 1;
+pub const RANK_DELEGATE: u8 = 2;
+
+/// Highest rank value that has a meaning. Anything above it is refused rather
+/// than stored — without this an Owner could mint a rank-255 authority that
+/// executes but that no rule below can ever revoke.
+pub const RANK_MAX: u8 = RANK_DELEGATE;
+
+/// May an authority of rank `actor` create one of rank `new_rank`?
+///
+/// Owner grants any rank, including Owner: a person with several devices holds
+/// several passkeys, and making each of them an Owner is what lets a surviving
+/// device revoke a lost one. Admin grants only Delegates. A Delegate grants
+/// nothing.
+///
+/// Rank alone is not the whole answer — a Delegate additionally requires a
+/// policy, and an authority that carries a policy itself may not grant at all.
+/// Both are enforced at the call site, where the policy bytes are in hand.
+#[inline]
+pub fn can_add(actor: u8, new_rank: u8) -> bool {
+    if new_rank > RANK_MAX {
+        return false;
+    }
+    match actor {
+        RANK_OWNER => true,
+        RANK_ADMIN => new_rank == RANK_DELEGATE,
+        _ => false,
+    }
+}
+
+/// May an authority of rank `actor` remove one of rank `target`, given how many
+/// Owners the wallet currently has?
+///
+/// The `owner_count > 1` condition is the whole reason the count exists. A
+/// wallet with no Owner is not frozen — its authorities keep spending — but
+/// nothing can ever be added or revoked again, so a lost device stays valid
+/// forever. Removing the last Owner is therefore refused, and losing ownership
+/// deliberately goes through TransferOwnership instead.
+///
+/// Self-removal is refused at the call site, where the two PDAs are in hand.
+#[inline]
+pub fn can_remove(actor: u8, target: u8, owner_count: u32) -> bool {
+    match (actor, target) {
+        (RANK_OWNER, RANK_OWNER) => owner_count > 1,
+        (RANK_OWNER, t) => t <= RANK_MAX,
+        (RANK_ADMIN, RANK_DELEGATE) => true,
+        _ => false,
+    }
+}
+
+/// Cap on an authority's policy buffer, matching the session cap in
+/// `session/create.rs` — the BPF heap is 32 KB, and 16 actions of ~128 bytes
+/// fit comfortably inside 2 KB.
+pub const MAX_POLICY_BUFFER_SIZE: usize = 2048;
+
 use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
     error::AuthError,
-    state::{authority::AuthorityAccountHeader, AccountDiscriminator},
+    state::{
+        action::validate_actions_buffer, authority::AuthorityAccountHeader,
+        policy::authority_fixed_len, AccountDiscriminator,
+    },
     utils::is_all_zero,
 };
 
@@ -22,10 +83,12 @@ use crate::{
 ///
 /// Layout:
 /// - `authority_type`: 0 for Ed25519, 1 for Secp256r1.
-/// - `new_role`: Role to assign (1=Admin, 2=Spender).
+/// - `new_role`: Rank to assign (0=Owner, 1=Admin, 2=Delegate).
 ///
-/// `Owner` is intentionally excluded here. Ownership changes must use
-/// `TransferOwnership`, which atomically closes the old owner authority.
+/// An Owner may grant `Owner`: a person with several devices holds several
+/// passkeys, and making each an Owner is what lets a surviving device revoke a
+/// lost one — see `can_add`. `TransferOwnership` is the different operation of
+/// *moving* ownership, closing the old owner authority atomically.
 /// - `_padding`: Reserved to align to 8-byte boundary.
 #[repr(C, align(8))]
 #[derive(NoPadding)]
@@ -115,18 +178,54 @@ pub fn process_add_authority(
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     };
 
-    // Split data_payload and authority_payload
-    // data_payload = everything up to and including the new authority data
-    let data_payload_len = 8 + full_auth_data.len(); // args + full_auth_data
-    if instruction_data.len() < data_payload_len {
+    // Optional policy, laid out exactly as CreateSession lays out its actions:
+    // `[policy_len u16 LE][policy]` after the key material and before the
+    // Secp256r1 auth payload. Putting it before the auth payload is what keeps
+    // it inside the signed region — a policy the passkey holder did not sign
+    // would be a policy somebody else chose.
+    let key_data_end = 8 + full_auth_data.len();
+    if instruction_data.len() < key_data_end {
         return Err(ProgramError::InvalidInstructionData);
     }
+
+    let (policy, data_payload_len) = if instruction_data.len() >= key_data_end + 2 {
+        let policy_len = u16::from_le_bytes(
+            instruction_data[key_data_end..key_data_end + 2]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        if policy_len > MAX_POLICY_BUFFER_SIZE {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let start = key_data_end + 2;
+        if instruction_data.len() < start + policy_len {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        (
+            &instruction_data[start..start + policy_len],
+            start + policy_len,
+        )
+    } else {
+        (&instruction_data[key_data_end..key_data_end], key_data_end)
+    };
+
+    if !policy.is_empty() {
+        validate_actions_buffer(policy)?;
+    }
+
     let (data_payload, authority_payload) = instruction_data.split_at(data_payload_len);
 
     let account_info_iter = &mut accounts.iter();
     let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. The payer's signature was only ever enforced as a side effect: the
+    // System Program demands it during the funding CPI. `initialize_pda_account`
+    // skips that CPI when the PDA already holds enough lamports — anyone can
+    // pre-fund a PDA — so on that path nothing checked it at all.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -148,9 +247,7 @@ pub fn process_add_authority(
     }
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     let rent_sysvar_info = account_info_iter
         .next()
@@ -163,17 +260,12 @@ pub fn process_add_authority(
     // }
 
     let admin_data = unsafe { admin_auth_pda.borrow_mut_data_unchecked() };
-    if admin_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(admin_data)?;
 
     // Safe Copy of Header using read_unaligned
     let admin_header =
         unsafe { std::ptr::read_unaligned(admin_data.as_ptr() as *const AuthorityAccountHeader) };
 
-    if admin_header.discriminator != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
     if admin_header.wallet != *wallet_pda.key() {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -219,21 +311,53 @@ pub fn process_add_authority(
     }
 
     // Authorization
-    // Validate new_role is a known non-owner value (1=Admin, 2=Spender).
-    // Without this check an Owner could create a role-255 authority that can
-    // execute but cannot be revoked by any Admin. Owner creation is also
-    // disallowed here: ownership must move via TransferOwnership so there is
-    // only one active owner authority at a time.
-    if args.new_role == 0 || args.new_role > 2 {
+    if !can_add(admin_header.role, args.new_role) {
         return Err(AuthError::PermissionDenied.into());
     }
-    if admin_header.role != 0 && (admin_header.role != 1 || args.new_role != 2) {
-        return Err(AuthError::PermissionDenied.into());
+
+    // A Delegate must carry a policy.
+    //
+    // This is what closes H-2. `role` gated management operations and nothing
+    // else — Execute never read it — so "Spender" named a tier that had exactly
+    // the same power over the vault as Owner. Requiring the policy makes the
+    // name true: rank says what you may manage, the policy says what you may
+    // spend, and a Delegate manages nothing.
+    if args.new_role == RANK_DELEGATE && policy.is_empty() {
+        return Err(AuthError::DelegateRequiresPolicy.into());
+    }
+
+    // …and only a Delegate may carry one, so `policy_len != 0` is exactly
+    // `rank == Delegate` for every authority the program will ever write.
+    //
+    // A bounded Owner was reachable before this and was a one-way trip into a
+    // dead wallet. Nothing stopped a policy being attached to rank 0, and
+    // `RemoveAuthority` reads no policy, so a bounded Owner could remove the
+    // unbounded one (or simply outlive a lost device) and become the sole
+    // Owner. From there every widening path is shut — AddAuthority 3034,
+    // CreateSession 3002, TransferOwnership 3002, Authorize 3002 — and no
+    // instruction rewrites a policy buffer, so when its allowance ran out the
+    // vault was inert with the funds still inside.
+    //
+    // Forbidding a policy above rank Delegate also retires the bounded-Admin
+    // shape, and with it the asymmetry that a bounded Admin could revoke
+    // Delegates and sessions it could never recreate. A capped spender is a
+    // Delegate; a manager is an Admin; the two are no longer one key.
+    if args.new_role != RANK_DELEGATE && !policy.is_empty() {
+        return Err(AuthError::PolicyRankMismatch.into());
+    }
+
+    // An authority that is itself bounded may not mint authorities.
+    //
+    // Comparing two policies to check the grant is no broader than the granter's
+    // is a hard problem; refusing the grant outright sidesteps it. Without this,
+    // an Admin capped at 1 SOL/day could mint a Delegate capped at 100.
+    if admin_header.policy_len != 0 {
+        return Err(AuthError::PolicyBearingAuthorityCannotDelegate.into());
     }
 
     // Logic
     let (new_auth_key, bump) = find_program_address(
-        &[b"authority", wallet_pda.key().as_ref(), id_seed],
+        &[crate::seeds::AUTHORITY, wallet_pda.key().as_ref(), id_seed],
         program_id,
     );
     if !sol_assert_bytes_eq(new_auth_pda.key().as_ref(), new_auth_key.as_ref(), 32) {
@@ -243,17 +367,15 @@ pub fn process_add_authority(
 
     // Fixed sizes per auth type (see wallet/create.rs for layout).
     let header_size = std::mem::size_of::<AuthorityAccountHeader>();
-    let space = match args.authority_type {
-        0 => header_size + 32,           // Ed25519: pubkey
-        1 => header_size + 32 + 33 + 32, // Secp256r1: cred ∥ pubkey ∥ rpIdHash
-        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
-    };
+    let fixed_len =
+        authority_fixed_len(args.authority_type).ok_or(AuthError::InvalidAuthenticationKind)?;
+    let space = fixed_len + policy.len();
     let rent_lamports = rent.minimum_balance(space);
 
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
     let bump_arr = [bump];
     let seeds = [
-        Seed::from(b"authority"),
+        Seed::from(crate::seeds::AUTHORITY),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(id_seed),
         Seed::from(&bump_arr),
@@ -269,6 +391,17 @@ pub fn process_add_authority(
         &seeds,
     )?;
 
+    // A new Owner changes the wallet's own state, which is why `wallet` is
+    // writable on this instruction. Done before the authority is written so a
+    // failure here leaves nothing behind.
+    if args.new_role == RANK_OWNER {
+        let wallet_data = unsafe { wallet_pda.borrow_mut_data_unchecked() };
+        let next = crate::state::wallet::WalletAccount::owner_count(wallet_data)
+            .checked_add(1)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        crate::state::wallet::WalletAccount::set_owner_count(wallet_data, next);
+    }
+
     let data = unsafe { new_auth_pda.borrow_mut_data_unchecked() };
     let header = AuthorityAccountHeader {
         discriminator: AccountDiscriminator::Authority as u8,
@@ -278,11 +411,16 @@ pub fn process_add_authority(
         version: crate::state::CURRENT_ACCOUNT_VERSION,
         _padding1: [0; 3],
         counter: 0,
-        _padding2: [0; 4],
+        policy_len: policy.len() as u16,
+        _padding2: [0; 2],
         wallet: *wallet_pda.key(),
     };
+    // `write_unaligned`, matching every other header write and every reader.
+    // This site used to store through a plain `*mut` deref, which is only sound
+    // if the account data happens to be 8-aligned — true in practice, undefined
+    // by the language, and inconsistent with the `read_unaligned` on the way back.
     unsafe {
-        *(data.as_mut_ptr() as *mut AuthorityAccountHeader) = header;
+        std::ptr::write_unaligned(data.as_mut_ptr() as *mut AuthorityAccountHeader, header);
     }
 
     // Write variable data. For Secp256r1 hash rpId once here so every Execute
@@ -312,7 +450,13 @@ pub fn process_add_authority(
                 data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
             }
         },
-        _ => unreachable!(),
+        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
+    }
+
+    // The policy trails the key material, at the offset PolicyLocation derives
+    // from this account's own discriminator and authority type.
+    if !policy.is_empty() {
+        data[fixed_len..fixed_len + policy.len()].copy_from_slice(policy);
     }
 
     Ok(())
@@ -347,9 +491,16 @@ pub fn process_remove_authority(
     // Build data_payload with target pubkeys (computed after parsing accounts)
 
     let account_info_iter = &mut accounts.iter();
-    let _payer = account_info_iter
+    let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. RemoveAuthority spends none of the payer's lamports, so nothing here
+    // needed the signature — but the account list documents index 0 as a signer
+    // and every builder passes one, so enforce what the interface claims rather
+    // than leaving a slot that silently accepts anything.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -372,9 +523,7 @@ pub fn process_remove_authority(
 
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     if !admin_auth_pda.is_writable() {
         return Err(ProgramError::InvalidAccountData);
@@ -382,15 +531,9 @@ pub fn process_remove_authority(
 
     // Safe copy header using read_unaligned
     let admin_data = unsafe { admin_auth_pda.borrow_mut_data_unchecked() };
-    if admin_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(admin_data)?;
     let admin_header =
         unsafe { std::ptr::read_unaligned(admin_data.as_ptr() as *const AuthorityAccountHeader) };
-
-    if admin_header.discriminator != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
     if admin_header.wallet != *wallet_pda.key() {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -429,17 +572,12 @@ pub fn process_remove_authority(
 
     // Authorization - ALWAYS validate target authority
     let target_data = unsafe { target_auth_pda.borrow_data_unchecked() };
-    if target_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(target_data)?;
     // Safe copy target header using read_unaligned
     let target_header =
         unsafe { std::ptr::read_unaligned(target_data.as_ptr() as *const AuthorityAccountHeader) };
 
     // ALWAYS verify discriminator
-    if target_header.discriminator != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
 
     // ALWAYS verify target belongs to THIS wallet (CRITICAL SECURITY CHECK)
     if target_header.wallet != *wallet_pda.key() {
@@ -451,24 +589,28 @@ pub fn process_remove_authority(
         return Err(AuthError::PermissionDenied.into());
     }
 
-    // Prevent removing an Owner — ownership must be transferred, not removed.
-    // This prevents accidentally locking the wallet by removing the last owner.
-    if target_header.role == 0 {
+    // Role-based permission check, including the "not the last Owner" rule.
+    let owner_count = crate::state::wallet::WalletAccount::owner_count(unsafe {
+        wallet_pda.borrow_data_unchecked()
+    });
+    if !can_remove(admin_header.role, target_header.role, owner_count) {
         return Err(AuthError::PermissionDenied.into());
-    }
-
-    // Role-based permission check
-    if admin_header.role != 0 {
-        // Admin can only remove Spender
-        if admin_header.role != 1 || target_header.role != 2 {
-            return Err(AuthError::PermissionDenied.into());
-        }
     }
 
     // Guard: if target == refund_dest the double-write would burn lamports and
     // trigger a Solana lamport conservation error, aborting after doing work.
     if target_auth_pda.key() == refund_dest.key() {
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    if target_header.role == RANK_OWNER {
+        let wallet_data = unsafe { wallet_pda.borrow_mut_data_unchecked() };
+        // `can_remove` already refused a count of 1, so this cannot wrap. The
+        // checked form is here because a future caller might not.
+        let next = crate::state::wallet::WalletAccount::owner_count(wallet_data)
+            .checked_sub(1)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        crate::state::wallet::WalletAccount::set_owner_count(wallet_data, next);
     }
 
     let target_lamports = unsafe { *target_auth_pda.borrow_mut_lamports_unchecked() };
@@ -510,5 +652,95 @@ mod tests {
     fn test_add_authority_args_too_short() {
         let data = vec![0u8; 7]; // Need 8
         assert!(AddAuthorityArgs::from_bytes(&data).is_err());
+    }
+}
+
+#[cfg(test)]
+mod rank_rules {
+    use super::*;
+
+    /// Every (actor, target) pair, so a change to either rule has to be a
+    /// deliberate edit to this table rather than a silent widening.
+    #[test]
+    fn can_add_table() {
+        let expected = [
+            // (actor, new_rank, allowed)
+            (RANK_OWNER, RANK_OWNER, true),
+            (RANK_OWNER, RANK_ADMIN, true),
+            (RANK_OWNER, RANK_DELEGATE, true),
+            (RANK_ADMIN, RANK_OWNER, false),
+            (RANK_ADMIN, RANK_ADMIN, false),
+            (RANK_ADMIN, RANK_DELEGATE, true),
+            (RANK_DELEGATE, RANK_OWNER, false),
+            (RANK_DELEGATE, RANK_ADMIN, false),
+            (RANK_DELEGATE, RANK_DELEGATE, false),
+        ];
+        for (actor, new_rank, allowed) in expected {
+            assert_eq!(
+                can_add(actor, new_rank),
+                allowed,
+                "can_add(actor={actor}, new_rank={new_rank})"
+            );
+        }
+    }
+
+    /// An unknown rank is refused rather than stored. Storing one would create
+    /// an authority that executes but that no `can_remove` arm can revoke.
+    #[test]
+    fn can_add_refuses_ranks_that_have_no_meaning() {
+        for new_rank in [RANK_MAX + 1, 42, u8::MAX] {
+            for actor in [RANK_OWNER, RANK_ADMIN, RANK_DELEGATE] {
+                assert!(
+                    !can_add(actor, new_rank),
+                    "actor={actor} new_rank={new_rank}"
+                );
+            }
+        }
+        // And an actor whose stored rank is nonsense grants nothing.
+        for actor in [RANK_MAX + 1, 42, u8::MAX] {
+            assert!(!can_add(actor, RANK_DELEGATE));
+        }
+    }
+
+    #[test]
+    fn can_remove_table() {
+        let expected = [
+            // (actor, target, owner_count, allowed)
+            (RANK_OWNER, RANK_OWNER, 1, false), // the rule the count exists for
+            (RANK_OWNER, RANK_OWNER, 2, true),
+            (RANK_OWNER, RANK_OWNER, 9, true),
+            (RANK_OWNER, RANK_ADMIN, 1, true),
+            (RANK_OWNER, RANK_DELEGATE, 1, true),
+            (RANK_ADMIN, RANK_OWNER, 9, false),
+            (RANK_ADMIN, RANK_ADMIN, 9, false),
+            (RANK_ADMIN, RANK_DELEGATE, 1, true),
+            (RANK_DELEGATE, RANK_OWNER, 9, false),
+            (RANK_DELEGATE, RANK_ADMIN, 9, false),
+            (RANK_DELEGATE, RANK_DELEGATE, 9, false),
+        ];
+        for (actor, target, owner_count, allowed) in expected {
+            assert_eq!(
+                can_remove(actor, target, owner_count),
+                allowed,
+                "can_remove(actor={actor}, target={target}, owner_count={owner_count})"
+            );
+        }
+    }
+
+    /// A count of zero should be unreachable, but if it ever happened the answer
+    /// must still be "no" rather than an underflow.
+    #[test]
+    fn can_remove_owner_is_refused_at_zero() {
+        assert!(!can_remove(RANK_OWNER, RANK_OWNER, 0));
+    }
+
+    /// Removing an Owner is the only decision the count participates in.
+    #[test]
+    fn owner_count_does_not_affect_other_removals() {
+        for owner_count in [0, 1, 2, 7] {
+            assert!(can_remove(RANK_OWNER, RANK_ADMIN, owner_count));
+            assert!(can_remove(RANK_OWNER, RANK_DELEGATE, owner_count));
+            assert!(can_remove(RANK_ADMIN, RANK_DELEGATE, owner_count));
+        }
     }
 }

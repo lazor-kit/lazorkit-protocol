@@ -1,7 +1,7 @@
 {
   "name": "@lazorkit/sdk",
   "version": "0.1.0-alpha.1",
-  "description": "LazorKit Protocol TypeScript SDK — passkey-based smart wallet on Solana (Solana Kit / web3.js v2)",
+  "description": "LazorKit Protocol TypeScript SDK \u2014 passkey-based smart wallet on Solana (Solana Kit / web3.js v2)",
   "keywords": [
     "solana",
     "solana-kit",
@@ -64,6 +64,7 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "bs58": "^6.0.0"
+    "bs58": "^6.0.0",
+    "@noble/hashes": "^1.8.0"
   }
 }

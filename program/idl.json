@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "2.0.0",
   "name": "lazorkit_program",
   "instructions": [
     {
@@ -100,10 +100,10 @@
         },
         {
           "name": "wallet",
-          "isMut": false,
+          "isMut": true,
           "isSigner": false,
           "docs": [
-            "Wallet PDA"
+            "Wallet PDA (owner_count)"
           ]
         },
         {
@@ -194,10 +194,10 @@
         },
         {
           "name": "wallet",
-          "isMut": false,
+          "isMut": true,
           "isSigner": false,
           "docs": [
-            "Wallet PDA"
+            "Wallet PDA (owner_count)"
           ]
         },
         {
@@ -986,6 +986,155 @@
       "discriminant": {
         "type": "u8",
         "value": 14
+      }
+    },
+    {
+      "name": "ProposeAdminRotation",
+      "accounts": [
+        {
+          "name": "admin",
+          "isMut": false,
+          "isSigner": true,
+          "docs": [
+            "Current protocol admin"
+          ]
+        },
+        {
+          "name": "protocolConfig",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "ProtocolConfig PDA"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "newAdmin",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 15
+      }
+    },
+    {
+      "name": "AcceptAdminRotation",
+      "accounts": [
+        {
+          "name": "pendingAdmin",
+          "isMut": false,
+          "isSigner": true,
+          "docs": [
+            "The proposed new admin"
+          ]
+        },
+        {
+          "name": "protocolConfig",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "ProtocolConfig PDA"
+          ]
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 16
+      }
+    },
+    {
+      "name": "MigrateWallet",
+      "accounts": [
+        {
+          "name": "payer",
+          "isMut": true,
+          "isSigner": true,
+          "docs": [
+            "Payer; receives reclaimed rent"
+          ]
+        },
+        {
+          "name": "v1Wallet",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "v1 Wallet PDA (closed on success)"
+          ]
+        },
+        {
+          "name": "v1Authority",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "v1 Owner Authority PDA (closed on success)"
+          ]
+        },
+        {
+          "name": "v1Vault",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "v1 Vault PDA (swept)"
+          ]
+        },
+        {
+          "name": "destination",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "SOL sink; token dest ATAs must be owned by it"
+          ]
+        },
+        {
+          "name": "refundDest",
+          "isMut": true,
+          "isSigner": false,
+          "docs": [
+            "Reclaimed v1 PDA/ATA rent destination"
+          ]
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "System Program"
+          ]
+        },
+        {
+          "name": "instructionsSysvar",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Instructions Sysvar (Secp256r1 introspection)"
+          ]
+        },
+        {
+          "name": "authSigner",
+          "isMut": false,
+          "isSigner": false,
+          "docs": [
+            "Ed25519 owner signer (must sign for Ed25519 auth; placeholder for passkeys)"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "numTokens",
+          "type": "u8"
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 17
       }
     }
   ],

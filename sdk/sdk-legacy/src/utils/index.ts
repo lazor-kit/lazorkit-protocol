@@ -1,6 +1,8 @@
 export * from './accounts';
 export * from './actions';
 export * from './pdas';
+export * from './v1';
+export * from './spl';
 export * from './secp256r1';
 export * from './packing';
 export * from './errors';
@@ -32,6 +34,7 @@ export {
   DISC_REGISTER_PAYER,
   DISC_WITHDRAW_TREASURY,
   DISC_INITIALIZE_TREASURY_SHARD,
+  DISC_MIGRATE_WALLET,
 } from './instructions';
 export * from './types';
 export * from './signing';

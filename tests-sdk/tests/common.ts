@@ -12,6 +12,7 @@ import {
 // Tests run against `solana-test-validator` which loads the SBF built with
 // `--features devnet`, so the on-chain program ID is the devnet vanity.
 // Re-export under the legacy name so per-test files don't need to change.
+import { readFileSync } from 'fs';
 import {
   LazorKitClient,
   PROGRAM_ID_DEVNET,
@@ -23,6 +24,8 @@ export { PROGRAM_ID_DEVNET };
 export function makeClient(connection: Connection): LazorKitClient {
   return new LazorKitClient(connection);
 }
+
+import { Actions, serializeActions } from '../../sdk/sdk-legacy/src';
 
 export const RPC_URL = process.env.RPC_URL || 'http://127.0.0.1:8899';
 
@@ -78,6 +81,37 @@ export function getProtocolTreasury(): Keypair {
   return _treasuryKp;
 }
 
+/**
+ * The keypair `initialize_protocol` now requires.
+ *
+ * ProtocolConfig is the root of the fee system and has no earlier on-chain
+ * account to anchor trust to, so the anchor is a pubkey compiled into the
+ * program (`PROTOCOL_INIT_AUTHORITY`). The devnet value is this committed test
+ * key — devnet carries no value, and a shared secret would make the local
+ * suites unrunnable.
+ */
+export function initAuthority(): Keypair {
+  // vitest runs with cwd at the package root, so this resolves the same in
+  // both module modes without depending on import.meta or __dirname.
+  const bytes = JSON.parse(
+    readFileSync('../keys/devnet-init-authority.json', 'utf8'),
+  ) as number[];
+  return Keypair.fromSecretKey(Uint8Array.from(bytes));
+}
+
+/**
+ * A minimal policy for a Delegate (ROLE_SPENDER).
+ *
+ * A Delegate must carry one: rank says what an authority may manage, the policy
+ * says what it may spend, and a Delegate manages nothing. Without this the tier
+ * would be an unbounded spender wearing a restricted name — which is what H-2
+ * was. Tests that only need a Delegate to exist use this; tests about limits
+ * build their own.
+ */
+export function delegatePolicy(limitLamports = 1_000_000n): Uint8Array {
+  return serializeActions([Actions.solLimit(limitLamports)]);
+}
+
 export interface TestContext {
   connection: Connection;
   payer: Keypair;
@@ -85,6 +119,9 @@ export interface TestContext {
 
 export async function setupTest(): Promise<TestContext> {
   const connection = new Connection(RPC_URL, 'confirmed');
+
+  await assertProgramDeployed(connection);
+
   const payer = Keypair.generate();
 
   const sig = await connection.requestAirdrop(payer.publicKey, 10 * LAMPORTS_PER_SOL);
@@ -93,6 +130,34 @@ export async function setupTest(): Promise<TestContext> {
   await ensureProtocolInitialized(connection, payer);
 
   return { connection, payer };
+}
+
+let _preflightDone = false;
+
+/**
+ * Fail loudly and early if the program is not where the SDK expects it.
+ *
+ * `validator:start` loads the .so at the devnet vanity address, the same one
+ * `PROGRAM_ID_DEVNET` holds. When those disagree — a stale validator, a forgotten
+ * `--reset`, a hand-rolled deploy — every downstream failure surfaces as a
+ * confusing error deep inside a PDA derivation or a simulate call. Check once.
+ */
+async function assertProgramDeployed(connection: Connection): Promise<void> {
+  if (_preflightDone) return;
+  _preflightDone = true;
+
+  const info = await connection.getAccountInfo(PROGRAM_ID);
+  if (!info) {
+    throw new Error(
+      `LazorKit program not found at ${PROGRAM_ID.toBase58()} on ${RPC_URL}.\n` +
+        `Start the validator first:  npm run validator:start && npm run validator:wait`,
+    );
+  }
+  if (!info.executable) {
+    throw new Error(
+      `Account ${PROGRAM_ID.toBase58()} on ${RPC_URL} exists but is not executable.`,
+    );
+  }
 }
 
 /**
@@ -145,8 +210,25 @@ async function ensureProtocolInitialized(
   }
 
   // Fresh validator — initialize protocol + shards.
+  //
+  // initialize_protocol is gated on PROTOCOL_INIT_AUTHORITY, so the random
+  // per-run payer cannot do it. Fund the authority and let it pay its own rent.
+  const authority = initAuthority();
+  await sendAndConfirmTransaction(
+    connection,
+    new Transaction().add(
+      (await import('@solana/web3.js')).SystemProgram.transfer({
+        fromPubkey: funderForAdmin.publicKey,
+        toPubkey: authority.publicKey,
+        lamports: 1 * LAMPORTS_PER_SOL,
+      }),
+    ),
+    [funderForAdmin],
+    { commitment: 'confirmed' },
+  );
+
   const initIxs = client.initializeProtocol({
-    payer: funderForAdmin.publicKey,
+    payer: authority.publicKey,
     admin: _adminKp.publicKey,
     treasury: _treasuryKp.publicKey,
     creationFee: CREATION_FEE,
@@ -155,7 +237,7 @@ async function ensureProtocolInitialized(
   }).instructions;
   const initTx = new Transaction();
   for (const ix of initIxs) initTx.add(ix);
-  await sendAndConfirmTransaction(connection, initTx, [funderForAdmin], {
+  await sendAndConfirmTransaction(connection, initTx, [authority], {
     commitment: 'confirmed',
   });
 
@@ -203,9 +285,26 @@ export async function sendTxExpectError(
   try {
     const tx = new Transaction();
     for (const ix of instructions) tx.add(ix);
-    await sendAndConfirmTransaction(ctx.connection, tx, [ctx.payer, ...signers], {
-      commitment: 'confirmed',
-    });
+
+    // Sign and submit the raw transaction rather than going through
+    // `sendAndConfirmTransaction`. That path calls `Connection._recentBlockhash`,
+    // whose cache refuses to reuse a blockhash it has already spent and polls for
+    // a new one — throwing "Unable to obtain a new blockhash after ...ms" when
+    // two transactions land inside the same blockhash window. It also overwrites
+    // any blockhash set on the transaction, so it cannot be pre-empted. Here that
+    // surfaced as a wrong-error-code assertion, which reads like a program bug
+    // and is not one.
+    const { blockhash, lastValidBlockHeight } =
+      await ctx.connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = ctx.payer.publicKey;
+    tx.sign(ctx.payer, ...signers);
+
+    const signature = await ctx.connection.sendRawTransaction(tx.serialize());
+    await ctx.connection.confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight },
+      'confirmed',
+    );
     throw new Error('Transaction should have failed but succeeded');
   } catch (err: any) {
     const msg = String(err);
@@ -226,6 +325,30 @@ export async function getSlot(ctx: TestContext): Promise<bigint> {
   const slot = await ctx.connection.getSlot('confirmed');
   // Use current slot directly; Clock::get() validates slot age (< 150 slots).
   return BigInt(slot);
+}
+
+/**
+ * Block until the chain's confirmed slot is strictly past `target`.
+ *
+ * Expiry tests must not sleep on the wall clock. Slot rate on a local validator
+ * is not a constant — it depends on machine load and on what the suite did
+ * immediately before — so `setTimeout(5000)` for "~10 slots" is a coin flip that
+ * fails as a confusing wrong-error-code assertion rather than as a timeout.
+ */
+export async function waitForSlot(
+  ctx: TestContext,
+  target: bigint,
+  timeoutMs = 60_000,
+): Promise<bigint> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const slot = await getSlot(ctx);
+    if (slot > target) return slot;
+    if (Date.now() > deadline) {
+      throw new Error(`slot ${target} not reached within ${timeoutMs}ms (still at ${slot})`);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
 }
 
 /**

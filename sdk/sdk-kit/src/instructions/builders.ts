@@ -40,6 +40,8 @@ export const DISC_UPDATE_PROTOCOL = 11;
 export const DISC_REGISTER_PAYER = 12;
 export const DISC_WITHDRAW_TREASURY = 13;
 export const DISC_INITIALIZE_TREASURY_SHARD = 14;
+export const DISC_PROPOSE_PROTOCOL_ADMIN = 15;
+export const DISC_ACCEPT_PROTOCOL_ADMIN = 16;
 
 // ─── Authority types ─────────────────────────────────────────────────
 export const AUTH_TYPE_ED25519 = 0;
@@ -195,6 +197,9 @@ export function createAddAuthorityIx(params: {
   credentialOrPubkey: Uint8Array;
   secp256r1Pubkey?: Uint8Array;
   rpId?: string;
+  /** Action buffer bounding what this authority may spend. Required for
+   *  ROLE_DELEGATE; optional for Owner and Admin. */
+  policy?: Uint8Array;
   authPayload?: Uint8Array;
   authorizerSigner?: Address;
   programId: Address;
@@ -212,11 +217,21 @@ export function createAddAuthorityIx(params: {
       parts.push(new Uint8Array([rp.length]), rp);
     }
   }
+  // `[policy_len u16 LE][policy]` between the key material and the auth
+  // payload. Always emitted, even when empty, because the program treats these
+  // two bytes as part of the signed region — omitting them for a policy-less
+  // authority would make the client's challenge and the program's disagree.
+  const policy = params.policy ?? new Uint8Array(0);
+  const policyLen = new Uint8Array(2);
+  new DataView(policyLen.buffer).setUint16(0, policy.length, true);
+  parts.push(policyLen, policy);
+
   if (params.authPayload) parts.push(params.authPayload);
 
   const accounts: AccountMeta[] = [
     meta(params.payer, SIGNER_RO),
-    meta(params.walletPda, RO),
+    // Writable: Add/RemoveAuthority maintain the wallet's owner_count.
+    meta(params.walletPda, RW),
     meta(params.adminAuthorityPda, RW),
     meta(params.newAuthorityPda, RW),
     meta(SYSTEM_PROGRAM_ADDRESS, RO),
@@ -252,7 +267,8 @@ export function createRemoveAuthorityIx(params: {
 
   const accounts: AccountMeta[] = [
     meta(params.payer, SIGNER_RO),
-    meta(params.walletPda, RO),
+    // Writable: Add/RemoveAuthority maintain the wallet's owner_count.
+    meta(params.walletPda, RW),
     meta(params.adminAuthorityPda, RW),
     meta(params.targetAuthorityPda, RW),
     meta(params.refundDestination, RW),

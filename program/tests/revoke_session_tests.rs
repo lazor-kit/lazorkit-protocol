@@ -25,13 +25,17 @@ fn setup_wallet_with_session(
     let user_seed = rand::random::<[u8; 32]>();
     let owner_keypair = Keypair::new();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     let (owner_auth_pda, owner_bump) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             owner_keypair.pubkey().as_ref(),
         ],
@@ -107,7 +111,7 @@ fn setup_wallet_with_session(
 
     let (session_pda, _) = Pubkey::find_program_address(
         &[
-            b"session",
+            lazorkit_program::seeds::SESSION,
             wallet_pda.as_ref(),
             session_keypair.pubkey().as_ref(),
         ],
@@ -247,7 +251,7 @@ fn test_revoke_session_by_admin() {
     let admin_kp = Keypair::new();
     let (admin_auth_pda, _) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             admin_kp.pubkey().as_ref(),
         ],
@@ -338,7 +342,7 @@ fn test_revoke_session_spender_fails() {
     let spender_kp = Keypair::new();
     let (spender_auth_pda, _) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             spender_kp.pubkey().as_ref(),
         ],
@@ -351,6 +355,12 @@ fn test_revoke_session_spender_fails() {
         add_data.push(2); // Spender role
         add_data.extend_from_slice(&[0; 6]);
         add_data.extend_from_slice(spender_kp.pubkey().as_ref());
+        // A Delegate must carry a policy — rank says what it may manage, the
+        // policy says what it may spend, and a Delegate manages nothing. The
+        // limit is irrelevant here; the test only needs the authority to exist.
+        let policy = action_sol_limit(1_000_000);
+        add_data.extend_from_slice(&(policy.len() as u16).to_le_bytes());
+        add_data.extend_from_slice(&policy);
 
         let ix = Instruction {
             program_id: context.program_id,

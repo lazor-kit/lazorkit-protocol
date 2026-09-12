@@ -13,3 +13,4 @@ pinocchio-system = { workspace = true }
 [features]
 mainnet = []
 devnet  = []
+staging = []

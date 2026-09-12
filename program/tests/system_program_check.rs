@@ -21,13 +21,17 @@ fn test_spoof_system_program() {
     let user_seed = rand::random::<[u8; 32]>();
     let owner_keypair = Keypair::new();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     let (auth_pda, auth_bump) = Pubkey::find_program_address(
         &[
-            b"authority",
+            lazorkit_program::seeds::AUTHORITY,
             wallet_pda.as_ref(),
             owner_keypair.pubkey().as_ref(),
         ],

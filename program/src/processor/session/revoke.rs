@@ -3,7 +3,7 @@ use crate::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
     error::AuthError,
-    state::{authority::AuthorityAccountHeader, session::SessionAccount, AccountDiscriminator},
+    state::{authority::AuthorityAccountHeader, session::SessionAccount},
 };
 use pinocchio::{
     account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
@@ -53,9 +53,7 @@ pub fn process(
 
     // Validate Wallet discriminator
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     // Authority PDA must be writable (counter increment for Secp256r1)
     if !admin_auth_pda.is_writable() {
@@ -64,15 +62,10 @@ pub fn process(
 
     // Read authority header
     let admin_data = unsafe { admin_auth_pda.borrow_mut_data_unchecked() };
-    if admin_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(admin_data)?;
     let admin_header =
         unsafe { std::ptr::read_unaligned(admin_data.as_ptr() as *const AuthorityAccountHeader) };
 
-    if admin_header.discriminator != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
     if admin_header.wallet != *wallet_pda.key() {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -114,15 +107,9 @@ pub fn process(
 
     // Validate session account
     let session_data = unsafe { session_pda.borrow_mut_data_unchecked() };
-    if session_data.len() < std::mem::size_of::<SessionAccount>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    SessionAccount::check(session_data).map_err(|_| AuthError::InvalidSessionAccount)?;
     let session =
         unsafe { std::ptr::read_unaligned(session_data.as_ptr() as *const SessionAccount) };
-
-    if session.discriminator != AccountDiscriminator::Session as u8 {
-        return Err(AuthError::InvalidSessionAccount.into());
-    }
 
     // Session must belong to this wallet
     if session.wallet != *wallet_pda.key() {

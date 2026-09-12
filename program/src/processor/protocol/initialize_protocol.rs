@@ -10,7 +10,10 @@ use pinocchio::{
 
 use crate::{
     error::ProtocolError,
-    state::{protocol_config::ProtocolConfig, AccountDiscriminator, CURRENT_ACCOUNT_VERSION},
+    state::{
+        protocol_config::{ProtocolConfig, MAX_PROTOCOL_FEE_LAMPORTS, PROTOCOL_INIT_AUTHORITY},
+        AccountDiscriminator, CURRENT_ACCOUNT_VERSION,
+    },
     utils::initialize_pda_account,
 };
 
@@ -31,6 +34,12 @@ pub fn process(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    // Operational invariant (audit MEDIUM — bootstrap freeze): if fees are
+    // enabled with a non-zero amount while NO treasury shard exists, every
+    // fee-eligible instruction reverts (try_collect_fee can't find a shard).
+    // Initialise at least one treasury shard BEFORE enabling fees. This is a
+    // deploy-ordering rule, not enforceable here (this instruction has no
+    // shard account); the deploy checklist carries it.
     if instruction_data.len() < 81 {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -43,6 +52,10 @@ pub fn process(
 
     if num_shards == 0 {
         return Err(ProgramError::InvalidInstructionData);
+    }
+
+    if creation_fee > MAX_PROTOCOL_FEE_LAMPORTS || execution_fee > MAX_PROTOCOL_FEE_LAMPORTS {
+        return Err(ProtocolError::FeeExceedsMaximum.into());
     }
 
     let account_info_iter = &mut accounts.iter();
@@ -59,8 +72,23 @@ pub fn process(
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
 
+    // The only gate that can exist here.
+    //
+    // ProtocolConfig is the root of the fee system; before it exists the
+    // program owns no account that could authorise its creation, so the trust
+    // anchor has to be the binary. Without this the first caller after any
+    // deploy became admin permanently — and since `update_protocol` could not
+    // write `admin`, permanently meant permanently. That is C-1.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if payer.key() != &PROTOCOL_INIT_AUTHORITY {
+        return Err(ProtocolError::UnauthorizedInitializer.into());
+    }
+
     // Verify PDA
-    let (config_key, config_bump) = find_program_address(&[b"protocol_config"], program_id);
+    let (config_key, config_bump) =
+        find_program_address(&[crate::seeds::PROTOCOL_CONFIG], program_id);
     if config_pda.key() != &config_key {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -76,7 +104,10 @@ pub fn process(
     let rent_lamports = rent.minimum_balance(space);
 
     let bump_arr = [config_bump];
-    let seeds = [Seed::from(b"protocol_config"), Seed::from(&bump_arr)];
+    let seeds = [
+        Seed::from(crate::seeds::PROTOCOL_CONFIG),
+        Seed::from(&bump_arr),
+    ];
 
     initialize_pda_account(
         payer,
@@ -100,6 +131,7 @@ pub fn process(
         treasury: Pubkey::from(*treasury),
         creation_fee,
         execution_fee,
+        pending_admin: Pubkey::default(),
     };
 
     let mut data = config_pda.try_borrow_mut_data()?;

@@ -8,6 +8,7 @@ import {
   Connection,
   Keypair,
   LAMPORTS_PER_SOL,
+  PublicKey,
   SystemProgram,
   Transaction,
   sendAndConfirmTransaction,
@@ -20,11 +21,19 @@ import * as path from 'path';
 import {
   LazorKitClient,
   Actions,
+  serializeActions,
   ed25519,
   session,
   ROLE_ADMIN,
   ROLE_SPENDER,
 } from '../../sdk/sdk-legacy/src';
+
+// v2 rank/policy split (H-2): a Delegate (ROLE_SPENDER) MUST carry a spend
+// policy — rank says what it manages, policy says what it may spend. A
+// policy-less Delegate is rejected with DelegateRequiresPolicy (3033).
+const DELEGATE_POLICY = serializeActions([
+  Actions.solLimit(BigInt(0.1 * 1_000_000_000)),
+]);
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 
 const RPC_URL = process.env.RPC_URL || 'https://api.devnet.solana.com';
@@ -39,12 +48,35 @@ interface TxResult {
 }
 
 async function loadPayer(): Promise<Keypair> {
-  const keypairPath = path.resolve(
-    process.env.HOME || '~',
-    '.config/solana/id.json',
-  );
+  // PAYER_KEYPAIR overrides the default CLI keypair — lets this run against a
+  // staging slot with a dedicated funded key without touching ~/.config.
+  const keypairPath = process.env.PAYER_KEYPAIR
+    ? path.resolve(process.env.PAYER_KEYPAIR)
+    : path.resolve(process.env.HOME || '~', '.config/solana/id.json');
   const raw = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
   return Keypair.fromSecretKey(new Uint8Array(raw));
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Public devnet RPC (api.devnet.solana.com) rate-limits and load-balances
+// across nodes, so a valid blockhash from one node is "not found" on another
+// and bursts get 429s. These are transient — a program rejection (custom
+// program error) is NOT, and must surface immediately so negative tests catch it.
+function isTransientRpcError(e: any): boolean {
+  const m = String(e?.message || e);
+  return (
+    m.includes('Blockhash not found') ||
+    m.includes('block height exceeded') ||
+    m.includes('429') ||
+    m.includes('Too Many Requests') ||
+    m.includes('node is behind') ||
+    m.includes('Transaction was not confirmed') ||
+    m.includes('failed to get') ||
+    m.includes('fetch failed') ||
+    m.includes('ETIMEDOUT') ||
+    m.includes('socket hang up')
+  );
 }
 
 async function sendAndMeasure(
@@ -53,27 +85,37 @@ async function sendAndMeasure(
   instructions: TransactionInstruction[],
   extraSigners: Signer[] = [],
 ): Promise<TxResult> {
-  const tx = new Transaction();
-  for (const ix of instructions) tx.add(ix);
-
-  const { blockhash } = await connection.getLatestBlockhash('confirmed');
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = payer.publicKey;
   const allSigners = [payer, ...extraSigners];
-  tx.sign(...allSigners);
-  const txSize = tx.serialize().length;
+  let lastErr: any;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      await sleep(300); // gentle throttle to stay under the rate limit
+      const tx = new Transaction();
+      for (const ix of instructions) tx.add(ix);
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = payer.publicKey;
+      tx.sign(...allSigners);
+      const txSize = tx.serialize().length;
 
-  const sig = await sendAndConfirmTransaction(connection, tx, allSigners, {
-    commitment: 'confirmed',
-  });
-
-  const txInfo = await connection.getTransaction(sig, {
-    commitment: 'confirmed',
-    maxSupportedTransactionVersion: 0,
-  });
-  const cu = txInfo?.meta?.computeUnitsConsumed ?? 0;
-
-  return { sig, cu, txSize };
+      const sig = await sendAndConfirmTransaction(connection, tx, allSigners, {
+        commitment: 'confirmed',
+      });
+      const txInfo = await connection.getTransaction(sig, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      });
+      const cu = txInfo?.meta?.computeUnitsConsumed ?? 0;
+      return { sig, cu, txSize };
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientRpcError(e)) throw e; // program error → surface now
+      const backoff = 600 * 2 ** attempt;
+      console.log(`  (transient RPC error — retry ${attempt + 1}/6 in ${backoff}ms)`);
+      await sleep(backoff);
+    }
+  }
+  throw lastErr;
 }
 
 function printRow(label: string, result: TxResult, extra = '') {
@@ -100,7 +142,15 @@ function record(label: string, result: TxResult) {
 async function main() {
   const connection = new Connection(RPC_URL, 'confirmed');
   const payer = await loadPayer();
-  const client = new LazorKitClient(connection);
+  // LAZORKIT_PROGRAM_ID pins the target program — required for a staging slot,
+  // since RPC-based inference would otherwise resolve devnet to the shared id.
+  const client = new LazorKitClient(
+    connection,
+    process.env.LAZORKIT_PROGRAM_ID
+      ? new PublicKey(process.env.LAZORKIT_PROGRAM_ID)
+      : undefined,
+  );
+  console.log(`Program: ${client.programId.toBase58()}`);
 
   const payerBalance = await connection.getBalance(payer.publicKey);
   console.log(`Payer:   ${payer.publicKey.toBase58()}`);
@@ -278,6 +328,7 @@ async function main() {
       adminSigner: ed25519(ed25519AdminKp.publicKey, ed25519AdminAuthPda),
       newAuthority: { type: 'ed25519', publicKey: ed25519SpenderKp.publicKey },
       role: ROLE_SPENDER,
+      policy: DELEGATE_POLICY,
     });
     const r = await sendAndMeasure(connection, payer, instructions, [
       ed25519AdminKp,
@@ -325,6 +376,7 @@ async function main() {
         rpId: secpSpenderKey.rpId,
       },
       role: ROLE_SPENDER,
+      policy: DELEGATE_POLICY,
     });
     const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
     const { instructions, newAuthorityPda } = client.finalizeAddAuthority(prepared, webauthnResponse);
@@ -429,6 +481,8 @@ async function main() {
       adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
       sessionKey: ed25519SessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     const r = await sendAndMeasure(connection, payer, instructions, [
       ed25519OwnerKp,
@@ -451,6 +505,8 @@ async function main() {
       secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       sessionKey: secpSessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     const webauthnResponse = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
     const { instructions, sessionPda } = client.finalizeCreateSession(prepared, webauthnResponse);

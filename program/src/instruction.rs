@@ -1,4 +1,3 @@
-use pinocchio::program_error::ProgramError;
 use shank::ShankInstruction;
 
 /// Shank IDL facade enum describing all program instructions and their required accounts.
@@ -33,7 +32,7 @@ pub enum ProgramIx {
         name = "payer",
         desc = "Payer and rent contributor"
     )]
-    #[account(1, name = "wallet", desc = "Wallet PDA")]
+    #[account(1, writable, name = "wallet", desc = "Wallet PDA (owner_count)")]
     #[account(
         2,
         writable,
@@ -64,7 +63,7 @@ pub enum ProgramIx {
 
     /// Remove an authority from the wallet
     #[account(0, signer, writable, name = "payer", desc = "Transaction payer")]
-    #[account(1, name = "wallet", desc = "Wallet PDA")]
+    #[account(1, writable, name = "wallet", desc = "Wallet PDA (owner_count)")]
     #[account(
         2,
         writable,
@@ -364,183 +363,75 @@ pub enum ProgramIx {
     #[account(4, name = "system_program", desc = "System Program")]
     #[account(5, name = "rent_sysvar", desc = "Rent Sysvar")]
     InitializeTreasuryShard { shard_id: u8 },
+
+    /// Propose a new protocol admin (step 1 of 2). The all-zero key cancels a
+    /// pending rotation.
+    #[account(0, signer, name = "admin", desc = "Current protocol admin")]
+    #[account(1, writable, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    ProposeAdminRotation { new_admin: [u8; 32] },
+
+    /// Accept a proposed admin rotation (step 2 of 2). The incoming admin signs,
+    /// proving the key exists.
+    #[account(0, signer, name = "pending_admin", desc = "The proposed new admin")]
+    #[account(1, writable, name = "protocol_config", desc = "ProtocolConfig PDA")]
+    AcceptAdminRotation,
+
+    /// Migrate a v1 wallet's SOL and SPL/Token-2022 balances to its v2 vault and
+    /// close the v1 PDAs, authorized by the wallet's own v1 Owner. Accounts 9..
+    /// are a variable run of (source_ata, dest_ata, token_program) triples — one
+    /// per token, `num_tokens` of them. Instruction data is
+    /// `[num_tokens(1)][auth_payload]`, the auth payload being empty for an
+    /// Ed25519 owner or the WebAuthn assertion blob for a passkey.
+    #[account(
+        0,
+        signer,
+        writable,
+        name = "payer",
+        desc = "Payer; receives reclaimed rent"
+    )]
+    #[account(
+        1,
+        writable,
+        name = "v1_wallet",
+        desc = "v1 Wallet PDA (closed on success)"
+    )]
+    #[account(
+        2,
+        writable,
+        name = "v1_authority",
+        desc = "v1 Owner Authority PDA (closed on success)"
+    )]
+    #[account(3, writable, name = "v1_vault", desc = "v1 Vault PDA (swept)")]
+    #[account(
+        4,
+        writable,
+        name = "destination",
+        desc = "SOL sink; token dest ATAs must be owned by it"
+    )]
+    #[account(
+        5,
+        writable,
+        name = "refund_dest",
+        desc = "Reclaimed v1 PDA/ATA rent destination"
+    )]
+    #[account(6, name = "system_program", desc = "System Program")]
+    #[account(
+        7,
+        name = "instructions_sysvar",
+        desc = "Instructions Sysvar (Secp256r1 introspection)"
+    )]
+    #[account(
+        8,
+        name = "auth_signer",
+        desc = "Ed25519 owner signer (must sign for Ed25519 auth; placeholder for passkeys)"
+    )]
+    MigrateWallet { num_tokens: u8 },
 }
 
-#[repr(C)]
-#[derive(Clone, Debug, PartialEq)]
-pub enum LazorKitInstruction {
-    /// Create a new wallet
-    ///
-    /// Accounts:
-    /// 1. `[signer, writable]` Payer
-    /// 2. `[writable]` Wallet PDA
-    /// 3. `[writable]` Vault PDA
-    /// 4. `[writable]` Authority PDA
-    /// 5. `[]` System Program
-    CreateWallet {
-        user_seed: Vec<u8>,
-        auth_type: u8,
-        auth_pubkey: [u8; 33],
-        credential_hash: [u8; 32],
-    },
-
-    /// Add a new authority to the wallet
-    ///
-    /// Accounts:
-    /// 1. `[signer]` Payer
-    /// 2. `[]` Wallet PDA
-    /// 3. `[signer]` Admin Authority PDA (The one authorizing this action)
-    /// 4. `[writable]` New Authority PDA
-    /// 5. `[]` System Program
-    AddAuthority {
-        new_type: u8,
-        new_pubkey: [u8; 33],
-        new_hash: [u8; 32],
-        new_role: u8,
-    },
-
-    /// Remove an authority from the wallet
-    ///
-    /// Accounts:
-    /// 1. `[signer]` Payer
-    /// 2. `[]` Wallet PDA
-    /// 3. `[signer]` Admin Authority PDA
-    /// 4. `[writable]` Target Authority PDA
-    /// 5. `[writable]` Refund Destination
-    RemoveAuthority,
-
-    /// Transfer ownership (atomic swap of Owner role)
-    ///
-    /// Accounts:
-    /// 1. `[signer]` Payer
-    /// 2. `[]` Wallet PDA
-    /// 3. `[writable]` Current Owner Authority PDA
-    /// 4. `[writable]` New Owner Authority PDA
-    /// 5. `[writable]` Refund Destination
-    /// 6. `[]` System Program
-    /// 7. `[]` Rent Sysvar
-    TransferOwnership {
-        new_type: u8,
-        new_pubkey: [u8; 33],
-        new_hash: [u8; 32],
-    },
-
-    /// Execute transactions
-    ///
-    /// Accounts:
-    /// 1. `[signer]` Payer
-    /// 2. `[]` Wallet PDA
-    /// 3. `[]` Authority PDA
-    /// 4. `[signer]` Vault PDA
-    /// 5. `[]` Sysvar Instructions (if Secp256r1)
-    ///    ... Inner accounts
-    Execute {
-        instructions: Vec<u8>, // CompactInstructions bytes, we'll parse later
-    },
-
-    /// Create a new session key
-    ///
-    /// Accounts:
-    /// 1. `[signer]` Payer
-    /// 2. `[]` Wallet PDA
-    /// 3. `[signer]` Authority PDA (Authorizer)
-    /// 4. `[writable]` Session PDA
-    /// 5. `[]` System Program
-    CreateSession {
-        session_key: [u8; 32],
-        expires_at: u64,
-    },
-}
-
-impl LazorKitInstruction {
-    pub fn unpack(input: &[u8]) -> Result<Self, ProgramError> {
-        let (&tag, rest) = input
-            .split_first()
-            .ok_or(ProgramError::InvalidInstructionData)?;
-
-        match tag {
-            0 => {
-                // CreateWallet
-                // Format: [user_seed_len(4)][user_seed][auth_type(1)][auth_pubkey(33)][credential_hash(32)]
-
-                if rest.len() < 4 {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
-                let (len_bytes, rest) = rest.split_at(4);
-                let seed_len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
-
-                if rest.len() < seed_len + 1 + 33 + 32 {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
-                let (user_seed, rest) = rest.split_at(seed_len);
-                let (&auth_type, rest) = rest.split_first().unwrap();
-                let (auth_pubkey, rest) = rest.split_at(33);
-                let (credential_hash, _) = rest.split_at(32);
-
-                Ok(Self::CreateWallet {
-                    user_seed: user_seed.to_vec(),
-                    auth_type,
-                    auth_pubkey: auth_pubkey.try_into().unwrap(),
-                    credential_hash: credential_hash.try_into().unwrap(),
-                })
-            },
-            1 => {
-                // AddAuthority
-                // Format: [new_type(1)][new_pubkey(33)][new_hash(32)][new_role(1)]
-                if rest.len() < 1 + 33 + 32 + 1 {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
-                let (&new_type, rest) = rest.split_first().unwrap();
-                let (new_pubkey, rest) = rest.split_at(33);
-                let (new_hash, rest) = rest.split_at(32);
-                let (&new_role, _) = rest.split_first().unwrap();
-
-                Ok(Self::AddAuthority {
-                    new_type,
-                    new_pubkey: new_pubkey.try_into().unwrap(),
-                    new_hash: new_hash.try_into().unwrap(),
-                    new_role,
-                })
-            },
-            2 => Ok(Self::RemoveAuthority),
-            3 => {
-                // Format: [new_type(1)][new_pubkey(33)][new_hash(32)]
-                if rest.len() < 1 + 33 + 32 {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
-                let (&new_type, rest) = rest.split_first().unwrap();
-                let (new_pubkey, rest) = rest.split_at(33);
-                let (new_hash, _) = rest.split_at(32);
-
-                Ok(Self::TransferOwnership {
-                    new_type,
-                    new_pubkey: new_pubkey.try_into().unwrap(),
-                    new_hash: new_hash.try_into().unwrap(),
-                })
-            },
-            4 => {
-                // Execute
-                // Remaining bytes are compact instructions
-                Ok(Self::Execute {
-                    instructions: rest.to_vec(),
-                })
-            },
-            5 => {
-                // CreateSession
-                // Format: [session_key(32)][expires_at(8)]
-                if rest.len() < 32 + 8 {
-                    return Err(ProgramError::InvalidInstructionData);
-                }
-                let (session_key, rest) = rest.split_at(32);
-                let (expires_at_bytes, _) = rest.split_at(8);
-                let expires_at = u64::from_le_bytes(expires_at_bytes.try_into().unwrap());
-
-                Ok(Self::CreateSession {
-                    session_key: session_key.try_into().unwrap(),
-                    expires_at,
-                })
-            },
-            _ => Err(ProgramError::InvalidInstructionData),
-        }
-    }
-}
+// `ProgramIx` above is the only instruction enum. A second hand-written
+// `LazorKitInstruction` used to sit here, duplicating every variant with its
+// own account comments and consumed by nothing — not the dispatcher, which
+// matches raw discriminator bytes in `entrypoint.rs`, and not the IDL, which
+// shank derives from `ProgramIx`. It had already drifted: it described none of
+// the v2 account or payload changes. Removed rather than updated, because the
+// version that gets updated is the one something reads.

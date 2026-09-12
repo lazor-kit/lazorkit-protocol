@@ -13,10 +13,11 @@
  * keypairs or signers directly (Secp256r1 signing is delegated through
  * a callback contract).
  */
-import { randomFillSync } from 'node:crypto';
+import { randomBytes } from '@noble/hashes/utils';
 import {
   AccountRole,
   getAddressEncoder,
+  getBase64Encoder,
   type AccountMeta,
   type Address,
   type Base58EncodedBytes,
@@ -26,6 +27,7 @@ import {
   type Instruction,
   type Rpc,
 } from '@solana/kit';
+import { ACCOUNT_DISCRIMINATOR } from './constants.js';
 import bs58 from 'bs58';
 
 const bs58Encode = (b: Uint8Array): string => bs58.encode(b);
@@ -42,6 +44,7 @@ import {
   DISC_REVOKE_SESSION,
   DISC_TRANSFER_OWNERSHIP,
   ROLE_OWNER,
+  ROLE_SPENDER,
   createAddAuthorityIx,
   createAuthorizeIx,
   createCreateSessionIx,
@@ -98,6 +101,7 @@ import type {
 } from './types.js';
 
 const addressEncoder = getAddressEncoder();
+const base64Encoder = getBase64Encoder();
 
 // ─── Sysvar instruction indexes (auto-computed from account layouts) ──
 
@@ -143,6 +147,7 @@ export interface PreparedAddAuthority extends PreparedBase {
     newAuthorityPda: Address;
     newType: number;
     newRole: number;
+    policy?: Uint8Array;
     credentialOrPubkey: Uint8Array;
     secp256r1Pubkey?: Uint8Array;
     rpId?: string;
@@ -285,15 +290,67 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
   };
 }
 
-function assertAddAuthorityRole(role: number): void {
-  if (role === ROLE_OWNER) {
+/// The program lets an Owner create another Owner — that is what makes a second
+/// device able to revoke a lost first one. It stays behind an explicit opt-in
+/// here because handing out ownership is not something to do by passing a `0`
+/// where a `1` was meant, and because the safe default is the one most callers
+/// want.
+function assertAddAuthorityRole(
+  role: number,
+  allowOwner = false,
+  policy?: Uint8Array,
+): void {
+  if (role === ROLE_OWNER && !allowOwner) {
     throw new Error(
-      'AddAuthority cannot create Owner authorities; use transferOwnership instead',
+      'AddAuthority creates an Owner only with allowOwner: true — an Owner can ' +
+        'manage and revoke everything, including you. Use ROLE_ADMIN for a ' +
+        'manager, or transferOwnership to hand ownership over.',
     );
   }
-  if (role < 1 || role > 2) {
+  if (role < 0 || role > 2) {
     throw new Error(
-      'AddAuthority role must be ROLE_ADMIN (1) or ROLE_SPENDER (2)',
+      'AddAuthority role must be ROLE_OWNER (0), ROLE_ADMIN (1) or ROLE_SPENDER (2)',
+    );
+  }
+  // The program rejects a policy-less Delegate (DelegateRequiresPolicy, 3033).
+  // Catching it here names the missing argument instead of surfacing an opaque
+  // custom program error after a passkey prompt has already been spent.
+  if (role === ROLE_SPENDER && (!policy || policy.length === 0)) {
+    throw new Error(
+      'ROLE_SPENDER (Delegate) requires a non-empty policy — rank says what an ' +
+        'authority may manage, the policy says what it may spend, and a Delegate ' +
+        'manages nothing. Build one with serializeActions([...]).',
+    );
+  }
+  // …and only a Delegate may carry one (PolicyRankMismatch, 3035). A bounded
+  // Owner or Admin holds powers no engine can bound — and a bounded Owner was
+  // a dead end, able to remove the unbounded Owner and then widen nothing.
+  if (role !== ROLE_SPENDER && policy && policy.length > 0) {
+    throw new Error(
+      'Only ROLE_SPENDER (Delegate) may carry a policy. A capped spender is a ' +
+        'Delegate; a manager is an Admin. To give one person both, issue two ' +
+        'authorities.',
+    );
+  }
+}
+
+/// A session with no actions is not "a session with no limits" — it is a key
+/// with *more* power over the vault than a bounded Delegate. The action buffer
+/// is what switches on the vault invariants the program checks after the CPI
+/// (lamport delta, owner, data length, and the token-authority snapshot), so an
+/// empty buffer disables all of them: such a key can reassign the vault or seize
+/// its token accounts. That is a deliberate capability, never a default, so it
+/// has to be asked for by name.
+function assertSessionActions(
+  actions: SessionAction[] | undefined,
+  unrestricted = false,
+): void {
+  if ((!actions || actions.length === 0) && !unrestricted) {
+    throw new Error(
+      'createSession with no actions grants an UNRESTRICTED session key — it can ' +
+        'move the whole vault and even reassign it, which is more power than a ' +
+        'bounded Delegate has. Pass actions: [Actions.solLimit(...), ...] to bound ' +
+        'it, or unrestricted: true to say you meant it.',
     );
   }
 }
@@ -333,10 +390,13 @@ export class LazorKit {
 
   readonly rpc: LazorKitRpc;
   readonly programId: Address;
+  /** Whether fee-eligible instructions carry the protocol-fee suffix. */
+  readonly protocolFees: boolean;
 
-  constructor(rpc: LazorKitRpc, programId: Address) {
+  constructor(rpc: LazorKitRpc, programId: Address, options: LazorKitOptions = {}) {
     this.rpc = rpc;
     this.programId = programId;
+    this.protocolFees = options.protocolFees ?? true;
   }
 
   // ─── PDA helpers (sync wrappers around the module-level fns) ─────
@@ -376,8 +436,8 @@ export class LazorKit {
       this._protocolConfig = null;
       return null;
     }
-    const data = new Uint8Array(Buffer.from(info.value.data[0], 'base64'));
-    if (data.length < 88 || data[0] !== 5) {
+    const data = new Uint8Array(base64Encoder.encode(info.value.data[0]));
+    if (data.length < 88 || data[0] !== ACCOUNT_DISCRIMINATOR.PROTOCOL_CONFIG) {
       this._protocolConfig = null;
       return null;
     }
@@ -390,21 +450,32 @@ export class LazorKit {
   }
 
   /**
-   * Returns the four fee accounts required by fee-eligible instructions when
-   * protocol fees are initialized and enabled. The FeeRecord address is always
-   * canonical for the payer, and the program requires every successful fee
-   * payment to update that record.
+   * Returns the four fee accounts every fee-eligible instruction (disc 0, 4, 7)
+   * must carry. The program requires the suffix whether or not a fee is
+   * charged: it rejects the instruction without it (4008 FeeAccountsRequired)
+   * before reading the config, and strips it when the protocol is
+   * uninitialised or disabled. Omitting it is what broke every CreateWallet /
+   * Execute between an upgrade and `InitializeProtocol`, or while fees were
+   * paused. The FeeRecord address is always canonical for the payer.
+   *
+   * Returns undefined only for a client built with `{ protocolFees: false }`,
+   * for a binary without the fee layer.
    */
   async resolveProtocolFee(payer: Address): Promise<ProtocolFeeAccounts | undefined> {
+    if (!this.protocolFees) return undefined;
     const config = await this.getProtocolConfig();
-    if (!config || !config.enabled) return undefined;
     const [protocolConfigPda] = await this.findProtocolConfig();
     const [feeRecordPda] = await this.findFeeRecord(payer);
-    const randBuf = new Uint8Array(4);
-    randomFillSync(randBuf);
-    const randU32 =
-      (randBuf[0]! | (randBuf[1]! << 8) | (randBuf[2]! << 16) | (randBuf[3]! << 24)) >>> 0;
-    const shardId = randU32 % config.numShards;
+    // A shard is only read when a fee is actually charged. Uninitialised or
+    // disabled, the program strips the suffix without touching the shard or
+    // the record (entrypoint `try_collect_fee`), so shard 0 serves.
+    let shardId = 0;
+    if (config && config.enabled && config.numShards > 0) {
+      const randBuf = randomBytes(4);
+      const randU32 =
+        (randBuf[0]! | (randBuf[1]! << 8) | (randBuf[2]! << 16) | (randBuf[3]! << 24)) >>> 0;
+      shardId = randU32 % config.numShards;
+    }
     const [treasuryShardPda] = await this.findTreasuryShard(shardId);
     return { protocolConfigPda, feeRecordPda, treasuryShardPda };
   }
@@ -415,13 +486,19 @@ export class LazorKit {
     const accounts = await this.resolveProtocolFee(payer);
     if (!accounts) return undefined;
 
+    // Only a live fee touches the FeeRecord. Uninitialised or disabled, the
+    // program never reads it, and RegisterPayer needs a live config — so there
+    // is nothing to register.
+    const config = await this.getProtocolConfig();
+    if (!config || !config.enabled) return { accounts };
+
     if (this._registeredPayers.has(payer)) return { accounts };
 
     const info = await this.rpc.getAccountInfo(accounts.feeRecordPda, { encoding: 'base64' }).send();
     let exists = false;
     if (info.value) {
-      const data = new Uint8Array(Buffer.from(info.value.data[0], 'base64'));
-      exists = data.length > 0 && data[0] === 6;
+      const data = new Uint8Array(base64Encoder.encode(info.value.data[0]));
+      exists = data.length > 0 && data[0] === ACCOUNT_DISCRIMINATOR.FEE_RECORD;
     }
     if (exists) {
       this._registeredPayers.add(payer);
@@ -512,6 +589,10 @@ export class LazorKit {
   private buildCompactLayoutAndHash(
     fixedAccounts: AccountMeta[],
     userInstructions: ReadonlyArray<Instruction>,
+    // Threaded through rather than read off `fixedAccounts[0]`: the deferred
+    // layout lists the payer twice, and the whole point of the payer exclusion
+    // is that a duplicate entry must not launder it.
+    payer: Address,
   ): {
     compactInstructions: CompactInstruction[];
     remainingAccounts: AccountMeta[];
@@ -522,6 +603,7 @@ export class LazorKit {
     const { compactInstructions, remainingAccounts } = buildCompactLayout(
       fixedAddresses,
       userInstructions,
+      payer,
     );
     const allAccountMetas = [...fixedAccounts, ...remainingAccounts];
     const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
@@ -536,7 +618,7 @@ export class LazorKit {
   ): Promise<WalletAuthorityRecord[]> {
     assertByteLength(credential, 32, 'credential');
     const typeValue = authorityType === 'ed25519' ? AUTH_TYPE_ED25519 : AUTH_TYPE_SECP256R1;
-    const discAndType = Buffer.from([2, typeValue]);
+    const discAndType = new Uint8Array([ACCOUNT_DISCRIMINATOR.AUTHORITY, typeValue]);
 
     const accounts = await this.rpc
       .getProgramAccounts(this.programId, {
@@ -555,7 +637,7 @@ export class LazorKit {
           {
             memcmp: {
               offset: 48n,
-              bytes: bs58Encode(Buffer.from(credential)) as Base58EncodedBytes,
+              bytes: bs58Encode(credential) as Base58EncodedBytes,
               encoding: 'base58',
             },
           },
@@ -567,7 +649,7 @@ export class LazorKit {
     // kit returns a Readonly array — iterate via index access.
     for (let idx = 0; idx < accounts.length; idx++) {
       const { pubkey, account } = accounts[idx]!;
-      const data = new Uint8Array(Buffer.from(account.data[0], 'base64'));
+      const data = new Uint8Array(base64Encoder.encode(account.data[0]));
       const walletBytes = data.slice(16, 48);
       const walletPda = addressFromBytes(walletBytes);
       const [vaultPda] = await this.findVault(walletPda);
@@ -627,8 +709,15 @@ export class LazorKit {
     adminSigner: AdminSigner;
     newAuthority: CreateWalletOwner;
     role: number;
+    /** Action buffer bounding what this authority may spend. Required for
+     *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
+     *  carry one, so a policy always means a bounded spender. */
+    policy?: Uint8Array;
+    /** Opt in to creating another Owner. An Owner can manage and revoke every
+     *  authority on the wallet, this one included, so it is never the default. */
+    allowOwner?: boolean;
   }): Promise<{ instructions: Instruction[]; newAuthorityPda: Address }> {
-    assertAddAuthorityRole(params.role);
+    assertAddAuthorityRole(params.role, params.allowOwner, params.policy);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
       params.newAuthority,
     );
@@ -638,6 +727,7 @@ export class LazorKit {
     if (s.type === 'ed25519') {
       const adminAuthorityPda = await this.resolveEd25519AuthorityPda(s, params.walletPda);
       const ix = createAddAuthorityIx({
+      policy: params.policy,
         payer: params.payer,
         walletPda: params.walletPda,
         adminAuthorityPda,
@@ -653,12 +743,19 @@ export class LazorKit {
       return { instructions: [ix], newAuthorityPda };
     }
 
+    // `policy` and `allowOwner` must be forwarded: dropping `policy` writes an
+    // authority with an empty action buffer, which for an Admin is an unbounded
+    // authority the caller believed was capped, and dropping `allowOwner` makes
+    // enrolling a second Owner — the only recovery path a passkey user has —
+    // impossible.
     const prepared = await this.prepareAddAuthority({
       payer: params.payer,
       walletPda: params.walletPda,
       secp256r1: this.extractSecp256r1Params(s),
       newAuthority: params.newAuthority,
       role: params.role,
+      policy: params.policy,
+      allowOwner: params.allowOwner,
     });
     const response = await s.signer.sign(prepared.challenge);
     return this.finalizeAddAuthority(prepared, response);
@@ -670,8 +767,15 @@ export class LazorKit {
     secp256r1: Secp256r1Params;
     newAuthority: CreateWalletOwner;
     role: number;
+    /** Action buffer bounding what this authority may spend. Required for
+     *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
+     *  carry one, so a policy always means a bounded spender. */
+    policy?: Uint8Array;
+    /** Opt in to creating another Owner. An Owner can manage and revoke every
+     *  authority on the wallet, this one included, so it is never the default. */
+    allowOwner?: boolean;
   }): Promise<PreparedAddAuthority> {
-    assertAddAuthorityRole(params.role);
+    assertAddAuthorityRole(params.role, params.allowOwner, params.policy);
     const { authType: newType, credentialOrPubkey, secp256r1Pubkey, rpId } = resolveOwnerFields(
       params.newAuthority,
     );
@@ -687,6 +791,7 @@ export class LazorKit {
       credentialOrPubkey,
       secp256r1Pubkey,
       rpId,
+      params.policy,
     );
     const signedPayload = concatBytes([
       dataPayload,
@@ -714,6 +819,7 @@ export class LazorKit {
         newAuthorityPda,
         newType,
         newRole: params.role,
+        policy: params.policy,
         credentialOrPubkey,
         secp256r1Pubkey,
         rpId,
@@ -729,6 +835,7 @@ export class LazorKit {
     const i = prepared._internal;
     const { authPayload, precompileIx } = finalizeSecp256r1(i.signing, response);
     const ix = createAddAuthorityIx({
+      policy: i.policy,
       payer: i.payer,
       walletPda: i.walletPda,
       adminAuthorityPda: i.adminAuthorityPda,
@@ -977,8 +1084,13 @@ export class LazorKit {
     adminSigner: AdminSigner;
     sessionKey: Address;
     expiresAt: bigint;
+    /** Actions bounding what this session may spend. Omitting them creates an
+     *  UNRESTRICTED session and requires `unrestricted: true`. */
     actions?: SessionAction[];
+    /** Opt in to a session with no actions — see `actions`. */
+    unrestricted?: boolean;
   }): Promise<{ instructions: Instruction[]; sessionPda: Address }> {
+    assertSessionActions(params.actions, params.unrestricted);
     const sessionKeyBytes = addressEncoder.encode(params.sessionKey) as Uint8Array;
     const [sessionPda] = await this.findSession(params.walletPda, sessionKeyBytes);
     const s = params.adminSigner;
@@ -1019,8 +1131,13 @@ export class LazorKit {
     secp256r1: Secp256r1Params;
     sessionKey: Address;
     expiresAt: bigint;
+    /** Actions bounding what this session may spend. Omitting them creates an
+     *  UNRESTRICTED session and requires `unrestricted: true`. */
     actions?: SessionAction[];
+    /** Opt in to a session with no actions — see `actions`. */
+    unrestricted?: boolean;
   }): Promise<PreparedCreateSession> {
+    assertSessionActions(params.actions, params.unrestricted);
     const sessionKeyBytes = addressEncoder.encode(params.sessionKey) as Uint8Array;
     const [sessionPda] = await this.findSession(params.walletPda, sessionKeyBytes);
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
@@ -1211,6 +1328,7 @@ export class LazorKit {
         const { compactInstructions, remainingAccounts } = buildCompactLayout(
           fixedAccounts,
           params.instructions,
+          params.payer,
         );
         const packed = packCompactInstructions(compactInstructions);
         const ix = createExecuteIx({
@@ -1249,6 +1367,7 @@ export class LazorKit {
         const { compactInstructions, remainingAccounts } = buildCompactLayout(
           fixedAccounts,
           params.instructions,
+          params.payer,
         );
         const packed = packCompactInstructions(compactInstructions);
         const sessionKeyMeta: AccountMeta = {
@@ -1295,7 +1414,7 @@ export class LazorKit {
       { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
     ];
     const { compactInstructions, remainingAccounts, accountsHash } =
-      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions);
+      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions, params.payer);
     const packed = packCompactInstructions(compactInstructions);
     const signedPayload = concatBytes([packed, accountsHash]);
 
@@ -1397,7 +1516,7 @@ export class LazorKit {
       { address: params.payer, role: AccountRole.WRITABLE },
     ];
     const { compactInstructions, remainingAccounts, accountsHash } =
-      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions);
+      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions, params.payer);
     const instructionsHash = computeInstructionsHash(compactInstructions);
     const expiryOffsetBuf = new Uint8Array(2);
     expiryOffsetBuf[0] = expiryOffset & 0xff;
@@ -1613,3 +1732,15 @@ export { LazorKit as LazorKitClient };
 
 /** Default-export the well-known program IDs for explicit ergonomic init. */
 export { PROGRAM_ID_DEVNET, PROGRAM_ID_MAINNET };
+
+/** Options for {@link LazorKit}. */
+export interface LazorKitOptions {
+  /**
+   * Append the `[ProtocolConfig, FeeRecord, TreasuryShard, SystemProgram]` suffix
+   * to fee-eligible instructions (CreateWallet, Execute, ExecuteDeferred).
+   * Default `true` — this program requires the suffix on those instructions
+   * even when no fee is charged. Set `false` only for a build without the fee
+   * layer.
+   */
+  protocolFees?: boolean;
+}

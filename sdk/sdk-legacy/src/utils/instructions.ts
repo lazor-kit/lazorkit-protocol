@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 /**
  * Hand-written instruction builders that produce the exact raw binary format
  * the LazorKit program expects. Solita-generated builders use beet which adds
@@ -28,6 +29,9 @@ export const DISC_UPDATE_PROTOCOL = 11;
 export const DISC_REGISTER_PAYER = 12;
 export const DISC_WITHDRAW_TREASURY = 13;
 export const DISC_INITIALIZE_TREASURY_SHARD = 14;
+export const DISC_PROPOSE_PROTOCOL_ADMIN = 15;
+export const DISC_ACCEPT_PROTOCOL_ADMIN = 16;
+export const DISC_MIGRATE_WALLET = 17;
 
 // ─── Authority types ─────────────────────────────────────────────────
 export const AUTH_TYPE_ED25519 = 0;
@@ -119,6 +123,9 @@ export function createAddAuthorityIx(params: {
   secp256r1Pubkey?: Uint8Array;
   /** Secp256r1 only: RP ID string for the new authority */
   rpId?: string;
+  /** Action buffer bounding what this authority may spend. Required for
+   *  ROLE_DELEGATE; optional for Owner and Admin. */
+  policy?: Uint8Array;
   /** Auth payload for Secp256r1 admin authentication */
   authPayload?: Uint8Array;
   /** For Ed25519 admin: the signer pubkey */
@@ -140,13 +147,23 @@ export function createAddAuthorityIx(params: {
       parts.push(new Uint8Array(rpIdBytes));
     }
   }
+  // `[policy_len u16 LE][policy]` between the key material and the auth
+  // payload. Always emitted, even when empty, because the program treats these
+  // two bytes as part of the signed region — omitting them for a policy-less
+  // authority would make the client's challenge and the program's disagree.
+  const policy = params.policy ?? new Uint8Array(0);
+  const policyLen = Buffer.alloc(2);
+  policyLen.writeUInt16LE(policy.length, 0);
+  parts.push(new Uint8Array(policyLen), policy);
+
   if (params.authPayload) {
     parts.push(params.authPayload);
   }
 
   const keys = [
     { pubkey: params.payer, isSigner: true, isWritable: false },
-    { pubkey: params.walletPda, isSigner: false, isWritable: false },
+    // Writable: Add/RemoveAuthority maintain the wallet's owner_count.
+    { pubkey: params.walletPda, isSigner: false, isWritable: true },
     { pubkey: params.adminAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: params.newAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -191,7 +208,8 @@ export function createRemoveAuthorityIx(params: {
 
   const keys = [
     { pubkey: params.payer, isSigner: true, isWritable: false },
-    { pubkey: params.walletPda, isSigner: false, isWritable: false },
+    // Writable: Add/RemoveAuthority maintain the wallet's owner_count.
+    { pubkey: params.walletPda, isSigner: false, isWritable: true },
     { pubkey: params.adminAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: params.targetAuthorityPda, isSigner: false, isWritable: true },
     { pubkey: params.refundDestination, isSigner: false, isWritable: true },
@@ -748,4 +766,80 @@ export function appendProtocolFeeAccounts(
     { pubkey: treasuryShardPda, isSigner: false, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   );
+}
+
+
+// ─── MigrateWallet (v1 → v2) ────────────────────────────────────────
+
+/** SPL Token program — the classic one; pass a different id for Token-2022. */
+export const SPL_TOKEN_PROGRAM_ID = new PublicKey(
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+);
+
+export interface MigrateTokenPair {
+  /** The v1 vault's token account for this mint. */
+  sourceAta: PublicKey;
+  /** A token account owned by `destination` for the same mint. */
+  destAta: PublicKey;
+  /** The token program that owns both accounts (SPL Token or Token-2022). Each
+   *  token carries its own, so one call can migrate a mix of the two. */
+  tokenProgram: PublicKey;
+}
+
+/**
+ * Build a `MigrateWallet` instruction — sweep a v1 wallet's SOL and SPL tokens
+ * to `destination` and close the v1 PDAs, authorized by the v1 authority.
+ *
+ * Derive the v1 accounts with `./v1` and the v2 `destination` (its vault) with
+ * `./pdas`. `authSigner` is the Ed25519 owner key for an Ed25519 authority, or
+ * the fee payer as a non-signer placeholder for a passkey (whose approval rides
+ * in `authPayload` + a preceding Secp256r1 precompile instruction).
+ *
+ * The passkey's `authPayload` must be signed over the migration intent — build
+ * it with the existing `finalizeSecp256r1` flow using `DISC_MIGRATE_WALLET` and a
+ * `signedPayload` of `concat(destination, v1Wallet, [tokens.length], refundDestination)`
+ * (32 + 32 + 1 + 32 bytes), and place the returned precompile instruction
+ * immediately before this one. Binding wallet, token count, and refund keeps a
+ * relayer from replaying the signature against another wallet, dropping tokens to
+ * strand them, or redirecting the reclaimed rent.
+ */
+export function createMigrateWalletIx(params: {
+  payer: PublicKey;
+  v1Wallet: PublicKey;
+  v1Authority: PublicKey;
+  v1Vault: PublicKey;
+  destination: PublicKey;
+  refundDestination: PublicKey;
+  authSigner: PublicKey;
+  authSignerIsSigner: boolean;
+  tokens?: MigrateTokenPair[];
+  authPayload?: Uint8Array;
+  programId: PublicKey;
+}): TransactionInstruction {
+  const tokens = params.tokens ?? [];
+  const keys = [
+    { pubkey: params.payer, isSigner: true, isWritable: true },
+    { pubkey: params.v1Wallet, isSigner: false, isWritable: true },
+    { pubkey: params.v1Authority, isSigner: false, isWritable: true },
+    { pubkey: params.v1Vault, isSigner: false, isWritable: true },
+    { pubkey: params.destination, isSigner: false, isWritable: true },
+    { pubkey: params.refundDestination, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+    { pubkey: params.authSigner, isSigner: params.authSignerIsSigner, isWritable: false },
+  ];
+  for (const t of tokens) {
+    keys.push({ pubkey: t.sourceAta, isSigner: false, isWritable: true });
+    keys.push({ pubkey: t.destAta, isSigner: false, isWritable: true });
+    keys.push({ pubkey: t.tokenProgram, isSigner: false, isWritable: false });
+  }
+
+  const data = Buffer.from(
+    concatBytes([
+      Uint8Array.from([DISC_MIGRATE_WALLET, tokens.length]),
+      params.authPayload ?? new Uint8Array(0),
+    ]),
+  );
+
+  return new TransactionInstruction({ programId: params.programId, keys, data });
 }

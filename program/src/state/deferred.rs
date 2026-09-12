@@ -34,3 +34,22 @@ pub struct DeferredExecAccount {
     pub expires_at: u64,
 }
 // Layout: 1+1+1+5+32+32+32+32+32+8 = 176 bytes
+
+impl DeferredExecAccount {
+    /// Minimum byte length for this account to be readable.
+    pub const MIN_LEN: usize = core::mem::size_of::<Self>();
+
+    /// Validate discriminator, length and layout version before trusting any
+    /// field. Every read path calls this instead of comparing `data[0]` by
+    /// hand, so a future version gate is one edit rather than a hunt through
+    /// every processor.
+    #[inline]
+    pub fn check(data: &[u8]) -> Result<(), pinocchio::program_error::ProgramError> {
+        crate::state::check_header(
+            data,
+            crate::state::AccountDiscriminator::DeferredExec,
+            crate::state::version_offset::DEFERRED_EXEC,
+            Self::MIN_LEN,
+        )
+    }
+}

@@ -40,7 +40,9 @@ const EXECUTION_FEE = 5000n; // lamports
 // ─── Helpers ────────────────────────────────────────────────────────
 
 function loadPayer(): Keypair {
-  const keypairPath = path.resolve(process.env.HOME || '~', '.config/solana/id.json');
+  const keypairPath = process.env.PAYER_KEYPAIR
+    ? path.resolve(process.env.PAYER_KEYPAIR)
+    : path.resolve(process.env.HOME || '~', '.config/solana/id.json');
   const raw = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
   return Keypair.fromSecretKey(new Uint8Array(raw));
 }
@@ -66,7 +68,12 @@ function step(msg: string) { console.log(`\n── ${msg} ──`); }
 async function main() {
   const connection = new Connection(RPC_URL, 'confirmed');
   const payer = loadPayer();
-  const client = new LazorKitClient(connection);
+  const client = new LazorKitClient(
+    connection,
+    process.env.LAZORKIT_PROGRAM_ID
+      ? new PublicKey(process.env.LAZORKIT_PROGRAM_ID)
+      : undefined,
+  );
 
   console.log(`Program ID: ${client.programId.toBase58()}`);
   console.log(`Payer:      ${payer.publicKey.toBase58()}`);

@@ -2,13 +2,13 @@ use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
-    compact::{parse_compact_instructions_ref_with_len, CompactInstructionRef},
+    compact::{compute_accounts_hash, parse_compact_instructions_ref_with_len},
     error::AuthError,
     processor::execute::actions::{
         evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
         snapshot_token_balances, verify_token_authorities_unchanged,
     },
-    state::{authority::AuthorityAccountHeader, session::has_actions, AccountDiscriminator},
+    state::{authority::AuthorityAccountHeader, policy::PolicyLocation, AccountDiscriminator},
     utils::get_stack_height,
 };
 use pinocchio::{
@@ -42,11 +42,31 @@ pub fn process(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    // Anti-CPI guard for every authentication branch, not just two of them.
+    // The Secp256r1 authenticator and the session branch each carried their
+    // own copy of this check; the Ed25519 branch did not, so any program the
+    // authority signed a transaction for could re-enter Execute and drive the
+    // vault PDA. Hoisting it above the discriminator match closes that gap and
+    // makes the per-branch copies redundant.
+    if get_stack_height() > 1 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
     // Parse accounts
     let account_info_iter = &mut accounts.iter();
-    let _payer = account_info_iter
+    let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. The payer's signature was only ever enforced as a side effect: the
+    // System Program demands it during the funding CPI. `initialize_pda_account`
+    // skips that CPI when the PDA already holds enough lamports — anyone can
+    // pre-fund a PDA — so on that path nothing checked it at all.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    // Compared by key rather than by position when deciding what may be
+    // forwarded, so the same account passed twice cannot launder the payer.
+    let payer_key = payer.key();
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -67,9 +87,7 @@ pub fn process(
     }
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     if !authority_pda.is_writable() {
         return Err(ProgramError::InvalidAccountData);
@@ -93,23 +111,38 @@ pub fn process(
     let (compact_instructions, compact_len) =
         parse_compact_instructions_ref_with_len(instruction_data)?;
 
-    // Track whether this is a session-based execution and the current slot
-    let mut is_session = false;
-    let mut session_slot: u64 = 0;
+    // Where this account's policy lives, if it carries one. Resolved from the
+    // account's own discriminator and authority type rather than passed in, so
+    // an authority can never be measured with the session header's offset —
+    // an Ed25519 authority is *exactly* 80 bytes, so that mistake would read
+    // its stored pubkey as an action buffer. See state::policy.
+    //
+    // This is what makes the engine serve both account types: a session with
+    // actions and an authority with a policy take the same path from here on.
+    let policy = PolicyLocation::of(authority_data).filter(|loc| loc.is_present(authority_data));
+
+    // Set on the session branch. `None` means "no session-specific restriction",
+    // which is what an authority-authenticated Execute wants.
+    let mut session_key: Option<Pubkey> = None;
+
+    // One clock read for both branches — policy evaluation needs the slot
+    // whether the caller is a session or a policy-bearing authority.
+    let current_slot = Clock::get()?.slot;
+
+    // Bound to the enum rather than to numeric literals. The v1 code matched on
+    // bare `2` and `3`, which silently stopped matching anything the moment the
+    // discriminators were renumbered — every Execute failed with a flat
+    // InvalidAccountData and no indication of why.
+    const DISC_AUTHORITY: u8 = AccountDiscriminator::Authority as u8;
+    const DISC_SESSION: u8 = AccountDiscriminator::Session as u8;
 
     match discriminator {
-        2 => {
+        DISC_AUTHORITY => {
             // Authority
-            if authority_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-                return Err(ProgramError::InvalidAccountData);
-            }
+            AuthorityAccountHeader::check(authority_data)?;
             let authority_header = unsafe {
                 std::ptr::read_unaligned(authority_data.as_ptr() as *const AuthorityAccountHeader)
             };
-
-            if authority_header.discriminator != AccountDiscriminator::Authority as u8 {
-                return Err(ProgramError::InvalidAccountData);
-            }
 
             if authority_header.wallet != *wallet_pda.key() {
                 return Err(ProgramError::InvalidAccountData);
@@ -147,7 +180,7 @@ pub fn process(
                 _ => return Err(AuthError::InvalidAuthenticationKind.into()),
             }
         },
-        3 => {
+        DISC_SESSION => {
             // Session — reuse the existing `authority_data` borrow; no re-borrow needed.
 
             // L5: anti-CPI guard, mirroring the Secp256r1 authenticator check.
@@ -167,9 +200,6 @@ pub fn process(
                     authority_data.as_ptr() as *const crate::state::session::SessionAccount
                 )
             };
-
-            let clock = Clock::get()?;
-            let current_slot = clock.slot;
 
             // Verify Wallet
             if session.wallet != *wallet_pda.key() {
@@ -193,38 +223,46 @@ pub fn process(
                 return Err(ProgramError::MissingRequiredSignature);
             }
 
-            // Pre-CPI action checks (program whitelist/blacklist)
-            if has_actions(authority_data) {
-                evaluate_pre_actions(
-                    authority_data,
-                    &compact_instructions,
-                    accounts,
-                    current_slot,
-                )?;
-            }
-
-            is_session = true;
-            session_slot = current_slot;
+            // Owned, not borrowed: `session` is a stack copy read out of the
+            // account, so a reference to it dies with this arm.
+            session_key = Some(session.session_key);
         },
         _ => return Err(ProgramError::InvalidAccountData),
     }
 
+    // Pre-CPI policy checks (program whitelist/blacklist), for a session with
+    // actions or an authority with a policy alike.
+    if let Some(loc) = policy {
+        evaluate_pre_actions(
+            authority_data,
+            loc,
+            &compact_instructions,
+            accounts,
+            current_slot,
+        )?;
+    }
+
     // Get vault bump for signing
-    let (vault_key, vault_bump) =
-        find_program_address(&[b"vault", wallet_pda.key().as_ref()], program_id);
+    let (vault_key, vault_bump) = find_program_address(
+        &[crate::seeds::VAULT, wallet_pda.key().as_ref()],
+        program_id,
+    );
 
     // Verify vault PDA.
     if vault_pda.key() != &vault_key {
         return Err(ProgramError::InvalidSeeds);
     }
 
-    // Snapshot balances before CPI (for session action enforcement)
-    let vault_lamports_before = if is_session { vault_pda.lamports() } else { 0 };
-    let token_snapshots_before = if is_session {
-        // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
-        snapshot_token_balances(authority_data, accounts, vault_pda.key())?
+    // Snapshot balances before CPI, for policy enforcement afterwards.
+    let vault_lamports_before = if policy.is_some() {
+        vault_pda.lamports()
     } else {
-        Vec::new()
+        0
+    };
+    let token_snapshots_before = match policy {
+        // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
+        Some(loc) => snapshot_token_balances(authority_data, loc, accounts, vault_pda.key())?,
+        None => Vec::new(),
     };
 
     // ── Session invariants (defense against System::Assign / SetAuthority escapes) ──
@@ -236,21 +274,11 @@ pub fn process(
     //
     // Snapshot the vault's metadata + every listed-mint vault-owned token account's
     // authority fields BEFORE the CPI loop; verify unchanged AFTER.
-    let session_has_actions = is_session && has_actions(authority_data);
-    let vault_owner_before = if session_has_actions {
-        Some(*vault_pda.owner())
-    } else {
-        None
-    };
-    let vault_data_len_before = if session_has_actions {
-        Some(unsafe { vault_pda.borrow_data_unchecked().len() })
-    } else {
-        None
-    };
-    let token_authority_snapshots = if session_has_actions {
-        snapshot_token_authorities(authority_data, accounts, vault_pda.key())?
-    } else {
-        Vec::new()
+    let vault_owner_before = policy.map(|_| *vault_pda.owner());
+    let vault_data_len_before = policy.map(|_| unsafe { vault_pda.borrow_data_unchecked().len() });
+    let token_authority_snapshots = match policy {
+        Some(loc) => snapshot_token_authorities(authority_data, loc, accounts, vault_pda.key())?,
+        None => Vec::new(),
     };
 
     // Track gross SOL outflow across all CPIs (for SolMaxPerTx check)
@@ -267,7 +295,7 @@ pub fn process(
     // PDA signer seeds (constant across the loop)
     let vault_bump_arr = [vault_bump];
     let seeds = [
-        Seed::from(b"vault"),
+        Seed::from(crate::seeds::VAULT),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(&vault_bump_arr),
     ];
@@ -289,10 +317,30 @@ pub fn process(
 
         account_metas.clear();
         cpi_accounts.clear();
-        for &acc in &decompressed.accounts {
+        // Signer forwarding is opt-in and never covers the fee payer.
+        //
+        // v1 forwarded every outer signer into every inner instruction that
+        // referenced it, which let a session limited to 0.001 SOL move 2 SOL
+        // out of the paymaster's own wallet: the action limits watch the
+        // vault, and the paymaster is not the vault.
+        //
+        // Three conditions now, and the high bit alone is not enough. It is
+        // real consent for a Secp256r1 authority — the compact bytes are in
+        // the signed payload, so the passkey holder signs the elevation. It
+        // is *not* consent in the session branch, where the session key
+        // holder is the adversary and would simply set the bit. So a session
+        // may only ever conscript its own signature, and nobody may ever
+        // conscript the fee payer's. Compared by key, not by position, so
+        // passing the payer twice cannot launder it.
+        for (i, &acc) in decompressed.accounts.iter().enumerate() {
+            let forwarded = decompressed.forward_signer[i]
+                && acc.is_signer()
+                && acc.key() != payer_key
+                && session_key.is_none_or(|sk| acc.key() == &sk);
+
             account_metas.push(AccountMeta {
                 pubkey: acc.key(),
-                is_signer: acc.is_signer() || acc.key() == vault_pda.key(),
+                is_signer: forwarded || acc.key() == vault_pda.key(),
                 is_writable: acc.is_writable(),
             });
             cpi_accounts.push(Account::from(acc));
@@ -311,7 +359,7 @@ pub fn process(
         }
 
         // Track gross SOL outflow per CPI (used for SolMaxPerTx — not net balance diff).
-        if is_session {
+        if policy.is_some() {
             let post = vault_pda.lamports();
             if prev_vault_lamports > post {
                 vault_lamports_gross_out =
@@ -341,67 +389,19 @@ pub fn process(
 
     // Post-CPI action checks (spending limits)
     // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
-    if session_has_actions {
+    if let Some(loc) = policy {
         evaluate_post_actions(
             authority_data,
+            loc,
             accounts,
             vault_pda.key(),
             vault_lamports_before,
             vault_pda.lamports(),
             vault_lamports_gross_out,
             &token_snapshots_before,
-            session_slot,
+            current_slot,
         )?;
     }
 
     Ok(())
-}
-
-/// Compute SHA256 hash of all account pubkeys referenced by compact instructions (Issue #11).
-///
-/// Optimisation: pass each 32-byte pubkey as a separate slice to sol_sha256
-/// instead of concatenating them into an owned Vec first. sol_sha256 accepts
-/// an array of slices natively, so the concat step was pure overhead.
-fn compute_accounts_hash(
-    accounts: &[AccountInfo],
-    compact_instructions: &[CompactInstructionRef<'_>],
-) -> Result<[u8; 32], ProgramError> {
-    // Collect slice references (16 bytes each) instead of copying 32-byte pubkeys.
-    // With MAX_COMPACT_INSTRUCTIONS = 16 and a reasonable per-ix account count,
-    // this fits comfortably on the BPF heap.
-    let mut refs: Vec<&[u8]> = Vec::with_capacity(compact_instructions.len() * 4);
-
-    for ix in compact_instructions {
-        let program_idx = ix.program_id_index as usize;
-        if program_idx >= accounts.len() {
-            return Err(ProgramError::InvalidInstructionData);
-        }
-        refs.push(accounts[program_idx].key().as_ref());
-
-        for &acc_idx in ix.accounts {
-            let idx = acc_idx as usize;
-            if idx >= accounts.len() {
-                return Err(ProgramError::InvalidInstructionData);
-            }
-            refs.push(accounts[idx].key().as_ref());
-        }
-    }
-
-    #[allow(unused_assignments)]
-    let mut hash = [0u8; 32];
-    #[cfg(target_os = "solana")]
-    unsafe {
-        pinocchio::syscalls::sol_sha256(
-            refs.as_ptr() as *const u8,
-            refs.len() as u64,
-            hash.as_mut_ptr(),
-        );
-    }
-    #[cfg(not(target_os = "solana"))]
-    {
-        hash = [0xAA; 32];
-        let _ = refs;
-    }
-
-    Ok(hash)
 }

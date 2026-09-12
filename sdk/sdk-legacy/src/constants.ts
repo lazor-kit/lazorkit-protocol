@@ -55,3 +55,25 @@ export const PROGRAM_ID_DEVNET = new PublicKey(PROGRAM_ADDRESS_DEVNET);
 export const PROGRAM_ID_FOUNDATION_DEVNET = new PublicKey(
   PROGRAM_ADDRESS_FOUNDATION_DEVNET,
 );
+
+// ─── Account discriminators ───────────────────────────────────────────────
+//
+// Byte 0 of every program-owned account. The high nibble is the protocol major
+// version, the low nibble the account type, so a v1 account (1..7) fails the
+// first byte check on every v2 read path — which is what makes v2 free of
+// migration code. Byte-identical with program/src/state/mod.rs.
+export const ACCOUNT_DISCRIMINATOR = {
+  WALLET: 0x21,
+  AUTHORITY: 0x22,
+  SESSION: 0x23,
+  DEFERRED_EXEC: 0x24,
+  PROTOCOL_CONFIG: 0x25,
+  FEE_RECORD: 0x26,
+  TREASURY_SHARD: 0x27,
+} as const;
+
+/** Account layout revision within the current protocol version. */
+export const CURRENT_ACCOUNT_VERSION = 1;
+
+/** Protocol major version. Mirrors PROTOCOL_VERSION in program/src/state/mod.rs. */
+export const PROTOCOL_VERSION = 2;

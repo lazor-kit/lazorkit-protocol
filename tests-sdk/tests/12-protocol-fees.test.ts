@@ -7,6 +7,7 @@ import {
   sendTxExpectError,
   getProtocolAdmin,
   getProtocolTreasury,
+  initAuthority,
   type TestContext,
 } from './common';
 import {
@@ -22,6 +23,7 @@ import {
   createWithdrawTreasuryIx,
   createUpdateProtocolIx,
 } from '../../sdk/sdk-legacy/src/utils/instructions';
+import { ACCOUNT_DISCRIMINATOR } from '../../sdk/sdk-legacy/src';
 
 // These values match what `setupTest()` uses for the global init.
 // If the constants in `common.ts` ever change, this test file's
@@ -91,15 +93,41 @@ describe('Protocol Fees', () => {
   // initialization" because it asserts on-chain idempotency.
 
   it('rejects double initialization', async () => {
+    // Signed by the init authority so this reaches the idempotency check
+    // rather than stopping at the authorization gate.
+    const authority = initAuthority();
     const { instructions } = client.initializeProtocol({
-      payer: ctx.payer.publicKey,
+      payer: authority.publicKey,
       admin: adminKp.publicKey,
       treasury: treasuryKp.publicKey,
       creationFee: CREATION_FEE,
       executionFee: EXECUTION_FEE,
       numShards: NUM_SHARDS,
     });
-    await sendTxExpectError(ctx, instructions, [], 4001);
+    await sendTxExpectError(ctx, instructions, [authority], 4001);
+  });
+
+  it('rejects initialization by anyone but the init authority', async () => {
+    const { instructions } = client.initializeProtocol({
+      payer: ctx.payer.publicKey,
+      admin: ctx.payer.publicKey,
+      treasury: ctx.payer.publicKey,
+      creationFee: CREATION_FEE,
+      executionFee: EXECUTION_FEE,
+      numShards: NUM_SHARDS,
+    });
+    await sendTxExpectError(ctx, instructions, [], 4015);
+  });
+
+  it('rejects a fee above the ceiling', async () => {
+    const { instructions } = client.updateProtocol({
+      admin: adminKp.publicKey,
+      creationFee: 10_000_001n, // MAX_PROTOCOL_FEE_LAMPORTS + 1
+      executionFee: EXECUTION_FEE,
+      enabled: true,
+      newTreasury: treasuryKp.publicKey,
+    });
+    await sendTxExpectError(ctx, instructions, [adminKp], 4014);
   });
 
   it('protocol config is initialized + valid', async () => {
@@ -107,7 +135,7 @@ describe('Protocol Fees', () => {
     const [protocolConfigPda] = client.findProtocolConfig();
     const info = await ctx.connection.getAccountInfo(protocolConfigPda);
     expect(info).not.toBeNull();
-    expect(info!.data[0]).toBe(5);
+    expect(info!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.PROTOCOL_CONFIG);
     expect(info!.data[3]).toBe(1); // enabled
     expect(info!.data[4]).toBe(NUM_SHARDS);
   });
@@ -117,7 +145,7 @@ describe('Protocol Fees', () => {
       const [shardPda] = client.findTreasuryShard(i);
       const info = await ctx.connection.getAccountInfo(shardPda);
       expect(info).not.toBeNull();
-      expect(info!.data[0]).toBe(7);
+      expect(info!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.TREASURY_SHARD);
       expect(info!.data[2]).toBe(i);
     }
   });
@@ -190,7 +218,7 @@ describe('Protocol Fees', () => {
     );
   });
 
-  it('rejects fee-eligible instructions while protocol is disabled', async () => {
+  it('keeps fee-eligible instructions working while the protocol is disabled', async () => {
     const disable = client.updateProtocol({
       admin: adminKp.publicKey,
       creationFee: CREATION_FEE,
@@ -202,12 +230,16 @@ describe('Protocol Fees', () => {
     client.invalidateProtocolCache();
 
     try {
-      await sendTxExpectError(
+      // The freeze fix: a disabled protocol stops charging, it does not stop
+      // users from transacting. Disc 0/4/7 are the only paths that move funds
+      // out of a vault, so reverting here put user funds behind a config flag.
+      const shardsBefore = await sumShardBalances();
+      await sendTx(
         ctx,
         [buildRawCreateWalletIx(ctx.payer.publicKey, feeAccountsFor())],
         [],
-        4003,
       );
+      expect(await sumShardBalances()).toBe(shardsBefore);
     } finally {
       const enable = client.updateProtocol({
         admin: adminKp.publicKey,
@@ -221,7 +253,7 @@ describe('Protocol Fees', () => {
     }
   });
 
-  it('rejects fee-eligible instructions when creation fee is zero', async () => {
+  it('keeps fee-eligible instructions working when the creation fee is zero', async () => {
     const zeroCreationFee = client.updateProtocol({
       admin: adminKp.publicKey,
       creationFee: 0n,
@@ -233,12 +265,13 @@ describe('Protocol Fees', () => {
     client.invalidateProtocolCache();
 
     try {
-      await sendTxExpectError(
+      const shardsBefore = await sumShardBalances();
+      await sendTx(
         ctx,
         [buildRawCreateWalletIx(ctx.payer.publicKey, feeAccountsFor())],
         [],
-        4012,
       );
+      expect(await sumShardBalances()).toBe(shardsBefore);
     } finally {
       const revert = client.updateProtocol({
         admin: adminKp.publicKey,
@@ -316,7 +349,7 @@ describe('Protocol Fees', () => {
 
     const info = await ctx.connection.getAccountInfo(feeRecordPda);
     expect(info).not.toBeNull();
-    expect(info!.data[0]).toBe(6);
+    expect(info!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD);
   });
 
   it('rejects duplicate payer registration', async () => {
@@ -398,7 +431,7 @@ describe('Protocol Fees', () => {
 
     const record = await ctx.connection.getAccountInfo(feeRecordPda);
     expect(record).not.toBeNull();
-    expect(record!.data[0]).toBe(6);
+    expect(record!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD);
     expect(record!.data.readBigUInt64LE(8)).toBe(CREATION_FEE);
     expect(record!.data.readUInt32LE(20)).toBe(1);
   });
@@ -500,7 +533,7 @@ describe('Protocol Fees', () => {
 
     const record = await ctx.connection.getAccountInfo(feeRecordPda);
     expect(record).not.toBeNull();
-    expect(record!.data[0]).toBe(6);
+    expect(record!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD);
     expect(record!.data.readBigUInt64LE(8)).toBe(EXECUTION_FEE);
     expect(record!.data.readUInt32LE(16)).toBe(1);
     expect(record!.data.readUInt32LE(20)).toBe(0);
@@ -579,7 +612,7 @@ describe('Protocol Fees', () => {
       protocolFee!.feeRecordPda,
     );
     expect(feeRecordAfter).not.toBeNull();
-    expect(feeRecordAfter!.data[0]).toBe(6); // FeeRecord discriminator
+    expect(feeRecordAfter!.data[0]).toBe(ACCOUNT_DISCRIMINATOR.FEE_RECORD); // FeeRecord discriminator
     const walletCount = feeRecordAfter!.data.readUInt32LE(20);
     expect(walletCount).toBe(1);
   });

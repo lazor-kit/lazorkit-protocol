@@ -12,6 +12,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -80,6 +81,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(adminKp.publicKey, adminAuthPda),
       newAuthority: { type: 'ed25519', publicKey: spenderKp.publicKey },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     spenderAuthPda = addSpenderResult.newAuthorityPda;
     await sendTx(ctx, addSpenderResult.instructions, [adminKp]);
@@ -96,6 +98,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderKp.publicKey, spenderAuthPda),
       newAuthority: { type: 'ed25519', publicKey: newKp.publicKey },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
 
     // Error 3002 = PermissionDenied
@@ -132,7 +135,9 @@ describe('Permission Boundaries', () => {
     await sendTx(ctx, instructions, [ownerKp]);
   });
 
-  it('owner cannot add another owner through AddAuthority', async () => {
+  // A person with several devices holds several passkeys, and each of them is an
+  // Owner — that is what lets a surviving device revoke a lost one.
+  it('owner can add another owner through AddAuthority', async () => {
     const newOwnerKp = Keypair.generate();
     const [newOwnerAuthPda] = client.findAuthority(
       walletPda,
@@ -150,7 +155,34 @@ describe('Permission Boundaries', () => {
       programId: client.programId,
     });
 
-    await sendTxExpectError(ctx, [ix], [ownerKp], 3002);
+    await sendTx(ctx, [ix], [ownerKp]);
+    const auth = await ctx.connection.getAccountInfo(newOwnerAuthPda);
+    expect(auth!.data[2]).toBe(ROLE_OWNER);
+  });
+
+  // The client keeps the safe default: creating an Owner is an explicit opt-in,
+  // not something a mistyped role constant can do.
+  it('the client refuses role 0 unless allowOwner is passed', async () => {
+    const newOwnerKp = Keypair.generate();
+    await expect(
+      client.addAuthority({
+        payer: ctx.payer.publicKey,
+        walletPda,
+        adminSigner: { type: 'ed25519', publicKey: ownerKp.publicKey, authorityPda: ownerAuthPda },
+        newAuthority: { type: 'ed25519', publicKey: newOwnerKp.publicKey },
+        role: ROLE_OWNER,
+      }),
+    ).rejects.toThrow(/allowOwner/);
+
+    const { instructions } = await client.addAuthority({
+      payer: ctx.payer.publicKey,
+      walletPda,
+      adminSigner: { type: 'ed25519', publicKey: ownerKp.publicKey, authorityPda: ownerAuthPda },
+      newAuthority: { type: 'ed25519', publicKey: newOwnerKp.publicKey },
+      role: ROLE_OWNER,
+      allowOwner: true,
+    });
+    await sendTx(ctx, instructions, [ownerKp]);
   });
 
   // ─── RemoveAuthority permission boundaries ──────────────────────
@@ -223,6 +255,8 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderKp.publicKey, spenderAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
 
     // Error 3002 = PermissionDenied
@@ -273,6 +307,7 @@ describe('Permission Boundaries', () => {
           rpId: secpSpenderKey.rpId,
         },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
       const addResult = client.finalizeAddAuthority(prepared, response);
@@ -293,6 +328,7 @@ describe('Permission Boundaries', () => {
         },
         newAuthority: { type: 'ed25519', publicKey: newKp.publicKey },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(
         secpSpenderKey,
@@ -317,6 +353,8 @@ describe('Permission Boundaries', () => {
         },
         sessionKey: sessionKp.publicKey,
         expiresAt: currentSlot + 9000n,
+        // Deliberately unrestricted: this test exercises the actionless session.
+        unrestricted: true,
       });
       const response = await fakeWebAuthnSign(
         secpSpenderKey,

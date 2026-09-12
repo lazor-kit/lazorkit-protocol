@@ -9,7 +9,7 @@ pattern.
 
 | Pattern | Who it's for | Guide |
 |---|---|---|
-| EOA owner + passkey spender | Teams onboarding existing Solana users who want to add a passkey for "tap-to-sign" UX without giving up their EOA key | [eoa-with-passkey-spender.md](./eoa-with-passkey-spender.md) |
+| EOA owner + passkey delegate | Teams onboarding existing Solana users who want to add a passkey for "tap-to-sign" UX without giving up their EOA key | [eoa-with-passkey-spender.md](./eoa-with-passkey-spender.md) |
 
 ## Planned (not yet written)
 
@@ -19,7 +19,13 @@ suite under `tests-sdk/tests/` covers all of them.
 - **Passkey-only wallet** — passkey is the Owner from day one; no EOA
   involved. See `tests-sdk/tests/07-e2e.test.ts`.
 - **Multi-device passkey** — primary passkey as Owner adds a second
-  device's passkey as Admin. Each device can sign independently.
+  device's passkey as **Owner** (`role: ROLE_OWNER, allowOwner: true`).
+  The second device must be an Owner, not an Admin: only an Owner may add
+  or remove an Owner, so an Admin second device can sign but can never
+  enroll a replacement if the first device is lost — that wallet is
+  unrecoverable. The trade is real and worth stating to users: either
+  device can also revoke the other. Admin is for a manager you want to be
+  able to revoke, never for a backup device.
 - **Gasless relayer** — a backend service pays the fee for users; users
   sign with their own passkey/EOA. The protocol-fee mechanism's per-payer
   `FeeRecord` is designed for this; see `docs/Architecture.md` for the

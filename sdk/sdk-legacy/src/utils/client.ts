@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import {
   Connection,
   PublicKey,
@@ -5,8 +6,12 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   TransactionInstruction,
 } from '@solana/web3.js';
-import { randomFillSync } from 'crypto';
-import { PROGRAM_ID_DEVNET, PROGRAM_ID_MAINNET } from '../constants';
+import { randomBytes } from '@noble/hashes/utils';
+import {
+  ACCOUNT_DISCRIMINATOR,
+  PROGRAM_ID_DEVNET,
+  PROGRAM_ID_MAINNET,
+} from '../constants';
 import {
   findWalletPda,
   findVaultPda,
@@ -17,6 +22,17 @@ import {
   findFeeRecordPda,
   findTreasuryShardPda,
 } from './pdas';
+import {
+  deriveV1Accounts,
+  readV1WalletState,
+  enumerateV1VaultTokens,
+  type V1Accounts,
+  type V1VaultToken,
+} from './v1';
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountIdempotentIx,
+} from './spl';
 import { readAuthorityCounter, readAuthorityPubkey } from './secp256r1';
 import {
   packCompactInstructions,
@@ -40,6 +56,7 @@ import {
   createRegisterPayerIx,
   createWithdrawTreasuryIx,
   createInitializeTreasuryShardIx,
+  createMigrateWalletIx,
   AUTH_TYPE_ED25519,
   AUTH_TYPE_SECP256R1,
   DISC_ADD_AUTHORITY,
@@ -49,7 +66,9 @@ import {
   DISC_CREATE_SESSION,
   DISC_AUTHORIZE,
   DISC_REVOKE_SESSION,
+  DISC_MIGRATE_WALLET,
   ROLE_OWNER,
+  ROLE_SPENDER,
 } from './instructions';
 import {
   prepareSecp256r1,
@@ -112,6 +131,7 @@ export interface PreparedAddAuthority extends PreparedBase {
     newAuthorityPda: PublicKey;
     newType: number;
     newRole: number;
+    policy?: Uint8Array;
     credentialOrPubkey: Uint8Array;
     secp256r1Pubkey?: Uint8Array;
     rpId?: string;
@@ -267,15 +287,67 @@ function resolveOwnerFields(owner: CreateWalletOwner): {
   };
 }
 
-function assertAddAuthorityRole(role: number): void {
-  if (role === ROLE_OWNER) {
+/// The program lets an Owner create another Owner — that is what makes a second
+/// device able to revoke a lost first one. It stays behind an explicit opt-in
+/// here because handing out ownership is not something to do by passing a `0`
+/// where a `1` was meant, and because the safe default is the one most callers
+/// want.
+function assertAddAuthorityRole(
+  role: number,
+  allowOwner = false,
+  policy?: Uint8Array,
+): void {
+  if (role === ROLE_OWNER && !allowOwner) {
     throw new Error(
-      'AddAuthority cannot create Owner authorities; use transferOwnership instead',
+      'AddAuthority creates an Owner only with allowOwner: true — an Owner can ' +
+        'manage and revoke everything, including you. Use ROLE_ADMIN for a ' +
+        'manager, or transferOwnership to hand ownership over.',
     );
   }
-  if (role < 1 || role > 2) {
+  if (role < 0 || role > 2) {
     throw new Error(
-      'AddAuthority role must be ROLE_ADMIN (1) or ROLE_SPENDER (2)',
+      'AddAuthority role must be ROLE_OWNER (0), ROLE_ADMIN (1) or ROLE_SPENDER (2)',
+    );
+  }
+  // The program rejects a policy-less Delegate (DelegateRequiresPolicy, 3033).
+  // Catching it here names the missing argument instead of surfacing an opaque
+  // custom program error after a passkey prompt has already been spent.
+  if (role === ROLE_SPENDER && (!policy || policy.length === 0)) {
+    throw new Error(
+      'ROLE_SPENDER (Delegate) requires a non-empty policy — rank says what an ' +
+        'authority may manage, the policy says what it may spend, and a Delegate ' +
+        'manages nothing. Build one with serializeActions([...]).',
+    );
+  }
+  // …and only a Delegate may carry one (PolicyRankMismatch, 3035). A bounded
+  // Owner or Admin holds powers no engine can bound — and a bounded Owner was
+  // a dead end, able to remove the unbounded Owner and then widen nothing.
+  if (role !== ROLE_SPENDER && policy && policy.length > 0) {
+    throw new Error(
+      'Only ROLE_SPENDER (Delegate) may carry a policy. A capped spender is a ' +
+        'Delegate; a manager is an Admin. To give one person both, issue two ' +
+        'authorities.',
+    );
+  }
+}
+
+/// A session with no actions is not "a session with no limits" — it is a key
+/// with *more* power over the vault than a bounded Delegate. The action buffer
+/// is what switches on the vault invariants the program checks after the CPI
+/// (lamport delta, owner, data length, and the token-authority snapshot), so an
+/// empty buffer disables all of them: such a key can reassign the vault or seize
+/// its token accounts. That is a deliberate capability, never a default, so it
+/// has to be asked for by name.
+function assertSessionActions(
+  actions: SessionAction[] | undefined,
+  unrestricted = false,
+): void {
+  if ((!actions || actions.length === 0) && !unrestricted) {
+    throw new Error(
+      'createSession with no actions grants an UNRESTRICTED session key — it can ' +
+        'move the whole vault and even reassign it, which is more power than a ' +
+        'bounded Delegate has. Pass actions: [Actions.solLimit(...), ...] to bound ' +
+        'it, or unrestricted: true to say you meant it.',
     );
   }
 }
@@ -302,6 +374,7 @@ function buildCompactLayoutAndHash(
   const { compactInstructions, remainingAccounts } = buildCompactLayout(
     fixedKeys,
     userInstructions,
+    fixedKeys[0],
   );
   const allAccountMetas: AccountMeta[] = [
     ...fixedAccounts,
@@ -358,6 +431,8 @@ export class LazorKitClient {
 
   readonly connection: Connection;
   readonly programId: PublicKey;
+  /** Whether fee-eligible instructions carry the protocol-fee suffix. */
+  readonly protocolFees: boolean;
 
   /**
    * Construct a client. The program ID is inferred from the connection's RPC
@@ -373,9 +448,14 @@ export class LazorKitClient {
    * const client = new LazorKitClient(connection, PROGRAM_ID_MAINNET);
    * ```
    */
-  constructor(connection: Connection, programId?: PublicKey) {
+  constructor(
+    connection: Connection,
+    programId?: PublicKey,
+    options: LazorKitClientOptions = {},
+  ) {
     this.connection = connection;
     this.programId = programId ?? inferProgramIdFromRpc(connection);
+    this.protocolFees = options.protocolFees ?? true;
   }
 
   // ─── PDA helpers ─────────────────────────────────────────────────
@@ -425,7 +505,7 @@ export class LazorKitClient {
     if (this._protocolConfig !== undefined) return this._protocolConfig;
     const [configPda] = this.findProtocolConfig();
     const info = await this.connection.getAccountInfo(configPda);
-    if (!info || info.data.length < 88 || info.data[0] !== 5) {
+    if (!info || info.data.length < 88 || info.data[0] !== ACCOUNT_DISCRIMINATOR.PROTOCOL_CONFIG) {
       this._protocolConfig = null;
       return null;
     }
@@ -444,12 +524,19 @@ export class LazorKitClient {
   /**
    * Auto-resolve protocol fee accounts for a payer.
    *
-   * Returns the 4 accounts to append whenever the protocol is initialized and enabled.
+   * Returns the 4 accounts to append to every fee-eligible instruction (disc 0, 4, 7).
    * The `feeRecordPda` is always the canonical PDA derived from the payer. Under strict
    * fee enforcement, every successful fee-paying instruction must create or update this
    * record; there is no "pay fee but skip accounting" path.
    *
-   * Returns undefined only if the protocol isn't initialized or is disabled.
+   * The program requires this suffix whether or not a fee is charged: it rejects a
+   * fee-eligible instruction without it (4008 FeeAccountsRequired) before it reads the
+   * config, and strips it again when the protocol is uninitialised or disabled. So the
+   * accounts are returned even then — omitting them is what broke every CreateWallet /
+   * Execute between an upgrade and `InitializeProtocol`, or while fees were paused.
+   *
+   * Returns undefined only for a client built with `{ protocolFees: false }`, for a
+   * binary without the fee layer.
    */
   async resolveProtocolFee(payer: PublicKey): Promise<
     | {
@@ -459,18 +546,24 @@ export class LazorKitClient {
       }
     | undefined
   > {
+    if (!this.protocolFees) return undefined;
     const config = await this.getProtocolConfig();
-    if (!config || !config.enabled) return undefined;
 
     const [protocolConfigPda] = this.findProtocolConfig();
     const [feeRecordPda] = this.findFeeRecord(payer);
     // CSPRNG to avoid predictable shard selection. Not a direct exploit vector
     // (fees still land in a valid shard), but violates "no Math.random in
     // crypto-adjacent code" hygiene.
-    const randBuf = new Uint8Array(4);
-    randomFillSync(randBuf);
-    const randU32 = (randBuf[0] | (randBuf[1] << 8) | (randBuf[2] << 16) | (randBuf[3] << 24)) >>> 0;
-    const shardId = randU32 % config.numShards;
+    //
+    // A shard is only read when a fee is actually charged. Uninitialised or
+    // disabled, the program strips the suffix without touching the shard or
+    // the record (entrypoint `try_collect_fee`), so shard 0 serves.
+    let shardId = 0;
+    if (config && config.enabled && config.numShards > 0) {
+      const randBuf = randomBytes(4);
+      const randU32 = (randBuf[0] | (randBuf[1] << 8) | (randBuf[2] << 16) | (randBuf[3] << 24)) >>> 0;
+      shardId = randU32 % config.numShards;
+    }
     const [treasuryShardPda] = this.findTreasuryShard(shardId);
     return { protocolConfigPda, feeRecordPda, treasuryShardPda };
   }
@@ -500,6 +593,12 @@ export class LazorKitClient {
     const accounts = await this.resolveProtocolFee(payer);
     if (!accounts) return undefined;
 
+    // Only a live fee touches the FeeRecord. Uninitialised or disabled, the
+    // program never reads it, and RegisterPayer needs a live config — so there
+    // is nothing to register.
+    const config = await this.getProtocolConfig();
+    if (!config || !config.enabled) return { accounts };
+
     const key = payer.toBase58();
     if (this._registeredPayers.has(key)) {
       return { accounts };
@@ -507,7 +606,7 @@ export class LazorKitClient {
 
     const info = await this.connection.getAccountInfo(accounts.feeRecordPda);
     const exists =
-      !!info && info.data.length > 0 && info.data[0] === 6; // FeeRecord discriminator
+      !!info && info.data.length > 0 && info.data[0] === ACCOUNT_DISCRIMINATOR.FEE_RECORD;
     if (exists) {
       this._registeredPayers.add(key);
       return { accounts };
@@ -707,8 +806,15 @@ export class LazorKitClient {
     secp256r1: Secp256r1Params;
     newAuthority: CreateWalletOwner;
     role: number;
+    /** Action buffer bounding what this authority may spend. Required for
+     *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
+     *  carry one, so a policy always means a bounded spender. */
+    policy?: Uint8Array;
+    /** Opt in to creating another Owner. An Owner can manage and revoke every
+     *  authority on the wallet, this one included, so it is never the default. */
+    allowOwner?: boolean;
   }): Promise<PreparedAddAuthority> {
-    assertAddAuthorityRole(params.role);
+    assertAddAuthorityRole(params.role, params.allowOwner, params.policy);
     const {
       authType: newType,
       credentialOrPubkey,
@@ -730,6 +836,7 @@ export class LazorKitClient {
       credentialOrPubkey,
       secp256r1Pubkey,
       rpId,
+      params.policy,
     );
     const signedPayload = concatBytes([dataPayload, params.payer.toBytes()]);
 
@@ -754,6 +861,7 @@ export class LazorKitClient {
         newAuthorityPda,
         newType,
         newRole: params.role,
+        policy: params.policy,
         credentialOrPubkey,
         secp256r1Pubkey,
         rpId,
@@ -772,6 +880,7 @@ export class LazorKitClient {
       response,
     );
     const ix = createAddAuthorityIx({
+      policy: i.policy,
       payer: i.payer,
       walletPda: i.walletPda,
       adminAuthorityPda: i.adminAuthorityPda,
@@ -972,8 +1081,13 @@ export class LazorKitClient {
     secp256r1: Secp256r1Params;
     sessionKey: PublicKey;
     expiresAt: bigint;
+    /** Actions bounding what this session may spend. Omitting them creates an
+     *  UNRESTRICTED session and requires `unrestricted: true`. */
     actions?: SessionAction[];
+    /** Opt in to a session with no actions — see `actions`. */
+    unrestricted?: boolean;
   }): Promise<PreparedCreateSession> {
+    assertSessionActions(params.actions, params.unrestricted);
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
@@ -1254,10 +1368,10 @@ export class LazorKitClient {
       authorityType === 'ed25519' ? AUTH_TYPE_ED25519 : AUTH_TYPE_SECP256R1;
 
     // Filters:
-    //   offset 0: discriminator == 2 (Authority)
+    //   offset 0: discriminator == ACCOUNT_DISCRIMINATOR.AUTHORITY
     //   offset 1: authority_type == typeValue
     //   offset 48: credential bytes match
-    const discAndType = Buffer.from([2, typeValue]);
+    const discAndType = Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY, typeValue]);
 
     const accounts = await this.connection.getProgramAccounts(this.programId, {
       encoding: 'base64',
@@ -1291,6 +1405,104 @@ export class LazorKitClient {
         authorityType: data[1],
       };
     });
+  }
+
+  /**
+   * Every authority on a wallet — the data a "your devices" screen is built
+   * from. The inverse of {@link findWalletsByAuthority}: that one answers
+   * "which wallets does this credential control", this one answers "which keys
+   * control this wallet".
+   *
+   * `policyLen > 0` means the authority is bounded: rank says what it may
+   * manage, the policy says what it may spend. Read the policy itself with
+   * `parseActions` over the account bytes after the key material (80 bytes for
+   * an Ed25519 authority, 145 for Secp256r1).
+   *
+   * Note the on-chain record stores the credential id's *hash*, so it cannot
+   * rebuild a WebAuthn `allowCredentials` list — keep the raw credential ids
+   * alongside, app-side.
+   */
+  async findAuthoritiesByWallet(walletPda: PublicKey): Promise<
+    {
+      authorityPda: PublicKey;
+      /** 0 = Owner, 1 = Admin, 2 = Delegate. */
+      role: number;
+      /** 0 = Ed25519, 1 = Secp256r1 (passkey). */
+      authorityType: number;
+      /** Secp256r1 replay odometer. */
+      counter: number;
+      /** Bytes of spending policy. 0 = unbounded. */
+      policyLen: number;
+      /** Convenience: does this authority carry a spending policy? */
+      isBounded: boolean;
+      /** The raw policy bytes, if any — pass to `parseActions`. */
+      policy?: Uint8Array;
+    }[]
+  > {
+    // Filters: offset 0 = Authority discriminator, offset 16 = this wallet.
+    const accounts = await this.connection.getProgramAccounts(this.programId, {
+      encoding: 'base64',
+      filters: [
+        {
+          memcmp: {
+            offset: 0,
+            bytes: Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY]).toString('base64'),
+            encoding: 'base64',
+          },
+        },
+        {
+          memcmp: {
+            offset: 16,
+            bytes: walletPda.toBuffer().toString('base64'),
+            encoding: 'base64',
+          },
+        },
+      ],
+    });
+
+    return accounts.map(({ pubkey: authorityPda, account }) => {
+      const data = account.data;
+      const authorityType = data[1];
+      const policyLen = data.readUInt16LE(12);
+      // Key material length: Ed25519 pubkey (32) or credential hash + pubkey +
+      // rpIdHash (97). The policy follows it.
+      const fixedLen = authorityType === AUTH_TYPE_SECP256R1 ? 145 : 80;
+      const policy =
+        policyLen > 0 && data.length >= fixedLen + policyLen
+          ? new Uint8Array(data.subarray(fixedLen, fixedLen + policyLen))
+          : undefined;
+      return {
+        authorityPda,
+        role: data[2],
+        authorityType,
+        counter: data.readUInt32LE(8),
+        policyLen,
+        isBounded: policyLen > 0,
+        policy,
+      };
+    });
+  }
+
+  /**
+   * Whether this wallet can survive losing a device.
+   *
+   * A wallet with a single Owner is **not recoverable**: only an Owner may add
+   * or remove an Owner, so if that key is lost no instruction in the program
+   * can ever enroll a replacement. An app should surface this *before* the
+   * loss, at enrollment time — after it, nothing can be done.
+   */
+  async getRecoveryStatus(walletPda: PublicKey): Promise<{
+    ownerCount: number;
+    /** True once a second Owner exists — a surviving Owner can revoke a lost one. */
+    isRecoverable: boolean;
+  }> {
+    const info = await this.connection.getAccountInfo(walletPda);
+    if (!info || info.data.length < 8) {
+      throw new Error(`Wallet account not found: ${walletPda.toBase58()}`);
+    }
+    // WalletAccount: disc(1) bump(1) version(1) _pad(1) owner_count(u32)
+    const ownerCount = info.data.readUInt32LE(4);
+    return { ownerCount, isRecoverable: ownerCount > 1 };
   }
 
   // ─── CreateWallet ────────────────────────────────────────────────
@@ -1327,8 +1539,16 @@ export class LazorKitClient {
     owner: CreateWalletOwner;
   }): Promise<{
     instructions: TransactionInstruction[];
+    /** The wallet's identity PDA. It holds configuration, **never funds** —
+     *  no instruction can sign for it to move value, so anything sent here is
+     *  unrecoverable. Show `depositAddress` to users, not this. */
     walletPda: PublicKey;
+    /** The vault PDA — the wallet's balance. This is the ONLY address that may
+     *  receive SOL or tokens. Also returned as `depositAddress`. */
     vaultPda: PublicKey;
+    /** Alias for `vaultPda`, named for the one thing it is safe to do with an
+     *  address: give it out. */
+    depositAddress: PublicKey;
     authorityPda: PublicKey;
   }> {
     assertByteLength(params.userSeed, 32, 'userSeed');
@@ -1358,7 +1578,13 @@ export class LazorKitClient {
       programId: this.programId,
     });
     const instructions = fee?.registerIx ? [fee.registerIx, ix] : [ix];
-    return { instructions, walletPda, vaultPda, authorityPda };
+    return {
+      instructions,
+      walletPda,
+      vaultPda,
+      depositAddress: vaultPda,
+      authorityPda,
+    };
   }
 
   // ─── AddAuthority (unified) ─────────────────────────────────────
@@ -1394,11 +1620,18 @@ export class LazorKitClient {
     adminSigner: AdminSigner;
     newAuthority: CreateWalletOwner;
     role: number;
+    /** Action buffer bounding what this authority may spend. Required for
+     *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
+     *  carry one, so a policy always means a bounded spender. */
+    policy?: Uint8Array;
+    /** Opt in to creating another Owner. An Owner can manage and revoke every
+     *  authority on the wallet, this one included, so it is never the default. */
+    allowOwner?: boolean;
   }): Promise<{
     instructions: TransactionInstruction[];
     newAuthorityPda: PublicKey;
   }> {
-    assertAddAuthorityRole(params.role);
+    assertAddAuthorityRole(params.role, params.allowOwner, params.policy);
     const {
       authType: newType,
       credentialOrPubkey,
@@ -1413,6 +1646,7 @@ export class LazorKitClient {
 
     if (s.type === 'ed25519') {
       const ix = createAddAuthorityIx({
+      policy: params.policy,
         payer: params.payer,
         walletPda: params.walletPda,
         adminAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
@@ -1428,13 +1662,19 @@ export class LazorKitClient {
       return { instructions: [ix], newAuthorityPda };
     }
 
-    // Secp256r1 — delegate to prepare/finalize
+    // Secp256r1 — delegate to prepare/finalize. `policy` and `allowOwner` must
+    // be forwarded: dropping `policy` writes an authority with an empty action
+    // buffer, which for an Admin is an unbounded authority the caller believed
+    // was capped, and dropping `allowOwner` makes enrolling a second Owner —
+    // the only recovery path a passkey user has — impossible.
     const prepared = await this.prepareAddAuthority({
       payer: params.payer,
       walletPda: params.walletPda,
       secp256r1: this.extractSecp256r1Params(s),
       newAuthority: params.newAuthority,
       role: params.role,
+      policy: params.policy,
+      allowOwner: params.allowOwner,
     });
     const response = await s.signer.sign(prepared.challenge);
     return this.finalizeAddAuthority(prepared, response);
@@ -1567,12 +1807,16 @@ export class LazorKitClient {
     adminSigner: AdminSigner;
     sessionKey: PublicKey;
     expiresAt: bigint;
-    /** Optional permission actions to restrict this session. Empty/omitted = unrestricted. */
+    /** Actions bounding what this session may spend. Omitting them creates an
+     *  UNRESTRICTED session and requires `unrestricted: true`. */
     actions?: SessionAction[];
+    /** Opt in to a session with no actions — see `actions`. */
+    unrestricted?: boolean;
   }): Promise<{
     instructions: TransactionInstruction[];
     sessionPda: PublicKey;
   }> {
+    assertSessionActions(params.actions, params.unrestricted);
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
     const s = params.adminSigner;
@@ -1658,6 +1902,7 @@ export class LazorKitClient {
         const { compactInstructions, remainingAccounts } = buildCompactLayout(
           fixedAccounts,
           params.instructions,
+          params.payer,
         );
         const packed = packCompactInstructions(compactInstructions);
         const ix = createExecuteIx({
@@ -1698,6 +1943,7 @@ export class LazorKitClient {
         const { compactInstructions, remainingAccounts } = buildCompactLayout(
           fixedAccounts,
           params.instructions,
+          params.payer,
         );
         const packed = packCompactInstructions(compactInstructions);
 
@@ -2010,4 +2256,163 @@ export class LazorKitClient {
     });
     return { instructions: [ix] };
   }
+
+  /**
+   * Orchestrate a full v1 -> v2 migration for one wallet, authorized by the v1
+   * owner. Returns the setup instructions (create the v2 wallet if it does not
+   * exist yet, and a destination token account for every token being moved) and
+   * the MigrateWallet step.
+   *
+   * Send `setupInstructions` first, then the migrate:
+   *  - Ed25519: sign `migrate.instruction` with the payer and the owner key.
+   *  - Secp256r1: have the passkey sign `migrate.challenge`, pass the WebAuthn
+   *    response to `migrate.finalize`, and send the returned
+   *    `[precompile, migrate]`.
+   *
+   * Only an Owner-rank v1 authority may migrate; throws otherwise, or if no v1
+   * wallet exists for `userSeed`. All vault-owned token accounts (SPL Token and
+   * Token-2022) are enumerated and migrated in one call.
+   */
+  async migrateV1Wallet(params: {
+    payer: PublicKey;
+    userSeed: Uint8Array;
+    owner: CreateWalletOwner;
+  }): Promise<{
+    v1: V1Accounts;
+    v2Vault: PublicKey;
+    tokens: V1VaultToken[];
+    setupInstructions: TransactionInstruction[];
+    migrate:
+      | { type: 'ed25519'; instruction: TransactionInstruction }
+      | {
+          type: 'secp256r1';
+          challenge: Uint8Array;
+          finalize: (response: WebAuthnResponse) => TransactionInstruction[];
+        };
+  }> {
+    const { authType, credentialOrPubkey } = resolveOwnerFields(params.owner);
+
+    const v1 = deriveV1Accounts(params.userSeed, credentialOrPubkey, this.programId);
+    const state = await readV1WalletState(this.connection, v1);
+    if (!state) throw new Error('no v1 wallet exists for this userSeed');
+    if (state.ownerRole !== ROLE_OWNER) {
+      throw new Error('MigrateWallet requires an Owner-rank v1 authority');
+    }
+
+    const [v2Wallet] = this.findWallet(params.userSeed);
+    const [v2Vault] = this.findVault(v2Wallet);
+
+    const tokens = await enumerateV1VaultTokens(this.connection, v1.vault);
+
+    const setupInstructions: TransactionInstruction[] = [];
+    const v2WalletInfo = await this.connection.getAccountInfo(v2Wallet);
+    if (!v2WalletInfo) {
+      const created = await this.createWallet({
+        payer: params.payer,
+        userSeed: params.userSeed,
+        owner: params.owner,
+      });
+      setupInstructions.push(...created.instructions);
+    }
+    const migrateTokens = tokens.map((t) => {
+      const destAta = getAssociatedTokenAddress(t.mint, v2Vault, t.tokenProgram);
+      setupInstructions.push(
+        createAssociatedTokenAccountIdempotentIx({
+          payer: params.payer,
+          ata: destAta,
+          owner: v2Vault,
+          mint: t.mint,
+          tokenProgram: t.tokenProgram,
+        }),
+      );
+      return { sourceAta: t.ata, destAta, tokenProgram: t.tokenProgram };
+    });
+
+    // signed_payload = destination || v1_wallet || num_tokens || refund_dest
+    //                  || source_ata[0] || … || source_ata[n-1]
+    // The trailing source ATAs bind WHICH token accounts move, not just how many
+    // — without them a relayer could keep the count and swap in dust it created,
+    // stranding the user's real tokens when the vault closes. Order must match
+    // the program's read order (the migrateTokens order used to build the ix).
+    const signedPayload = concatBytes([
+      v2Vault.toBytes(),
+      v1.wallet.toBytes(),
+      Uint8Array.from([tokens.length]),
+      params.payer.toBytes(),
+      ...migrateTokens.map((t) => t.sourceAta.toBytes()),
+    ]);
+
+    if (authType === AUTH_TYPE_ED25519) {
+      const instruction = createMigrateWalletIx({
+        payer: params.payer,
+        v1Wallet: v1.wallet,
+        v1Authority: v1.authority,
+        v1Vault: v1.vault,
+        destination: v2Vault,
+        refundDestination: params.payer,
+        authSigner: (params.owner as { publicKey: PublicKey }).publicKey,
+        authSignerIsSigner: true,
+        tokens: migrateTokens,
+        programId: this.programId,
+      });
+      return {
+        v1,
+        v2Vault,
+        tokens,
+        setupInstructions,
+        migrate: { type: 'ed25519', instruction },
+      };
+    }
+
+    // Secp256r1 passkey.
+    const owner = params.owner as { compressedPubkey: Uint8Array };
+    const counter = (await readAuthorityCounter(this.connection, v1.authority)) + 1;
+    const slot = BigInt(await this.connection.getSlot());
+    const prepared = prepareSecp256r1({
+      discriminator: Uint8Array.from([DISC_MIGRATE_WALLET]),
+      signedPayload,
+      sysvarIxIndex: 7,
+      slot,
+      counter,
+      payer: params.payer,
+      programId: this.programId,
+      publicKeyBytes: owner.compressedPubkey,
+    });
+    const finalize = (response: WebAuthnResponse): TransactionInstruction[] => {
+      const { authPayload, precompileIx } = finalizeSecp256r1(prepared, response);
+      const migrateIx = createMigrateWalletIx({
+        payer: params.payer,
+        v1Wallet: v1.wallet,
+        v1Authority: v1.authority,
+        v1Vault: v1.vault,
+        destination: v2Vault,
+        refundDestination: params.payer,
+        authSigner: params.payer,
+        authSignerIsSigner: false,
+        tokens: migrateTokens,
+        authPayload,
+        programId: this.programId,
+      });
+      return [precompileIx, migrateIx];
+    };
+    return {
+      v1,
+      v2Vault,
+      tokens,
+      setupInstructions,
+      migrate: { type: 'secp256r1', challenge: prepared.challenge, finalize },
+    };
+  }
+}
+
+/** Options for {@link LazorKitClient}. */
+export interface LazorKitClientOptions {
+  /**
+   * Append the `[ProtocolConfig, FeeRecord, TreasuryShard, SystemProgram]` suffix
+   * to fee-eligible instructions (CreateWallet, Execute, ExecuteDeferred).
+   * Default `true` — this program requires the suffix on those instructions
+   * even when no fee is charged. Set `false` only for a build without the fee
+   * layer.
+   */
+  protocolFees?: boolean;
 }

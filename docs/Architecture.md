@@ -7,7 +7,8 @@ Technical reference for the LazorKit on-chain program. If you just want to use t
 - **Zero-copy state** — pinocchio casts raw bytes to Rust structs; no Borsh.
 - **NoPadding structs** — custom derive ensures memory safety and tight packing.
 - **Per-authority storage** — each authority gets its own PDA (no per-wallet list, no resize).
-- **Strict RBAC** — Owner (0) / Admin (1) / Spender (2).
+- **Rank and policy are separate** — rank (Owner / Admin / Delegate) says what an
+  authority may manage; its policy says what it may spend.
 - **Compact instructions** — index-based references for inner CPI accounts.
 
 ## Account model at a glance
@@ -23,7 +24,7 @@ flow.
 graph TD
     User[User / Integrator] -->|controls| Wallet[Wallet PDA<br/>identity anchor]
     Wallet -->|holds SOL/tokens via| Vault[Vault PDA<br/>system-owned, signed by program]
-    Wallet -->|has 1..N| Auth[Authority PDA<br/>Owner / Admin / Spender<br/>Ed25519 or Secp256r1]
+    Wallet -->|has 1..N| Auth[Authority PDA<br/>Owner / Admin / Delegate<br/>Ed25519 or Secp256r1<br/>optional spending policy]
     Wallet -->|has 0..N| Session[Session PDA<br/>ephemeral signer + spending limits]
     Auth -.->|Owner/Admin may create| Session
     Auth -.->|Owner/Admin secp256r1 may commit| Deferred[DeferredExec PDA<br/>temporary hash commitment]
@@ -61,7 +62,8 @@ erDiagram
         pubkey wallet PK
         bytes32 id_hash PK
         u8 authority_type "0=Ed25519 | 1=Secp256r1"
-        u8 role "0=Owner | 1=Admin | 2=Spender"
+        u8 role "rank: 0=Owner | 1=Admin | 2=Delegate"
+        u16 policy_len "spending policy bytes, 0 = unbounded"
         u32 counter "Secp256r1 odometer"
     }
     SESSION {
@@ -175,57 +177,86 @@ Two non-obvious points:
 
 ### Discriminators
 
+The high nibble is the protocol major version, so a v1 account fails the
+discriminator check immediately rather than being reinterpreted under a layout
+that has moved underneath it.
+
 ```rust
+pub const PROTOCOL_VERSION: u8 = 2;
+
 pub enum AccountDiscriminator {
-    Wallet        = 1,
-    Authority     = 2,
-    Session       = 3,
-    DeferredExec  = 4,
-    ProtocolConfig = 5,
-    FeeRecord     = 6,
-    TreasuryShard = 7,
+    Wallet         = 0x21,
+    Authority      = 0x22,
+    Session        = 0x23,
+    DeferredExec   = 0x24,
+    ProtocolConfig = 0x25,
+    FeeRecord      = 0x26,
+    TreasuryShard  = 0x27,
 }
 ```
 
+Every PDA seed carries the same version as a literal prefix — `lk2:wallet`,
+`lk2:authority`, and so on. The two mechanisms do different jobs and both are
+needed: the seed prefix makes the v2 address space disjoint from v1's, and the
+discriminator makes a v1 account that somehow arrives fail loudly. See
+[upgrade-procedure.md](upgrade-procedure.md).
+
 ### Wallet PDA — 8 bytes
 
-Seeds: `["wallet", user_seed]`
+Seeds: `["lk2:wallet", user_seed]`
 
 ```rust
 #[repr(C, align(8))]
 pub struct WalletAccount {
-    pub discriminator: u8,   // 1
+    pub discriminator: u8,   // 0x21
     pub bump: u8,
     pub version: u8,
-    pub _padding: [u8; 5],
+    pub _padding: [u8; 1],
+    pub owner_count: u32,    // authorities on this wallet holding rank Owner
 }
 ```
 
+`owner_count` is what refuses the removal of the last Owner. A wallet with no
+Owner is not frozen — its Admins and Delegates keep spending — but nothing can
+ever be added or revoked again, so a lost device would stay valid forever.
+
 ### Authority PDA
 
-Seeds: `["authority", wallet_pubkey, id_hash]`
+Seeds: `["lk2:authority", wallet_pubkey, id_hash]`
 
-48-byte fixed header + auth-type-specific data:
+48-byte fixed header + auth-type-specific data + an optional policy:
 
 ```rust
 #[repr(C, align(8))]
 pub struct AuthorityAccountHeader {
-    pub discriminator: u8,   // 2
+    pub discriminator: u8,   // 0x22
     pub authority_type: u8,  // 0=Ed25519, 1=Secp256r1
-    pub role: u8,            // 0=Owner, 1=Admin, 2=Spender
+    pub role: u8,            // rank: 0=Owner, 1=Admin, 2=Delegate
     pub bump: u8,
     pub version: u8,
     pub _padding1: [u8; 3],
     pub counter: u32,        // Secp256r1 odometer
-    pub _padding2: [u8; 4],
+    pub policy_len: u16,     // action buffer length, 0 = unbounded
+    pub _padding2: [u8; 2],
     pub wallet: Pubkey,
 }
 ```
 
 Variable data after header:
 
-- **Ed25519**: `[pubkey(32)]` — total 80 bytes.
-- **Secp256r1**: `[credential_id_hash(32)][compressed_pubkey(33)][rpIdHash(32)]` — total 145 bytes fixed.
+- **Ed25519**: `[pubkey(32)]` — 80 bytes, plus `policy_len` bytes of policy.
+- **Secp256r1**: `[credential_id_hash(32)][compressed_pubkey(33)][rpIdHash(32)]` —
+  145 bytes, plus `policy_len` bytes of policy.
+
+`role` is a **rank**: what this authority may *manage*. The policy is what it may
+*spend*. They are independent, and conflating them is what made "Spender" a name
+for a tier that had full control of the vault — rank was checked at five
+management sites and nowhere in `Execute`. A Delegate is required to carry a
+policy for exactly that reason; Owner and Admin may carry one optionally.
+
+An authority whose own `policy_len` is non-zero may not add authorities at all.
+Comparing two policies to prove a grant is no wider than the granter's is a hard
+problem; refusing the grant sidesteps it.
 
 `CreateWallet` and `AddAuthority` reject all-zero Ed25519 pubkeys, all-zero
 Secp256r1 credential hashes, and all-zero Secp256r1 compressed pubkeys before
@@ -238,12 +269,12 @@ authority seed.
 
 ### Session PDA — 80+ bytes
 
-Seeds: `["session", wallet_pubkey, session_key]`
+Seeds: `["lk2:session", wallet_pubkey, session_key]`
 
 ```rust
 #[repr(C, align(8))]
 pub struct SessionAccount {
-    pub discriminator: u8,   // 3
+    pub discriminator: u8,   // 0x23
     pub bump: u8,
     pub version: u8,
     pub _padding: [u8; 5],
@@ -268,7 +299,8 @@ Optional **actions** buffer appended after the header (variable length, max 2048
 
 **Expired-action policy**: expired spending limits are treated as **fully exhausted** (any spend denied); expired whitelists are **hard deny**; expired blacklist entries are silently dropped.
 
-**Vault invariants (H1 fix)**: during a session+actions Execute, the program snapshots `vault.owner()`, `vault.data.len()`, and per-listed-mint token account `owner` / `delegate` / `close_authority` before the CPI loop, and rejects if any changed. This prevents escape via `System::Assign`, SPL Token `SetAuthority`, or `Approve`.
+**Vault invariants**: during any policy-bearing Execute — a session with actions,
+or an authority with a policy — the program snapshots `vault.owner()`, `vault.data.len()`, and per-listed-mint token account `owner` / `delegate` / `close_authority` before the CPI loop, and rejects if any changed. This prevents escape via `System::Assign`, SPL Token `SetAuthority`, or `Approve`.
 
 ### DeferredExec PDA — 176 bytes
 
@@ -294,7 +326,7 @@ Temporary account created during `Authorize` (tx1), closed during `ExecuteDeferr
 
 ### Vault PDA
 
-Seeds: `["vault", wallet_pubkey]`
+Seeds: `["lk2:vault", wallet_pubkey]`
 
 No data allocated. Holds SOL as a System-owned account (`data_len = 0`, `owner = SystemProgram`). Program signs for it via PDA seeds during Execute/ExecuteDeferred.
 
@@ -303,22 +335,36 @@ No data allocated. Holds SOL as a System-owned account (`data_len = 0`, `owner =
 LazorKit's entrypoint can collect fees before dispatching to `CreateWallet` / `Execute` / `ExecuteDeferred` processors.
 
 ```rust
-// ProtocolConfig PDA ["protocol_config"] — 88 bytes, disc 5
+// ProtocolConfig PDA ["lk2:protocol_config"] — 120 bytes, disc 0x25
 pub struct ProtocolConfig {
     pub discriminator: u8, pub version: u8, pub bump: u8,
     pub enabled: u8, pub num_shards: u8, pub _padding: [u8; 3],
     pub admin: Pubkey, pub treasury: Pubkey,
     pub creation_fee: u64, pub execution_fee: u64,
+    pub pending_admin: Pubkey,   // two-step rotation; default = none pending
 }
 
-// FeeRecord PDA ["fee_record", payer_pubkey] — 32 bytes, disc 6
+// Either fee is capped at MAX_PROTOCOL_FEE_LAMPORTS (0.01 SOL). Without a
+// ceiling, execution_fee = u64::MAX is a freeze wearing a fee's clothes:
+// nobody can pay it, discriminators 4 and 7 are the only paths that move funds
+// out of a vault, and the config still reads as enabled.
+
+// FeeRecord PDA ["lk2:fee_record", payer_pubkey] — 32 bytes, disc 0x26
 // Per-payer reward-tracking counters.
 
-// TreasuryShard PDA ["treasury_shard", shard_id_u8] — 8 bytes, disc 7
+// TreasuryShard PDA ["lk2:treasury_shard", shard_id_u8] — 8 bytes, disc 0x27
 // Sharded fee destination (N shards spread write contention).
 ```
 
 Fee flow: SDK appends `[protocolConfig, feeRecord, treasuryShard, systemProgram]` to fee-eligible instructions and prepends `RegisterPayer` when the payer/paymaster is missing its canonical `FeeRecord`. Entrypoint validates the canonical config, fee record, and treasury shard PDAs, creates the `FeeRecord` inline if the canonical account is still system-owned, transfers `fee` from payer to a random `treasuryShard`, bumps `FeeRecord` counters, then strips the 4 accounts and dispatches to the processor. Admin withdraws from shards to `treasury` via `WithdrawTreasury`.
+
+**When fees are not configured, collection is skipped — the instruction is not
+rejected.** This was C-1. The entrypoint used to revert every discriminator 0, 4
+and 7 when the config was disabled or the fee was zero, and those are the only
+paths that move funds out of a vault: a single admin write froze every user's
+funds, and nothing in the protocol could undo it. Skipping is safe because the
+config PDA address is pinned first, so "not configured" cannot be spoofed by
+passing a different account.
 
 ## Auth payload layout (Secp256r1)
 
@@ -335,18 +381,34 @@ Fee flow: SDK appends `[protocolConfig, feeRecord, treasuryShard, systemProgram]
 
 The first 14 bytes form the deterministic prefix that's hashed into the challenge. Everything after is bound into the signature via the precompile's signed message (`authenticatorData ∥ SHA256(clientDataJSON)`).
 
-## Roles and permissions (RBAC)
+## Rank and policy
 
-Every Authority has a numeric `role` field. The role determines which program
-instructions that authority is allowed to invoke. The matrix below is
-enforced by the program — an Authority that calls something it isn't
-allowed to fails with `PermissionDenied (3002)`.
+Two independent questions, deliberately kept apart:
+
+- **Rank** (`role` in the header) — what this authority may *manage*.
+- **Policy** (the action buffer after the key material) — what it may *spend*.
+
+They used to be one field, and that was the bug. `role` gated management at five
+sites and gated `Execute` nowhere, so an authority named "Spender" could move the
+entire vault; the name described a restriction the program never applied. Rank
+now says nothing about spending, and the policy says nothing about management.
+
+### Rank
+
+| Rank | Value | May add | May remove |
+|---|---|---|---|
+| Owner | 0 | Owner, Admin, Delegate | Owner (not the last), Admin, Delegate |
+| Admin | 1 | Delegate | Delegate |
+| Delegate | 2 | nothing | nothing |
+
+Enforced by `can_add` and `can_remove` in `processor/authority/manage.rs`, which
+are pure functions table-tested over every pair.
 
 ```mermaid
 flowchart LR
-    Owner["**Owner**<br/>role = 0"]
-    Admin["**Admin**<br/>role = 1"]
-    Spender["**Spender**<br/>role = 2"]
+    Owner["**Owner**<br/>rank = 0"]
+    Admin["**Admin**<br/>rank = 1"]
+    Delegate["**Delegate**<br/>rank = 2<br/>policy required"]
 
     Add[AddAuthority]
     Remove[RemoveAuthority]
@@ -356,92 +418,167 @@ flowchart LR
     Authorize[Authorize<br/>deferred TX1]
     Exec[Execute<br/>immediate]
 
-    Owner -->|Admin/Spender role only| Add
-    Owner --> Remove
+    Owner -->|any rank| Add
+    Owner -->|not the last Owner| Remove
     Owner --> Transfer
     Owner --> CreateS
     Owner --> RevokeS
     Owner -->|secp256r1 only| Authorize
     Owner --> Exec
 
-    Admin -->|Spender role only| Add
-    Admin -->|Spender role only| Remove
+    Admin -->|Delegate only| Add
+    Admin -->|Delegate only| Remove
     Admin --> CreateS
     Admin --> RevokeS
     Admin -->|secp256r1 only| Authorize
     Admin --> Exec
 
-    Spender --> Exec
+    Delegate --> Exec
 
     classDef owner fill:#fce4ec,stroke:#c2185b,color:#000
     classDef admin fill:#e8f5e9,stroke:#388e3c,color:#000
-    classDef spender fill:#e3f2fd,stroke:#1976d2,color:#000
+    classDef delegate fill:#e3f2fd,stroke:#1976d2,color:#000
     class Owner owner
     class Admin admin
-    class Spender spender
+    class Delegate delegate
 ```
 
-**Reading the diagram:** an arrow from a role to an instruction means
-"authorities with this role can call this instruction." Edge labels record
-extra constraints (e.g. Admin can only add `Spender`-role authorities;
-`Authorize` requires the auth type to be Secp256r1).
+Rules the diagram cannot show:
 
-Notable rules not visible above:
+- **A wallet may have several Owners.** This is the multi-device case: each
+  device holds its own passkey, passkeys cannot be copied, so several devices
+  means several authorities — and only if they are all Owners can a surviving
+  device revoke a lost one. `WalletAccount::owner_count` tracks how many there
+  are.
+- **The last Owner cannot be removed.** A wallet with no Owner still spends, but
+  nothing can ever be added or revoked again. In practice a removal always
+  leaves its author standing (removing an Owner requires an Owner, and
+  self-removal is refused), so the count is the belt to that braces.
+- **A Delegate must carry a policy**, and **an authority carrying a policy may
+  not add authorities at all** — proving a grant is no wider than the granter's
+  is a hard problem, and refusing the grant sidesteps it.
+- `TransferOwnership` still exists and still swaps atomically. It is the only way
+  to hand ownership to a key that does not exist yet, and the only way for a sole
+  Owner to stop being one without leaving the wallet ownerless. It leaves
+  `owner_count` unchanged: one Owner goes, one arrives.
+- `ExecuteDeferred` and `ReclaimDeferred` are not gated by rank — by hash match
+  and payer pubkey respectively. Anyone may submit TX2; only the original payer
+  may reclaim after expiry.
 
-- The **Owner role itself can never be added or removed** through
-  `AddAuthority`/`RemoveAuthority`. Only `TransferOwnership` swaps it
-  atomically with a new Owner.
-- An authority **cannot remove itself** (`manage.rs:435`).
-- `ExecuteDeferred` (TX2) and `ReclaimDeferred` are not gated by role —
-  they're gated by hash match + payer-pubkey, respectively. Anyone can
-  submit TX2; only the original payer can reclaim after expiry.
+### Policy
 
-### Concrete RBAC enforcement: a Spender calling Execute
+An authority with `policy_len > 0` runs the same action engine a session does,
+on the same path: pre-action snapshot, execute, post-action evaluation against
+vault deltas and token-authority state. The action types are shared — `SolLimit`,
+`SolRecurringLimit`, `SolMaxPerTx`, the `Token*` equivalents,
+`ProgramWhitelist`/`ProgramBlacklist`.
 
-The role check is per-instruction, not per-authority globally. Below is what
-happens when a Spender (lowest privilege) calls `Execute` — and what would
-happen if the same Spender tried to call `AddAuthority` instead.
+An authority with `policy_len == 0` is unbounded and spends like an Owner. That
+is intended for Owner and Admin; it is refused for Delegate.
 
-### Execute signer forwarding and paymasters
+**A session with zero actions is likewise unbounded** — no actions means no
+policy engine runs, so the session key can spend the vault freely until
+expiry. Creating one still requires Owner/Admin authorization, but "session"
+does not imply "limited": attach actions, and the SDK should refuse to build
+a zero-action session without an explicit opt-in.
 
-`Execute` and `ExecuteDeferred` intentionally preserve signer privilege from
-outer transaction accounts when constructing inner CPIs, while also signing
-for the wallet vault PDA. This means a payer/paymaster/dev account that signs
-the outer transaction can also be consumed as a signer by an inner instruction
-if that same account appears in the compact instruction account list.
+**A policy bounds only the dimensions its actions cover.** The post-action
+evaluation checks the limits that are *present*: if a policy has a
+`ProgramWhitelist` but no `SolLimit`, SOL spend is not capped; if it caps SOL but
+not a token, that token is not capped. "Delegate requires a policy" means the
+buffer must be non-empty and well-formed — not that the delegate is
+spend-limited on every asset. A granter who wants a bounded delegate must write a
+value cap (`SolLimit`/`SolMaxPerTx`/`Token*`) for each asset class the delegate
+can reach; the SDK should surface this. A whitelist-only policy is a legitimate
+shape (restrict *which* programs, unlimited amount), so this is a granter choice,
+not a defect — but it is a choice, and worth stating plainly.
 
-That behavior is part of the sponsored-transaction model rather than a contract
-bug. A paymaster must parse and approve the full transaction, including all
-inner compact instructions and expected lamport/token movement, before signing.
-The protocol still charges fees and records them against that fee payer's
-canonical `FeeRecord`.
+**Only a Delegate may carry a policy.** `AddAuthority` requires one for rank
+Delegate (3033) and refuses one above it (3035), and the three sites that write
+an authority — wallet creation, AddAuthority, TransferOwnership — are the only
+ones that set `policy_len`. So `policy_len != 0` means exactly `rank ==
+Delegate` for every authority the program will ever write. A bounded Owner was
+otherwise a dead end: it could remove the unbounded Owner, and then widen
+nothing — no AddAuthority, no CreateSession, no TransferOwnership, no
+Authorize — so when its allowance ran out the wallet was unmanageable with its
+funds still inside. A bounded Admin was the shape every escalation guard below
+was written against. A capped spender is a Delegate; a manager is an Admin; one
+key is no longer both.
+
+Four instructions refuse a policy-bearing authority outright rather than
+silently ignoring its limits, because none of them can enforce a policy. With
+the rank rule above they are now defence in depth against a bounded authority
+arriving by some other route, rather than a live gate:
+`AddAuthority` (a bounded authority may not grant), `Authorize`/deferred
+execution (no action engine), `CreateSession` (a session carries its own action
+buffer, which may be empty, so a bounded Admin could otherwise mint an unbounded
+key) and `TransferOwnership` (the new owner is written `policy_len = 0`, so a
+bounded Owner could otherwise shed its own bound).
+
+The rule those four implement is worth stating directly, because it is narrower
+than "a bounded authority may only Execute": **a bounded authority may narrow
+the authority set but never widen it.** `RemoveAuthority` and `RevokeSession`
+deliberately carry no policy check — a bounded Admin can still revoke a Delegate
+or kill a session, which takes power away and can never grant it. It cannot then
+recreate what it removed.
+
+## Execute signer forwarding
+
+An inner instruction sometimes legitimately needs a signature that is not the
+vault's — a co-signer, a market account, a second party to a swap. `Execute`
+used to supply those by forwarding *every* signer on the outer transaction into
+every inner CPI, which included the fee payer.
+
+That was H-3. A session restricted to a 0.001 SOL lifetime allowance could move
+2 SOL out of the paymaster's own wallet: nothing was bypassed, because the action
+limits watch the vault and the paymaster is a different account whose signature
+`try_collect_fee` requires anyway.
+
+Forwarding is now **opt-in per account**, requested by bit 7 of that account's
+index byte inside the compact instruction, and bounded by two rules the bit
+cannot override:
+
+- **The fee payer is never forwarded**, compared by key so listing it twice
+  cannot launder it.
+- **A session may forward only its own session key.**
+
+The second rule exists because the bit is not consent on the session path. For a
+Secp256r1 authority the compact bytes sit inside the signed payload, so setting
+the bit is something the passkey holder signs. A session key signs no payload —
+it is the adversary in this finding — and would simply set the bit itself.
+
+The vault signs unconditionally and needs no flag: the program signs for it with
+seeds rather than forwarding anything.
+
+A paymaster is therefore no longer required to audit inner instructions for
+conscription of its own signature. It should still parse the transaction for the
+usual reasons — it is paying for it.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant App
     participant LK as LazorKit Program
-    participant Auth as Authority PDA<br/>(role = Spender)
+    participant Auth as Authority PDA
     participant V as Vault PDA
 
     App->>LK: Execute { compact_ixs, auth_payload }
-    LK->>Auth: read header (role, type, counter)
-    Note over LK,Auth: Execute does NOT gate on role —<br/>any role (Owner/Admin/Spender) can call it
+    LK->>Auth: read header (rank, type, counter, policy_len)
+    Note over LK,Auth: Execute does not gate on rank.<br/>It gates on the policy, if there is one.
     LK->>LK: authenticate (Ed25519 signer check OR Secp256r1 odometer + WebAuthn)
-    LK->>V: invoke_signed (CPI with vault seeds)
+    LK->>LK: snapshot vault + token authorities (policy present)
+    LK->>V: invoke_signed (vault seeds; flagged signers forwarded)
     V-->>App: inner ix executes
+    LK->>LK: evaluate post-actions against the deltas
     LK-->>App: ok ✓
 
     rect rgb(255,235,235)
-    Note over App,LK: If the same Spender called AddAuthority instead:
+    Note over App,LK: The same Delegate calling AddAuthority:
     App->>LK: AddAuthority { ... }
-    LK->>Auth: read role
-    LK-->>App: PermissionDenied (3002) ✗<br/>(manage.rs:210 — only Owner/Admin can add)
+    LK->>Auth: read rank
+    LK-->>App: PermissionDenied (3002) ✗
     end
 ```
-
-This is why "**Execute is the universal action**" is a useful mental model:
-every role can execute, but everything *else* requires Admin or Owner.
 
 ## Instruction reference
 
@@ -450,8 +587,8 @@ Wallet operations:
 | Disc | Instruction | Description |
 |---|---|---|
 | 0 | CreateWallet | Create wallet + vault + first authority |
-| 1 | AddAuthority | Add Ed25519/Secp256r1 authority |
-| 2 | RemoveAuthority | Remove authority; refund rent |
+| 1 | AddAuthority | Add Ed25519/Secp256r1 authority at a rank, with an optional policy. **Wallet account writable** |
+| 2 | RemoveAuthority | Remove authority; refund rent. **Wallet account writable** |
 | 3 | TransferOwnership | Atomic owner swap |
 | 4 | Execute | Execute compact instructions via CPI with vault signing |
 | 5 | CreateSession | Create session key (optional actions) |
@@ -469,8 +606,19 @@ Protocol admin instructions (admin-only):
 | 12 | RegisterPayer |
 | 13 | WithdrawTreasury |
 | 14 | InitializeTreasuryShard |
+| 15 | ProposeProtocolAdmin |
+| 16 | AcceptProtocolAdmin |
 
-All admin instructions verify both `admin.is_signer()` **and** `config_pda.owner() == program_id` (H2 fix).
+Admin rotation is two-step: the sitting admin proposes, the named successor
+accepts. Proposing `Pubkey::default()` cancels. A single-step write would make a
+typo permanent, and there is nothing above the admin to undo it.
+
+Every admin instruction pins the ProtocolConfig **address** as well as its owner
+and header, via `ProtocolConfig::load`, before reading any field for an
+authorization decision.
+
+The entrypoint refuses to run at all if the program is deployed at an address
+other than the one compiled into it.
 
 ## Compact instruction format
 
@@ -479,16 +627,37 @@ Binary format packed into the Execute instruction data:
 ```
 [num_instructions(1)]       // Max 16
 For each:
-  [program_id_index(1)]     // Index into tx accounts
+  [program_id_index(1)]     // Index into tx accounts, bit 7 clear
   [num_accounts(1)]
-  [account_indexes(N)]      // 1 byte each
+  [account_indexes(N)]      // 1 byte each: bits 0-6 index, bit 7 forward-signer
   [data_len(2 LE)]
   [instruction_data(M)]
 ```
 
-Indexes replace 32-byte pubkeys with 1-byte references, shrinking Secp256r1 Execute tx size from ~1.2KB (uncompressed) to ~800 bytes.
+Indexes replace 32-byte pubkeys with 1-byte references, shrinking a Secp256r1
+Execute from ~1.2KB uncompressed to ~800 bytes.
 
-**Accounts hash** — for Secp256r1 Execute the signed payload includes `SHA256(concat of all pubkeys referenced by compact indexes)`. Prevents account-reordering attacks (e.g., swapping recipient addresses).
+**Bit 7 of an account index byte** requests that this account's signer privilege
+be forwarded into the inner CPI. That caps the addressable account list at 128;
+an index of 128 or above is rejected rather than masked, because masking would
+silently point the instruction at a different account. See
+[Execute signer forwarding](#execute-signer-forwarding) for the rules that bound
+the request.
+
+**Accounts hash** — for Secp256r1 the signed payload includes a SHA-256 over
+every account each compact instruction references: for each instruction in order,
+the program id account then each referenced account, each contributing its
+32-byte key **followed by one flags byte** (bit 0 `is_signer`, bit 1
+`is_writable`). The forward-signer bit is masked off before lookup, so requesting
+forwarding does not change the digest.
+
+The flags byte is M-4. Binding only the keys left the privileges for the relayer
+to choose: it could take an account the passkey holder had approved as read-only
+and submit it writable. Golden vectors for the exact encoding live in
+[`test-vectors/accounts-hash.json`](../test-vectors/accounts-hash.json), asserted
+against by the program and by both SDKs — a divergence there fails as a unit test
+naming the mismatched byte, rather than as an unexplained `InvalidMessageHash`
+against a validator.
 
 ## Parallel execution
 
@@ -551,7 +720,7 @@ sequenceDiagram
 Properties:
 - Odometer counter provides a unique PDA seed per authorization.
 - Expiry window: 10–9,000 slots (~4 s to ~1 h).
-- Only Secp256r1 Owner/Admin can authorize (not Ed25519, not Spender).
+- Only a Secp256r1 Owner or Admin can authorize — not Ed25519, not a Delegate.
 - If TX2 never runs, the original payer can reclaim rent after expiry via `ReclaimDeferred`.
 
 ## Compute cost
@@ -568,4 +737,18 @@ See `docs/` for benchmarks. Top-line numbers on hot paths:
 
 All paths fit comfortably within Solana's 200K CU default budget.
 
-The precompile alone is a 2,300 CU floor on Secp256r1 Execute; the remaining ~7,100 CU covers account validation, odometer counter, challenge hashing, clientDataJSON validation, accounts_hash computation, inner CPI, and state bookkeeping.
+The precompile alone is a 2,300 CU floor on Secp256r1 Execute; the remaining
+~7,100 CU covers account validation, odometer counter, challenge hashing,
+clientDataJSON validation, accounts_hash computation, inner CPI, and state
+bookkeeping.
+
+Two v2 changes move these numbers and are not yet reflected above:
+
+- An authority carrying a policy now runs the same pre/post action engine a
+  session does, including the mint-agnostic token snapshot. Expect a
+  policy-bearing Execute to cost roughly what a session Execute costs on top of
+  its own authentication, rather than the unbounded-authority number.
+- The accounts hash preimage grew one byte per referenced account. Negligible
+  against the syscall itself, but the numbers above predate it.
+
+Re-benchmark before quoting these in anything that matters.
