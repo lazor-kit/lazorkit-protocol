@@ -38,14 +38,26 @@ export const ERROR_NAMES: Record<number, string> = {
   3030: 'SessionVaultOwnerChanged',
   3031: 'SessionVaultDataLenChanged',
   3032: 'SessionTokenAuthorityChanged',
+  // Rank and policy (v2)
+  3033: 'DelegateRequiresPolicy',
+  3034: 'PolicyBearingAuthorityCannotDelegate',
+  3035: 'PolicyRankMismatch',
   // Protocol errors (Commercial binary only — foundation binary never emits these)
   4001: 'ProtocolAlreadyInitialized',
   4002: 'InvalidProtocolAdmin',
-  4003: 'ProtocolDisabled',
   4004: 'InvalidIntegratorRecord',
   4005: 'InsufficientFeeBalance',
   4006: 'IntegratorAlreadyRegistered',
   4007: 'InvalidTreasury',
+  4008: 'FeeAccountsRequired',
+  4009: 'ProtocolNotInitialized',
+  4010: 'InvalidTreasuryShard',
+  4011: 'InvalidFeeRecord',
+  4013: 'AccountVersionMismatch',
+  4014: 'FeeExceedsMaximum',
+  4015: 'UnauthorizedInitializer',
+  4016: 'NoPendingAdmin',
+  4017: 'WrongProgramAddress',
 };
 
 /**
