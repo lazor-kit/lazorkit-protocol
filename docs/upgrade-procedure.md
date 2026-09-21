@@ -189,9 +189,27 @@ Two things the deploy command hides:
   the path from the feature account; the steps and a devnet run are in
   [`mainnet-deploy-checklist.md`](mainnet-deploy-checklist.md#multisig-rehearsal).
 
+### 7. Publish the SDKs, and move the dist-tags last
+
+A protocol major moves both SDKs to a new npm major. The trap is the dist-tag:
+`latest` must keep resolving to the line that talks to the cluster as it is
+**right now**, or every integrator who runs `npm install` before the upgrade
+lands gets a package that derives the wrong addresses.
+
+```bash
+# before the upgrade: publish the new major off latest
+npm publish --tag next                    # in sdk/sdk-legacy and sdk/sdk-kit
+# after the upgrade is confirmed on mainnet:
+npm dist-tag add @lazorkit/sdk-legacy@<new> latest
+```
+
+Check both package.json versions against the protocol they speak before
+publishing anything. `0.3.1` shipped numbered as a patch of the v1 line while
+its source already spoke v2 — the mistake this step exists to prevent.
+
 Until `InitializeProtocol` runs, clients must still send the fee suffix on
 discriminators 0/4/7 — the program requires it and skips the charge. SDK builds
-from `431d40b` on always do.
+from `@lazorkit/sdk-legacy` 1.0.0 on always do.
 
 ---
 

@@ -15,8 +15,12 @@ A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r
 ## Install
 
 ```bash
-npm install @lazorkit/sdk-legacy
+npm install @lazorkit/sdk-legacy          # 0.3.x — protocol v1, what mainnet runs today
+npm install @lazorkit/sdk-legacy@next     # 1.x — protocol v2, this repo
 ```
+
+This README documents protocol v2. Mainnet still runs v1 until the upgrade
+lands, and the two are not wire-compatible.
 
 Program IDs (chosen at compile time via `--features mainnet` / `--features devnet`):
 

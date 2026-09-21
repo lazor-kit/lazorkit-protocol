@@ -124,7 +124,7 @@ sequenceDiagram
 ## Prerequisites
 
 ```bash
-npm install @lazorkit/sdk-legacy @solana/web3.js
+npm install @lazorkit/sdk-legacy@next @solana/web3.js   # 1.x speaks protocol v2
 ```
 
 You need:
@@ -148,6 +148,8 @@ The pattern below is adapted from [tests-sdk/tests/09-permissions.test.ts:47-83]
 import {
   LazorKitClient,
   ROLE_SPENDER,
+  Actions,
+  serializeActions,
   ed25519,
   secp256r1,
 } from '@lazorkit/sdk-legacy';
@@ -197,6 +199,9 @@ const { instructions, newAuthorityPda: spenderAuthPda } =
       rpId: passkey.rpId,                           // e.g. 'app.example.com'
     },
     role: ROLE_SPENDER,
+    // A Delegate must carry a policy in v2 — the client refuses one without it,
+    // and so does the program (3033 DelegateRequiresPolicy).
+    policy: serializeActions([Actions.solMaxPerTx(500_000_000n)]),
   });
 
 await sendAndConfirmTransaction(

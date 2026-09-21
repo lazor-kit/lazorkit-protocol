@@ -1,6 +1,6 @@
 # @lazorkit/sdk-legacy
 
-TypeScript SDK for the LazorKit smart wallet on Solana. Built for `@solana/web3.js` v1. (A `@lazorkit/sdk` for web3.js v2 is coming soon.)
+TypeScript SDK for the LazorKit smart wallet on Solana. Built for `@solana/web3.js` v1. For `@solana/kit` there is [`@lazorkit/sdk`](../sdk-kit/).
 
 Provides:
 
@@ -12,9 +12,34 @@ Provides:
 
 ## Install
 
+Which version you need depends on which protocol version your target cluster runs.
+
+| npm | protocol | where it works |
+|---|---|---|
+| `0.3.x` (`latest`) | v1 | mainnet today |
+| `1.x` (`next`) | v2 | devnet staging today, mainnet after the upgrade |
+
+The two are not wire-compatible: v2 namespaces every PDA seed, so the same
+`userSeed` derives a different wallet address. See
+[CHANGELOG.md](../../CHANGELOG.md) for the full list, and
+[`docs/migration-ui-flow.md`](../../docs/migration-ui-flow.md) for moving an
+existing user's funds across.
+
 ```bash
-npm install @lazorkit/sdk-legacy
+npm install @lazorkit/sdk-legacy          # 0.3.x, talks to mainnet today
+npm install @lazorkit/sdk-legacy@next     # 1.x, protocol v2
 ```
+
+### Browser and React Native
+
+The SDK needs no Node polyfills. Hashing and randomness come from
+`@noble/hashes` and `Buffer` is imported from the `buffer` package, so a
+browser or React Native bundle resolves everything on its own. Verified by
+bundling for the browser and comparing every output byte for byte against Node.
+
+On React Native, add `react-native-get-random-values` once at app start. That
+is the same polyfill `@solana/web3.js` already needs for `Keypair.generate()`,
+and the SDK uses `crypto.getRandomValues` for treasury shard selection.
 
 ## Quick start
 

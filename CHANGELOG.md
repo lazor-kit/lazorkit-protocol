@@ -6,6 +6,67 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## SDK 1.0.0 — protocol v2 (`@lazorkit/sdk-legacy` 1.0.0, `@lazorkit/sdk` 1.0.0-rc.1)
+
+The SDKs move to a new major because they speak protocol v2, which is not wire
+compatible with the program running on mainnet today. **`latest` on npm stays
+on `0.3.2` until the mainnet upgrade lands**; 1.x publishes under the `next`
+dist-tag.
+
+```bash
+npm install @lazorkit/sdk-legacy          # 0.3.x — protocol v1, mainnet today
+npm install @lazorkit/sdk-legacy@next     # 1.x   — protocol v2
+npm install @lazorkit/sdk@next            # kit SDK, release candidate
+```
+
+### Breaking — what an app has to change
+
+- **Every address moves.** PDA seeds are namespaced `lk2:`, so the same
+  `userSeed` derives a different wallet and vault. No error is raised: a cached
+  address, a deposit address shown to a user, or a wallet row in your own
+  database all keep pointing at the v1 account, which no v2 code path reads.
+  Move funds with `migrateV1Wallet` rather than re-creating.
+- **`createSession` with no actions now throws** unless you pass
+  `unrestricted: true`. An empty action buffer is an unbounded session key, so
+  it has to be named.
+- **`addAuthority` with `role: ROLE_SPENDER` requires a non-empty `policy`**,
+  and a policy is refused on any other rank (3033, 3035 on-chain). Creating an
+  Owner requires `allowOwner: true`.
+- **All-zero key material is rejected** at the client before anything is
+  signed.
+- **`AddAuthority` and `RemoveAuthority` need the wallet account writable.**
+  Only matters if you build those instructions by hand.
+- **The signed bytes changed**: the accounts hash binds each account's
+  signer/writable flags, account index bytes use bit 7 as a forward-signer
+  request (so indices cap at 127), and the `AddAuthority` payload always
+  carries `[policy_len u16][policy]`.
+- **`buildCompactLayout` takes the payer as a third argument.**
+- **Serialized `DeferredPayload`s carry a version and are refused across the
+  boundary.** Drain anything in flight before upgrading both sides.
+- **The protocol fee suffix is mandatory** on `CreateWallet`, `Execute` and
+  `ExecuteDeferred` — the program answers 4008 without it even when it charges
+  nothing. The high-level client handles this; direct callers of the low-level
+  builders must pass the fee accounts.
+- **The low-level `create*Ix` builders are no longer exported from the package
+  root.** Use the client, or import them from the module path.
+
+An app that only uses `LazorKitClient` and holds no cached addresses is
+typically a handful of call-site changes: the session and authority guards
+above, plus the migration of existing wallets.
+
+## SDK 0.3.2 — `@lazorkit/sdk-legacy`, protocol v1
+
+- Dropped the Node `crypto` dependency (`@noble/hashes` and the `buffer`
+  package instead), so the SDK bundles for browsers and React Native with no
+  polyfill configuration. No behaviour change: outputs are byte-identical to
+  0.3.1 and the type declarations are unchanged. Cut from the v1 line, so
+  0.3.x keeps talking to the program that is live on mainnet.
+
+## SDK 0.3.1 — `@lazorkit/sdk-legacy`, protocol v1
+
+- Republished 0.3.0 under a new number after that version was tombstoned on
+  npm. This is the line mainnet integrators run today.
+
 ## Protocol v2 (program 2.0.0)
 
 An audit of `program/src` produced 26 findings, five proven by reproduction

@@ -2,18 +2,24 @@
 
 LazorKit Protocol TypeScript SDK for **Solana Kit** (`@solana/kit`, formerly `@solana/web3.js` v2).
 
-This is the modern, tree-shakable, functional-API counterpart to [`@lazorkit/sdk-legacy`](../sdk-legacy/) (which targets `@solana/web3.js` v1). Both SDKs talk to the same on-chain program and produce equivalent transactions; pick the one that matches your stack.
+This is the tree-shakable counterpart to [`@lazorkit/sdk-legacy`](../sdk-legacy/) (which targets `@solana/web3.js` v1). Both ship a high-level `LazorKit` class (aliased `LazorKitClient`) over the same on-chain protocol and produce equivalent transactions, so pick the one that matches your Solana client library.
 
 ## Status
 
-**Alpha.** Currently in active development as part of the SDK consolidation effort. APIs may change before the first stable `0.1.0`. The `0.1.0-alpha.x` line is published for early integrators who want to build against `@solana/kit`.
+**Release candidate** (`1.0.0-rc.1`), published under the `next` dist-tag. The
+surface is complete for protocol v2 and covered by unit tests plus a
+local-validator suite, with three public paths still untested
+(`revokeSession`, the one-shot `transferOwnership`, `signWithSecp256r1`) and no
+`migrateV1Wallet` equivalent yet — use `@lazorkit/sdk-legacy` for migrating a
+v1 wallet.
 
-For production use today, prefer [`@lazorkit/sdk-legacy`](https://www.npmjs.com/package/@lazorkit/sdk-legacy).
+**For mainnet today, use [`@lazorkit/sdk-legacy`](https://www.npmjs.com/package/@lazorkit/sdk-legacy) 0.3.x.** Mainnet
+still runs protocol v1, and everything in this package targets v2.
 
 ## Install
 
 ```bash
-npm install @lazorkit/sdk @solana/kit
+npm install @lazorkit/sdk@next @solana/kit
 ```
 
 `@solana/kit` is declared as a peer dependency — install whichever version your app uses.
@@ -26,7 +32,7 @@ import {
   findWalletPda,
 } from '@lazorkit/sdk';
 
-const userSeed = new Uint8Array(/* 16-byte cred-id digest, etc. */);
+const userSeed = new Uint8Array(32); // exactly 32 bytes, e.g. a random seed you store per user
 const [walletPda, bump] = await findWalletPda(userSeed, PROGRAM_ID_DEVNET);
 console.log(walletPda); // address(...)
 ```
@@ -69,8 +75,9 @@ sdk-kit/
 
 ## Relationship to `@lazorkit/sdk-legacy`
 
-- **Same on-chain protocol.** Identical instruction encoding, identical PDA seeds, identical account layouts. PDA derivation is byte-identical (verified in `tests/pdas.test.ts`).
-- **Different runtime API.** `sdk-legacy` exposes a `LazorKitClient` class that takes a v1 `Connection`; `sdk-kit` is functional, taking RPC primitives from `@solana/kit`.
+- **Same on-chain protocol, same major.** Identical instruction encoding, identical PDA seeds, identical account layouts, byte-identical PDA derivation (verified in `tests/pdas.test.ts`) — against `sdk-legacy` **1.x**. The `0.3.x` line that `latest` still serves speaks protocol v1 and shares none of it.
+- **Different runtime API.** Both expose a high-level class, but `sdk-legacy` takes a v1 `Connection` while this one takes RPC primitives from `@solana/kit`, and the module-level helpers here are tree-shakable.
+- **Smaller surface.** No `parseActions`, `findAuthoritiesByWallet`, `getRecoveryStatus`, SPL/ATA helpers, or `migrateV1Wallet` yet; reach for `sdk-legacy` when you need those.
 - **No flavor branching.** Both SDKs are oblivious to whether the on-chain binary is the commercial (`lazorkit-protocol`) or foundation (`program-v2`) build — they always produce commercial-shape transactions and rely on the on-chain logic to gracefully tolerate or charge fees as appropriate. See the docstring in `src/constants.ts`.
 
 ## License
