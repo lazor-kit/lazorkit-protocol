@@ -20,18 +20,30 @@ what it does and why.
 On app load, check whether the connected identity still has a v1 wallet.
 
 ```ts
-import { LazorKitClient, deriveV1Accounts, readV1WalletState } from '@lazorkit/sdk-legacy';
+import { LazorKitClient, readV1WalletState } from '@lazorkit/sdk-legacy';
 
 const client = new LazorKitClient(connection); // programId inferred from RPC
 
 // `ownerIdSeed` is the passkey credential-id hash, or the Ed25519 public-key bytes.
-const v1 = deriveV1Accounts(userSeed, ownerIdSeed, client.programId);
-const state = await readV1WalletState(connection, v1);
+const found = await client.findV1WalletsByOwner(ownerIdSeed, 'secp256r1');
+const owned = found.filter((w) => w.role === 0); // only an Owner may migrate
 
-if (state) {
+if (owned.length) {
+  const state = await readV1WalletState(connection, owned[0]);
   // Show a "Migrate your wallet" banner.
 }
 ```
+
+**Do not ask the app for a `userSeed`.** Wallets created through
+`@lazorkit/wallet` used a random 32-byte seed that lived in browser storage, so
+a user who cleared it, or who is on another device, cannot derive their own
+wallet any more. The chain can: the authority account holds the owner's key
+material and the wallet it belongs to, which is what `findV1WalletsByOwner`
+scans for. `MigrateWallet` itself never needs the seed — it takes the v1 wallet
+as an account and derives the vault from that key.
+
+If the app *does* still hold the seed, `deriveV1Accounts(userSeed, ownerIdSeed,
+programId)` gets to the same place without an RPC scan.
 
 `state` is `null` when there is nothing to migrate (already migrated, or never a
 v1 user). Otherwise it carries the owner's auth type, rank, and the vault's SOL.
@@ -55,7 +67,10 @@ One call assembles everything: create the v2 wallet if needed, create the
 destination token accounts, and the MigrateWallet step.
 
 ```ts
-const plan = await client.migrateV1Wallet({ payer, userSeed, owner });
+const plan = await client.migrateV1Wallet({ payer, owner, v1Wallet: owned[0].wallet });
+
+// `plan.destinationUserSeed` is set when this call had to mint a v2 wallet.
+// Persist it if you want to keep deriving that wallet without a scan.
 ```
 
 `plan.setupInstructions` creates the v2 wallet and the destination ATAs — send

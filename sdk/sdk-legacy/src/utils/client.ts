@@ -24,10 +24,14 @@ import {
 } from './pdas';
 import {
   deriveV1Accounts,
+  findV1AuthorityPda,
+  findV1VaultPda,
+  findV1WalletsByOwner,
   readV1WalletState,
   enumerateV1VaultTokens,
   type V1Accounts,
   type V1VaultToken,
+  type V1WalletRecord,
 } from './v1';
 import {
   getAssociatedTokenAddress,
@@ -2258,6 +2262,17 @@ export class LazorKitClient {
   }
 
   /**
+   * Find this owner's v1 wallets on-chain, with no user seed — the path for a
+   * user whose browser storage is gone. See {@link findV1WalletsByOwner}.
+   */
+  async findV1WalletsByOwner(
+    ownerIdSeed: Uint8Array,
+    authorityType: 'ed25519' | 'secp256r1' = 'secp256r1',
+  ): Promise<V1WalletRecord[]> {
+    return findV1WalletsByOwner(this.connection, ownerIdSeed, this.programId, authorityType);
+  }
+
+  /**
    * Orchestrate a full v1 -> v2 migration for one wallet, authorized by the v1
    * owner. Returns the setup instructions (create the v2 wallet if it does not
    * exist yet, and a destination token account for every token being moved) and
@@ -2269,16 +2284,37 @@ export class LazorKitClient {
    *    response to `migrate.finalize`, and send the returned
    *    `[precompile, migrate]`.
    *
+   * Identify the v1 wallet in one of two ways:
+   *  - `userSeed`, when the app still has the seed the wallet was created with.
+   *  - `v1Wallet`, the wallet address itself, for a user whose seed is gone.
+   *    Find it with {@link findV1WalletsByOwner}. The program never needs the
+   *    seed: it takes the v1 wallet as an account and derives the vault from
+   *    that key.
+   *
+   * The v2 destination follows: with `userSeed` it is that seed's wallet;
+   * otherwise an existing v2 wallet for this owner is reused, and if there is
+   * none a fresh one is created from `destinationUserSeed` or a random seed.
+   * The seed used is returned as `destinationUserSeed` when one was generated,
+   * so the caller can persist it.
+   *
    * Only an Owner-rank v1 authority may migrate; throws otherwise, or if no v1
-   * wallet exists for `userSeed`. All vault-owned token accounts (SPL Token and
-   * Token-2022) are enumerated and migrated in one call.
+   * wallet is found. All vault-owned token accounts (SPL Token and Token-2022)
+   * are enumerated and migrated in one call.
    */
   async migrateV1Wallet(params: {
     payer: PublicKey;
-    userSeed: Uint8Array;
     owner: CreateWalletOwner;
+    /** The seed the v1 wallet was created with, when the app still has it. */
+    userSeed?: Uint8Array;
+    /** The v1 wallet address, for a wallet whose seed is gone. */
+    v1Wallet?: PublicKey;
+    /** Seed for the v2 wallet, when one has to be created. Defaults to random. */
+    destinationUserSeed?: Uint8Array;
   }): Promise<{
     v1: V1Accounts;
+    destinationWallet: PublicKey;
+    /** Set only when this call had to mint a fresh seed — persist it. */
+    destinationUserSeed?: Uint8Array;
     v2Vault: PublicKey;
     tokens: V1VaultToken[];
     setupInstructions: TransactionInstruction[];
@@ -2292,14 +2328,57 @@ export class LazorKitClient {
   }> {
     const { authType, credentialOrPubkey } = resolveOwnerFields(params.owner);
 
-    const v1 = deriveV1Accounts(params.userSeed, credentialOrPubkey, this.programId);
+    let v1: V1Accounts;
+    if (params.v1Wallet) {
+      const [vault] = findV1VaultPda(params.v1Wallet, this.programId);
+      const [authority] = findV1AuthorityPda(
+        params.v1Wallet,
+        credentialOrPubkey,
+        this.programId,
+      );
+      v1 = { wallet: params.v1Wallet, vault, authority };
+    } else if (params.userSeed) {
+      v1 = deriveV1Accounts(params.userSeed, credentialOrPubkey, this.programId);
+    } else {
+      throw new Error(
+        'migrateV1Wallet needs either userSeed or v1Wallet. A wallet created by ' +
+          '@lazorkit/wallet used a random seed that lived in browser storage, so for ' +
+          'most users the seed is gone: find the wallet with findV1WalletsByOwner and ' +
+          'pass v1Wallet instead.',
+      );
+    }
+
     const state = await readV1WalletState(this.connection, v1);
-    if (!state) throw new Error('no v1 wallet exists for this userSeed');
+    if (!state) {
+      throw new Error(
+        params.v1Wallet
+          ? `no v1 wallet at ${v1.wallet.toBase58()} for this owner`
+          : 'no v1 wallet exists for this userSeed',
+      );
+    }
     if (state.ownerRole !== ROLE_OWNER) {
       throw new Error('MigrateWallet requires an Owner-rank v1 authority');
     }
 
-    const [v2Wallet] = this.findWallet(params.userSeed);
+    // Where the funds land. With a seed, the destination is that seed's wallet.
+    // Without one, reuse whatever v2 wallet this owner already has, and only
+    // mint a seed when there is nothing to reuse.
+    let v2Wallet: PublicKey;
+    let destinationUserSeed: Uint8Array | undefined;
+    if (params.userSeed) {
+      [v2Wallet] = this.findWallet(params.userSeed);
+    } else {
+      const existing = await this.findWalletsByAuthority(
+        credentialOrPubkey,
+        authType === AUTH_TYPE_ED25519 ? 'ed25519' : 'secp256r1',
+      );
+      if (existing.length > 0) {
+        v2Wallet = existing[0].walletPda;
+      } else {
+        destinationUserSeed = params.destinationUserSeed ?? randomBytes(32);
+        [v2Wallet] = this.findWallet(destinationUserSeed);
+      }
+    }
     const [v2Vault] = this.findVault(v2Wallet);
 
     const tokens = await enumerateV1VaultTokens(this.connection, v1.vault);
@@ -2307,12 +2386,16 @@ export class LazorKitClient {
     const setupInstructions: TransactionInstruction[] = [];
     const v2WalletInfo = await this.connection.getAccountInfo(v2Wallet);
     if (!v2WalletInfo) {
+      // Creating the v2 wallet needs a seed even though migrating does not.
+      destinationUserSeed =
+        params.userSeed ?? destinationUserSeed ?? params.destinationUserSeed ?? randomBytes(32);
       const created = await this.createWallet({
         payer: params.payer,
-        userSeed: params.userSeed,
+        userSeed: destinationUserSeed,
         owner: params.owner,
       });
       setupInstructions.push(...created.instructions);
+      if (params.userSeed) destinationUserSeed = undefined; // caller already has it
     }
     const migrateTokens = tokens.map((t) => {
       const destAta = getAssociatedTokenAddress(t.mint, v2Vault, t.tokenProgram);
@@ -2357,6 +2440,8 @@ export class LazorKitClient {
       });
       return {
         v1,
+        destinationWallet: v2Wallet,
+        destinationUserSeed,
         v2Vault,
         tokens,
         setupInstructions,
@@ -2397,6 +2482,8 @@ export class LazorKitClient {
     };
     return {
       v1,
+      destinationWallet: v2Wallet,
+      destinationUserSeed,
       v2Vault,
       tokens,
       setupInstructions,

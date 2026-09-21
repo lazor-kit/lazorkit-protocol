@@ -62,6 +62,73 @@ export interface V1Accounts {
   authority: PublicKey;
 }
 
+/** One v1 wallet found by scanning, plus the rank of the authority that found it. */
+export interface V1WalletRecord extends V1Accounts {
+  /** Role enum: 0=Owner, 1=Admin, 2=Spender. Only an Owner may migrate. */
+  role: number;
+  /** Authority type enum: 0=Ed25519, 1=Secp256r1 */
+  authorityType: number;
+}
+
+/**
+ * Find a user's v1 wallets from their key material alone, with no user seed.
+ *
+ * The seed matters: wallets created through `@lazorkit/wallet` used a random
+ * 32-byte `userSeed` that lived in the browser's storage, so a user who
+ * cleared it, or moved to another device, cannot derive their own v1 wallet
+ * any more. The chain can still answer the question, because the authority
+ * account stores both the owner's key material and the wallet it belongs to.
+ *
+ * `MigrateWallet` never needs the seed either — it takes the v1 wallet as an
+ * account and derives the vault from that key. So this scan plus
+ * `migrateV1Wallet({ v1Wallet })` is the path for a user whose storage is gone.
+ *
+ * The scan is a `getProgramAccounts` call with two memcmp filters, which some
+ * RPC providers rate-limit or refuse; use an endpoint that allows it.
+ */
+export async function findV1WalletsByOwner(
+  connection: Connection,
+  /** Credential-id hash for a passkey, or the 32 public-key bytes for Ed25519. */
+  ownerIdSeed: Uint8Array,
+  programId: PublicKey,
+  authorityType: 'ed25519' | 'secp256r1' = 'secp256r1',
+): Promise<V1WalletRecord[]> {
+  if (ownerIdSeed.length !== 32) {
+    throw new Error(`ownerIdSeed must be 32 bytes, got ${ownerIdSeed.length}`);
+  }
+  // v1 authority layout, byte-compatible with v2 apart from the discriminator:
+  //   0 discriminator (2) | 1 authority_type | 2 role | 16..48 wallet | 48.. key material
+  const discAndType = Buffer.from([
+    V1_DISC_AUTHORITY,
+    authorityType === 'ed25519' ? 0 : 1,
+  ]);
+  const accounts = await connection.getProgramAccounts(programId, {
+    encoding: 'base64',
+    filters: [
+      { memcmp: { offset: 0, bytes: discAndType.toString('base64'), encoding: 'base64' } },
+      {
+        memcmp: {
+          offset: 48,
+          bytes: Buffer.from(ownerIdSeed).toString('base64'),
+          encoding: 'base64',
+        },
+      },
+    ],
+  });
+
+  return accounts.map(({ pubkey: authority, account }) => {
+    const wallet = new PublicKey(account.data.slice(16, 48));
+    const [vault] = findV1VaultPda(wallet, programId);
+    return {
+      wallet,
+      vault,
+      authority,
+      role: account.data[2],
+      authorityType: account.data[1],
+    };
+  });
+}
+
 /**
  * All three v1 PDAs for one wallet, from the user seed and the owner's id seed
  * (the credential-id hash for a passkey, the Ed25519 public-key bytes for an

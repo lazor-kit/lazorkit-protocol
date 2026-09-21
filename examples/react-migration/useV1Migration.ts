@@ -15,7 +15,6 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Connection, PublicKey, Keypair, TransactionInstruction } from '@solana/web3.js';
 import {
   LazorKitClient,
-  deriveV1Accounts,
   readV1WalletState,
   enumerateV1VaultTokens,
   type CreateWalletOwner,
@@ -40,7 +39,6 @@ export interface UseV1MigrationParams {
   client: LazorKitClient;
   payer: PublicKey;
   /** The same inputs that derive the wallet: the user seed and owner descriptor. */
-  userSeed: Uint8Array;
   owner: CreateWalletOwner;
   /**
    * Sign (payer + any extra signers) and send. Return the confirmed signature.
@@ -60,14 +58,25 @@ export interface UseV1MigrationParams {
 }
 
 export function useV1Migration(params: UseV1MigrationParams) {
-  const { client, payer, userSeed, owner, sendTransaction, ed25519Signer, getAssertion, assertionOptions } = params;
+  const { client, payer, owner, sendTransaction, ed25519Signer, getAssertion, assertionOptions } = params;
   const [status, setStatus] = useState<MigrationStatus>({ phase: 'detecting' });
+  const [v1Wallet, setV1Wallet] = useState<PublicKey | null>(null);
 
   const detect = useCallback(async () => {
     setStatus({ phase: 'detecting' });
     try {
       const ownerIdSeed = owner.type === 'ed25519' ? owner.publicKey.toBytes() : owner.credentialIdHash;
-      const v1 = deriveV1Accounts(userSeed, ownerIdSeed, client.programId);
+      // Find the wallet on-chain rather than deriving it: the random userSeed
+      // it was created with lived in browser storage and is usually gone.
+      const owned = (
+        await client.findV1WalletsByOwner(ownerIdSeed, owner.type === 'ed25519' ? 'ed25519' : 'secp256r1')
+      ).filter((w) => w.role === 0);
+      if (!owned.length) {
+        setStatus({ phase: 'none' });
+        return;
+      }
+      const v1 = owned[0];
+      setV1Wallet(v1.wallet);
       const state = await readV1WalletState(client.connection, v1);
       if (!state) {
         setStatus({ phase: 'none' });
@@ -88,7 +97,7 @@ export function useV1Migration(params: UseV1MigrationParams) {
     } catch (e) {
       setStatus({ phase: 'error', message: e instanceof Error ? e.message : String(e) });
     }
-  }, [client, userSeed, owner]);
+  }, [client, owner]);
 
   useEffect(() => {
     void detect();
@@ -97,7 +106,8 @@ export function useV1Migration(params: UseV1MigrationParams) {
   const migrate = useCallback(async () => {
     const assets = status.phase === 'ready' ? status.assets : undefined;
     try {
-      const plan = await client.migrateV1Wallet({ payer, userSeed, owner });
+      if (!v1Wallet) throw new Error('no v1 wallet detected yet');
+      const plan = await client.migrateV1Wallet({ payer, owner, v1Wallet });
 
       // 1. Create the v2 wallet + destination ATAs (payer signs). For a vault
       //    with many token accounts this may need splitting across transactions.
@@ -123,7 +133,7 @@ export function useV1Migration(params: UseV1MigrationParams) {
     } catch (e) {
       setStatus({ phase: 'error', message: e instanceof Error ? e.message : String(e), assets });
     }
-  }, [client, payer, userSeed, owner, sendTransaction, ed25519Signer, getAssertion, assertionOptions, status]);
+  }, [client, payer, owner, v1Wallet, sendTransaction, ed25519Signer, getAssertion, assertionOptions, status]);
 
   return { status, migrate, refresh: detect };
 }

@@ -6,6 +6,26 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## SDK 1.1.0 — `@lazorkit/sdk-legacy`, migrate without the user seed
+
+Wallets created through `@lazorkit/wallet` used a random 32-byte `userSeed`
+that lived in the browser's storage. `migrateV1Wallet` required it, so a user
+who cleared storage or moved to another device had no way to migrate — their
+funds would have been stranded in the v1 vault after the upgrade.
+
+The program never needed the seed: `MigrateWallet` takes the v1 wallet as an
+account and derives the vault from that key. Only the SDK helper insisted.
+
+- **`findV1WalletsByOwner(connection, ownerIdSeed, programId, authorityType)`**
+  and the client method of the same name find a user's v1 wallets from their
+  passkey alone, by scanning v1 authority accounts (needs an RPC that allows
+  `getProgramAccounts` with memcmp filters).
+- **`migrateV1Wallet` now takes `v1Wallet`** as an alternative to `userSeed`,
+  and returns `destinationWallet` plus, when it had to mint one,
+  `destinationUserSeed`. Passing neither throws and says which to use.
+- With no `userSeed`, the destination is whatever v2 wallet the owner already
+  has; a fresh one is created only when there is none.
+
 ## SDK 1.0.0 — protocol v2 (`@lazorkit/sdk-legacy` 1.0.0, `@lazorkit/sdk` 1.0.0-rc.1)
 
 The SDKs move to a new major because they speak protocol v2, which is not wire
