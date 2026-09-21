@@ -180,6 +180,38 @@ V1_SO=<v1-mainnet.so> V2_SO=<v2-mainnet.so> \
 Result: `Data Length 135704 → 148352` in place, vault SOL + token migrated to the
 v2 destination, v1 wallet + authority closed. `REHEARSAL PASSED`.
 
+## Seedless migration rehearsal
+
+Run on devnet on 2026-09-21, end to end on a throwaway program id: the live v1
+binary deployed, a real v1 wallet created through the published
+`@lazorkit/sdk-legacy` 0.3.2, upgraded in place to v2, then migrated with
+`@lazorkit/sdk-legacy` 1.1.0 **without the user seed**.
+
+Scripts: [`scripts/rehearse/migrate-v1-create.cjs`](../scripts/rehearse/migrate-v1-create.cjs)
+then [`scripts/rehearse/migrate-v1-seedless.cjs`](../scripts/rehearse/migrate-v1-seedless.cjs).
+
+Why it matters: wallets created through `@lazorkit/wallet` used
+`userSeed: randomBytes(32)` kept in browser storage. A returning user usually
+does not have it, and `MigrateWallet` is the only way their funds move after
+the upgrade. The program never needed the seed — it takes the v1 wallet as an
+account — but the SDK did, until 1.1.0.
+
+| check | result |
+|---|---|
+| scan finds the v1 wallet from the owner key alone | `3Fq7dKcy…`, Owner rank |
+| plan targets the same v1 accounts, finds the token account | ok |
+| a fresh v2 seed is minted, different from the original | ok |
+| v1 wallet and authority closed | ok |
+| v1 vault emptied | 0 lamports |
+| SOL landed in the v2 vault | 0.05 SOL |
+| tokens landed in the v2 vault | 1,234,000 of 1,234,000 |
+
+Signatures: setup `UQebUTLC…`, migrate `4PYXoAco…`.
+
+Still unproven: the same flow driven by a **passkey** owner through the portal.
+That path needs a real authenticator, so it has to be exercised by hand in
+`app/migrate` (lazor-kit/lazor-kit#88) before the mainnet window.
+
 ## Multisig rehearsal
 
 Run on devnet on 2026-09-11 with
