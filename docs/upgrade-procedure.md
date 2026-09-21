@@ -191,7 +191,7 @@ Two things the deploy command hides:
 
 Until `InitializeProtocol` runs, clients must still send the fee suffix on
 discriminators 0/4/7 — the program requires it and skips the charge. SDK builds
-from `93bfb6b` on always do.
+from `431d40b` on always do.
 
 ---
 

@@ -114,9 +114,9 @@ is the human process: keys, comms, and the decisions in section 2.
       size and the slot advanced. Record the upgrade signature.
 - [ ] C-1 is now dead. Verify: a `CreateWallet`/`Execute` no longer reverts when
       fees are unconfigured.
-- [ ] Until `InitializeProtocol` runs, SDK builds before `93bfb6b` omit the fee
+- [ ] Until `InitializeProtocol` runs, SDK builds before `431d40b` omit the fee
       suffix and fail every `CreateWallet`/`Execute` with 4008. Ship the
-      integrator an SDK at or after `93bfb6b` before the window, or run
+      integrator an SDK at or after `431d40b` before the window, or run
       `InitializeProtocol` (plus a treasury shard if fees will be on) inside it.
 
 ## 6. Post-deploy
@@ -181,7 +181,7 @@ mainnet, 137904 bytes growing to 149296.
 | `write-buffer` v2, `set-buffer-authority` to the vault | ok |
 | top-level `ExtendProgram`, 11392 bytes, signed by a payer that is not the authority | ok |
 | vault transaction `[Upgrade]`: propose, 2 approvals, execute | 137904 → 149296 bytes, on-chain == local build |
-| SDK from `93bfb6b`: `createWallet` on the upgraded, uninitialised program | lands; the old suffix-less shape fails 4008 |
+| SDK from `431d40b`: `createWallet` on the upgraded, uninitialised program | lands; the old suffix-less shape fails 4008 |
 | vault transaction `[SetAuthority → key]` | authority back on the key |
 
 What it found, and what carries to mainnet:
