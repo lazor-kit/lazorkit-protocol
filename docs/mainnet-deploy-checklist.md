@@ -77,6 +77,12 @@ is the human process: keys, comms, and the decisions in section 2.
 - [ ] Record the toolchain and both SHA-256 hashes in the deploy log. Builds are
       only trustworthy if reproducible — a second machine must produce the same
       hash.
+      ⚠️ **The toolchain moved after the 2026-09-11 rehearsal.** That run used
+      solana-cli 4.0.3 with platform-tools v1.53; the machine now has
+      `cargo-build-sbf` 4.1.0, which pulls platform-tools v1.54. A rebuild will
+      not reproduce the `e22f176d…` hash in the rehearsal table below, and that
+      is expected rather than alarming. Record the new hash, and rehearse again
+      with the binary you are actually going to deploy.
 - [ ] Confirm the v2 binary's compiled id is the vanity id (M-2 pins it; a wrong
       id refuses to run).
 
@@ -96,6 +102,11 @@ is the human process: keys, comms, and the decisions in section 2.
 - [ ] Confirm the upgrade-authority keypair is loaded and is the on-chain upgrade
       authority (`solana program show` reports it).
 - [ ] Announce the maintenance window to users/integrator.
+- [ ] **Publish the v2 SDKs under the `next` dist-tag before the window**, so
+      integrators can build and test against staging first:
+      `npm publish --tag next` in `sdk/sdk-legacy` (1.0.0) and `sdk/sdk-kit`
+      (1.0.0-rc.1). Leave `latest` on 0.3.2 — it is what mainnet speaks until
+      the upgrade lands.
 
 ## 5. The upgrade
 
@@ -122,6 +133,9 @@ is the human process: keys, comms, and the decisions in section 2.
 
 ## 6. Post-deploy
 
+- [ ] Move the npm dist-tag now that mainnet speaks v2:
+      `npm dist-tag add @lazorkit/sdk-legacy@1.0.0 latest`. Until this runs, a
+      plain `npm install` still hands integrators the v1 line.
 - [ ] Publish the migration flow (SDK `createMigrateWalletIx`) / UI.
 - [ ] Migrate the high-value active wallets first — value is concentrated, so a
       handful covers most of it.
@@ -143,7 +157,7 @@ Latest run: **2026-09-11**, against the program that is actually live.
 | binary | size | SHA-256 — **re-record at deploy** |
 |---|---|---|
 | v1 — the live mainnet program, `solana program dump` (last deployed slot 416478802) | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
-| v2 — `6f4cb94`, `--features mainnet`, solana-cli 4.0.3 | 149296 | `e22f176df7b3a597e6abc16bec3fcfc1bb6301cf8d72c9cc7e34c30969546752` |
+| v2 — `6f4cb94`, `--features mainnet`, solana-cli 4.0.3 + platform-tools v1.53 (**superseded**: the toolchain is now 4.1.0 / v1.54) | 149296 | `e22f176df7b3a597e6abc16bec3fcfc1bb6301cf8d72c9cc7e34c30969546752` |
 
 > Use the **dump** as v1, not a rebuild. The first rehearsal used a rebuild of
 > `bdeffd7` (135704 bytes, `7bab37e2…`), which is not byte-identical to what is
