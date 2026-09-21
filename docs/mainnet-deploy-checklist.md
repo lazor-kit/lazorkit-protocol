@@ -180,6 +180,56 @@ V1_SO=<v1-mainnet.so> V2_SO=<v2-mainnet.so> \
 Result: `Data Length 135704 → 148352` in place, vault SOL + token migrated to the
 v2 destination, v1 wallet + authority closed. `REHEARSAL PASSED`.
 
+## Paymaster (Kora)
+
+Read out of `lazor-kit/kora` on 2026-09-21. The relayer sponsors every user
+transaction, so it is on the critical path, and none of this is visible from
+the protocol repo.
+
+**The one gate that blocks a v2 transaction is the program allowlist.**
+`validation.allowed_programs` is checked by exact pubkey against every
+instruction. The config committed in that repo lists System, SPL Token, ATA,
+Address Lookup Table and ComputeBudget — neither the LazorKit program nor
+`Secp256r1SigVerify1111111111111111111111111`. The live relayer must already
+list both, since v1 passkey transactions work today, but **the file serving
+production is not in the repo, so confirm it by hand** and make sure the
+mainnet config lists the vanity id.
+
+Everything else about the v2 shape passes: Kora never parses LazorKit
+instruction data, so the four-account fee suffix, the forward-signer bit inside
+the compact payload, the precompile sitting immediately before the program
+instruction, and a prepended ComputeBudget instruction are all invisible to it.
+It never reorders or inserts instructions.
+
+- [ ] Confirm the live `allowed_programs` contains the mainnet program id and
+      the Secp256r1 precompile, on the mainnet deployment specifically.
+- [ ] Kora simulates every transaction before signing and rejects on
+      simulation failure, folding the simulated inner instructions into the
+      accounts its validator walks. So a v2 transaction that would fail 4008
+      never gets sponsored — good — but it also means the protocol fee CPI is
+      inside `max_allowed_lamports`. Set that cap high enough for the fee plus
+      the one-time `FeeRecord` rent (~0.00111 SOL per payer), or sponsored
+      transactions start failing on the cap.
+- [ ] Decide the fee-payer custody. The sample signer config is
+      `type = "memory"` reading a base58 key out of an environment variable.
+      Turnkey and Vault handlers already exist in that repo; a mainnet fee
+      payer holding real SOL should use one.
+- [ ] Turn on authentication. The sample `[kora.auth]` is empty, which means
+      anyone who finds the endpoint can spend the fee payer. At minimum an API
+      key, preferably the HMAC scheme.
+- [ ] Move the metrics port off the RPC port. When they match, the metrics
+      handler is mounted outside the auth layer.
+- [ ] Fund and monitor the sponsor. Rent dominates: creating a wallet costs the
+      payer about 0.00285 SOL (Wallet 8 bytes + Authority 145 bytes; the vault
+      PDA is not funded at creation), against a protocol fee measured in
+      thousandths of that. Ten thousand new wallets in a day is roughly 29 SOL,
+      of which the protocol fee is under 2 per cent.
+- [ ] Point the client at a mainnet endpoint. There is none in the client
+      repo: the React package defaults to an onrender host and React Native to
+      `kora.devnet.lazorkit.com`.
+- [ ] Rotate the Kora API key committed in the public client repo
+      (lazor-kit/lazor-kit#89). Removing it from HEAD does not rotate it.
+
 ## Seedless migration rehearsal
 
 Run on devnet on 2026-09-21, end to end on a throwaway program id: the live v1
