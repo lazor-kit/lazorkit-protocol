@@ -65,6 +65,10 @@ describe('findV1WalletsByOwner', () => {
     expect(found[0].wallet.toBase58()).toBe(wallet.toBase58());
     expect(found[0].vault.toBase58()).toBe(findV1VaultPda(wallet, PROGRAM_ID)[0].toBase58());
     expect(found[0].role).toBe(0);
+    // The owner key comes out of the record, because a returning user's browser
+    // cannot produce it: signing in with a passkey yields an assertion, and an
+    // assertion carries no public key.
+    expect(Buffer.from(found[0].ownerPubkey)).toEqual(Buffer.from(CREDENTIAL));
 
     // The filters are the contract with the RPC: a v1 authority (disc 2) whose
     // key material at offset 48 is this owner's.

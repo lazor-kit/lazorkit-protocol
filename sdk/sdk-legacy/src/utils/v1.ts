@@ -68,6 +68,16 @@ export interface V1WalletRecord extends V1Accounts {
   role: number;
   /** Authority type enum: 0=Ed25519, 1=Secp256r1 */
   authorityType: number;
+  /**
+   * The owner's key as stored on-chain: 33 compressed bytes for a passkey, the
+   * 32 public-key bytes for Ed25519.
+   *
+   * Read it from here rather than from a WebAuthn response. Signing in with an
+   * existing passkey returns an assertion, and an assertion carries no public
+   * key — only registration does. The chain is the only place a returning user's
+   * key can be found.
+   */
+  ownerPubkey: Uint8Array;
 }
 
 /**
@@ -119,12 +129,20 @@ export async function findV1WalletsByOwner(
   return accounts.map(({ pubkey: authority, account }) => {
     const wallet = new PublicKey(account.data.slice(16, 48));
     const [vault] = findV1VaultPda(wallet, programId);
+    // Key material starts after the 48-byte header: an Ed25519 authority keeps
+    // its 32-byte public key there, a Secp256r1 one keeps the credential-id
+    // hash and then 33 compressed bytes.
+    const ownerPubkey =
+      account.data[1] === 1
+        ? new Uint8Array(account.data.slice(80, 113))
+        : new Uint8Array(account.data.slice(48, 80));
     return {
       wallet,
       vault,
       authority,
       role: account.data[2],
       authorityType: account.data[1],
+      ownerPubkey,
     };
   });
 }
