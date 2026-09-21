@@ -203,6 +203,10 @@ It never reorders or inserts instructions.
 
 - [ ] Confirm the live `allowed_programs` contains the mainnet program id and
       the Secp256r1 precompile, on the mainnet deployment specifically.
+      **Confirmed the hard way on devnet (2026-09-21):** a migration through the
+      UI was refused with `Program 3AN3Wn… is not in the allowed list`. This is
+      not theoretical, and it fails at the relayer, before anything reaches the
+      chain.
 - [ ] Kora simulates every transaction before signing and rejects on
       simulation failure, folding the simulated inner instructions into the
       accounts its validator walks. So a v2 transaction that would fail 4008
@@ -270,11 +274,25 @@ v1 accounts closed, 0.04 SOL and 777,000 tokens landed in the v2 vault, and
 **replaying the same signature was rejected**. Signatures: setup `4r5sycFE…`,
 migrate `5b1CcN1P…`.
 
-What that does NOT cover is the browser plumbing: a real authenticator prompt
-and the portal round-trip that carries the assertion back. That part is
-protocol-free — the portal signs an opaque 32-byte challenge — but it still
-has to be walked by hand once in `app/migrate` (lazor-kit/lazor-kit#88) before
-the mainnet window.
+**Then walked by hand, in a browser, with a real passkey** (2026-09-21): the
+maintainer signed in with an existing Touch ID passkey through
+`portal.lazor.sh`, the page found the v1 wallet from that passkey alone, and
+one approval moved 0.04 SOL and 500,000 tokens into the v2 vault
+`G99ePt8w…`. The v1 wallet `Dmhp9WyD…` and its vault are closed. The passkey
+prompted exactly once, for the migration itself.
+
+Two defects only that run could have found, both fixed:
+
+- **A returning user has no public key.** Signing in with an existing passkey
+  returns an assertion, and an assertion carries no public key — only
+  registration does. The page passed the empty value to `migrateV1Wallet` and
+  failed on a byte count. Every returning user would have hit it. The key is
+  read from the authority account now, and `findV1WalletsByOwner` returns it
+  (sdk-legacy 1.1.1).
+- **The paymaster refused to sponsor.** Kora answered *"Program 3AN3Wn… is not
+  in the allowed list"*, live confirmation of the allowlist gate below. See the
+  paymaster section: the mainnet config must list the vanity program id and the
+  Secp256r1 precompile, or every sponsored transaction fails this way.
 
 ## Multisig rehearsal
 
