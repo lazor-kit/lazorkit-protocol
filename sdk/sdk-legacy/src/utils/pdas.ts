@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import { PublicKey } from '@solana/web3.js';
 
 // PDA derivation helpers. Every function takes the program ID explicitly —

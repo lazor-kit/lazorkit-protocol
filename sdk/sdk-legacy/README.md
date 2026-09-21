@@ -16,6 +16,17 @@ Provides:
 npm install @lazorkit/sdk-legacy
 ```
 
+### Browser and React Native
+
+The SDK needs no Node polyfills. Hashing and randomness come from
+`@noble/hashes` and `Buffer` is imported from the `buffer` package, so a
+browser or React Native bundle resolves everything on its own. Verified by
+bundling for the browser and comparing every output byte for byte against Node.
+
+On React Native, add `react-native-get-random-values` once at app start. That
+is the same polyfill `@solana/web3.js` already needs for `Keypair.generate()`,
+and the SDK uses `crypto.getRandomValues` for treasury shard selection.
+
 ## Quick start
 
 ```typescript

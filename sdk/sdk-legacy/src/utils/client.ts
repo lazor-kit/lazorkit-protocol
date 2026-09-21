@@ -1,3 +1,4 @@
+import { Buffer } from 'buffer';
 import {
   Connection,
   PublicKey,
@@ -5,7 +6,7 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   TransactionInstruction,
 } from '@solana/web3.js';
-import { randomFillSync } from 'crypto';
+import { randomBytes } from '@noble/hashes/utils';
 import { PROGRAM_ID_DEVNET, PROGRAM_ID_MAINNET } from '../constants';
 import {
   findWalletPda,
@@ -443,8 +444,7 @@ export class LazorKitClient {
     // CSPRNG to avoid predictable shard selection. Not a direct exploit vector
     // (fees still land in a valid shard), but violates "no Math.random in
     // crypto-adjacent code" hygiene.
-    const randBuf = new Uint8Array(4);
-    randomFillSync(randBuf);
+    const randBuf = randomBytes(4);
     const randU32 = (randBuf[0] | (randBuf[1] << 8) | (randBuf[2] << 16) | (randBuf[3] << 24)) >>> 0;
     const shardId = randU32 % config.numShards;
     const [treasuryShardPda] = this.findTreasuryShard(shardId);
