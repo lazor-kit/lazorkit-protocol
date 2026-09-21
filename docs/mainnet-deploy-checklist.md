@@ -208,9 +208,23 @@ account — but the SDK did, until 1.1.0.
 
 Signatures: setup `UQebUTLC…`, migrate `4PYXoAco…`.
 
-Still unproven: the same flow driven by a **passkey** owner through the portal.
-That path needs a real authenticator, so it has to be exercised by hand in
-`app/migrate` (lazor-kit/lazor-kit#88) before the mainnet window.
+The passkey path was then rehearsed the same way, with a synthetic
+authenticator — a P-256 key the script holds, producing the authenticatorData,
+clientDataJSON and signature a real one would, so the program and SDK cannot
+tell the difference
+([`migrate-v1-create-passkey.cjs`](../scripts/rehearse/migrate-v1-create-passkey.cjs),
+[`migrate-v1-seedless-passkey.cjs`](../scripts/rehearse/migrate-v1-seedless-passkey.cjs)).
+All eleven checks passed: the scan found the wallet from the credential hash
+alone and reported a Secp256r1 Owner, the plan took the Secp256r1 branch, the
+v1 accounts closed, 0.04 SOL and 777,000 tokens landed in the v2 vault, and
+**replaying the same signature was rejected**. Signatures: setup `4r5sycFE…`,
+migrate `5b1CcN1P…`.
+
+What that does NOT cover is the browser plumbing: a real authenticator prompt
+and the portal round-trip that carries the assertion back. That part is
+protocol-free — the portal signs an opaque 32-byte challenge — but it still
+has to be walked by hand once in `app/migrate` (lazor-kit/lazor-kit#88) before
+the mainnet window.
 
 ## Multisig rehearsal
 
