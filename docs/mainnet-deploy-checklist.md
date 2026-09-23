@@ -447,6 +447,89 @@ PROPOSE_ONLY=1 RPC_URL=<mainnet-rpc> PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipv
 `MULTISIG` is the multisig account the Squads app shows, not its vault. The
 proposer must be a member with the Initiate permission.
 
+## Handing the upgrade authority to the Squads vault
+
+The multisig already exists on mainnet. Read on 2026-09-23 straight off the
+chain, and re-checkable at any time with `preflight` below:
+
+| | |
+|---|---|
+| multisig | `Gb65EbMEZocGgotuTzJEfogfT3GPr8t8fARWYfMCHaw9` |
+| vault (index 0) | `E11nkm79w4rEnB2ZNmTKhWKF4BH5z34LUkTw2L4LBjKa` — 0.001 SOL |
+| threshold | **3 of 5**, every member holds Initiate+Vote+Execute |
+| config authority | none — only the members can change it |
+| time lock | 0 |
+| transactions so far | **0 — it has never executed anything** |
+
+```bash
+DEPS=$(mktemp -d) && npm i --prefix "$DEPS" @sqds/multisig@2.1.4 @solana/web3.js@1.98.4
+
+RPC_URL=https://api.mainnet-beta.solana.com \
+PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+MULTISIG=Gb65EbMEZocGgotuTzJEfogfT3GPr8t8fARWYfMCHaw9 \
+NODE_PATH="$DEPS/node_modules" node scripts/rehearse/squads-upgrade.cjs preflight
+```
+
+It signs nothing and needs no keypair: it prints PASS/FAIL for each invariant
+and, while the authority is still a single key, the handover command with the
+addresses filled in.
+
+**The current authority is not a member.** `4fZM6RPR…` holds the program today
+and appears nowhere in that member list, so the handover is a one-way door for
+that key: afterwards nothing it can sign touches the program. Whoever holds
+three of the five member keys holds the program.
+
+Order of operations — none of it is reversible once step 4 lands:
+
+- [ ] **1. Reach three signers.** Confirm, by name, who holds each of the five
+      member keys and that three of them can sign on the day. A 3-of-5 where
+      only two keys are reachable is an immutable program with extra steps.
+- [ ] **2. Prove the multisig works, on mainnet, before it owns anything.** The
+      transaction index is 0: these five keys have never approved anything
+      together. `dry-run` proposes a memo signed by the vault — the cheapest
+      transaction that still exercises propose → 3 approvals → execute:
+      ```bash
+      PROPOSE_ONLY=1 RPC_URL=https://api.mainnet-beta.solana.com \
+      PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+      MULTISIG=Gb65EbMEZocGgotuTzJEfogfT3GPr8t8fARWYfMCHaw9 \
+      PAYER=<payer.json> PROPOSER=<your-member-key.json> \
+      NODE_PATH="$DEPS/node_modules" node scripts/rehearse/squads-upgrade.cjs dry-run
+      # approve with two more members and execute, in the Squads app
+      ```
+      Then `preflight` again: `proven` flips to PASS. Do not skip this — the
+      alternative is that the first time these keys are used together is also
+      the first time a live program depends on it.
+- [ ] **3. Rehearse a full upgrade against a throwaway program**, with the same
+      shape as mainnet, as recorded under [Multisig rehearsal](#multisig-rehearsal).
+      That rehearsal used a 2-of-3 with all keys local; repeat the
+      propose-then-approve-in-the-app half with this 3-of-5 so the operator has
+      seen the actual UI path once.
+- [ ] **4. Hand over.** Run with the current authority key:
+      ```bash
+      solana program set-upgrade-authority LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+        --new-upgrade-authority E11nkm79w4rEnB2ZNmTKhWKF4BH5z34LUkTw2L4LBjKa \
+        --skip-new-upgrade-authority-signer-check \
+        --upgrade-authority <current-authority-keypair> \
+        --url https://api.mainnet-beta.solana.com
+      ```
+      The flag waives only the new authority's signature, which a PDA cannot
+      give. It does **not** check that the address is a vault, or that anyone
+      controls it — a typo here is a permanently frozen program. Paste the vault
+      address from `preflight`, never by hand.
+- [ ] **5. Verify.** `preflight` again: `program authority` must read
+      `already the vault`, and `solana program show <program id>` must agree.
+- [ ] **6. Note what stops working.** `solana program deploy` against this
+      program, `set-upgrade-authority`, and `--final` all now require a vault
+      transaction with three approvals. Buffers must have their authority set to
+      the vault **before** the proposal
+      (`solana program set-buffer-authority <buffer> --new-buffer-authority <vault>`)
+      — the script refuses to propose otherwise, and it now also refuses when
+      the program's authority is not yet the vault.
+
+`InitializeProtocol` is unaffected: it is authorized by the compiled-in
+`PROTOCOL_INIT_AUTHORITY`, not by the upgrade authority, so the order of the
+handover against the v2 deploy window is free.
+
 ## Deploy log template
 
 ```
