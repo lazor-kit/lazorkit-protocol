@@ -38,13 +38,23 @@ is the human process: keys, comms, and the decisions in section 2.
       - ⚠️ **This is the same key as the program upgrade authority.** One key can
         both upgrade the program and initialise the protocol. Decide whether that
         concentration is acceptable or whether they should be split before deploy.
-- [ ] **Custody confirmed**: the upgrade authority
-      (`4fZM6RPR…`) and the ProtocolConfig admin (`24fx48GA…`) are both keys you
-      can sign with, ideally in cold storage / multisig.
-- [ ] **When the upgrade authority moves to the Squads vault.** Recommended:
-      after v2 has run cleanly for a few days, so a rollback during the window
-      needs one key, not a quorum. Both the transfer and a vault-approved
-      upgrade are rehearsed — see [Multisig rehearsal](#multisig-rehearsal).
+- [x] **Custody confirmed**: the upgrade authority (`4fZM6RPR…`) and the
+      ProtocolConfig admin (`24fx48GA…`) are both keys the maintainer can sign
+      with. Neither is in cold storage or a multisig today. The upgrade
+      authority has a path out — the Squads vault, below — and the admin does
+      not until v2's two-step propose/accept exists on chain, which is one more
+      reason not to leave it long after the upgrade.
+- [x] **When the upgrade authority moves to the Squads vault: after the v2
+      upgrade** (decided 2026-09-23). A rollback inside the upgrade window then
+      needs one key rather than a quorum, and the multisig's first real duty is
+      not also the riskiest hour of the year. Quorum is reachable — the
+      maintainer holds four of the five member keys, against a threshold of
+      three. Everything else for that day is prepared: see
+      [Handing the upgrade authority to the Squads vault](#handing-the-upgrade-authority-to-the-squads-vault)
+      for the multisig's on-chain state, `preflight`, the `dry-run` that proves
+      the members can approve and execute, and the handover command. Both the
+      transfer and a vault-approved upgrade are rehearsed on devnet — see
+      [Multisig rehearsal](#multisig-rehearsal).
       Once transferred, every upgrade needs the vault. The extend before it
       never does: the loader's `ExtendProgram` takes no authority account at
       all, and the runtime refuses the upgradeable loader via CPI for anything
@@ -485,11 +495,15 @@ and appears nowhere in that member list, so the handover is a one-way door for
 that key: afterwards nothing it can sign touches the program. Whoever holds
 three of the five member keys holds the program.
 
-Order of operations — none of it is reversible once step 4 lands:
+This happens **after** the v2 upgrade has landed and settled (section 1). Order
+of operations — step 4 ends the old key's control of the program for good:
 
-- [ ] **1. Reach three signers.** Confirm, by name, who holds each of the five
-      member keys and that three of them can sign on the day. A 3-of-5 where
-      only two keys are reachable is an immutable program with extra steps.
+- [x] **1. Reach three signers.** The maintainer holds four of the five member
+      keys, against a threshold of three, so quorum does not depend on anyone
+      else being available. Worth re-confirming on the day that four are still
+      reachable and none is on a device that cannot sign (the script cannot
+      drive a hardware wallet — a Ledger member proposes and approves in the
+      Squads app instead).
 - [ ] **2. Prove the multisig works, on mainnet, before it owns anything.** The
       transaction index is 0: these five keys have never approved anything
       together. `dry-run` proposes a memo signed by the vault — the cheapest
