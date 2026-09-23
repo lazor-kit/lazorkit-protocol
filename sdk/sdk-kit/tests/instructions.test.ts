@@ -34,6 +34,7 @@ import {
   createExecuteIx,
   createInitializeProtocolIx,
   createInitializeTreasuryShardIx,
+  createMigrateWalletIx,
   createReclaimDeferredIx,
   createRegisterPayerIx,
   createRemoveAuthorityIx,
@@ -53,6 +54,7 @@ import {
   createExecuteIx as legacyExecuteIx,
   createInitializeProtocolIx as legacyInitProtocolIx,
   createInitializeTreasuryShardIx as legacyInitTreasuryShardIx,
+  createMigrateWalletIx as legacyMigrateWalletIx,
   createReclaimDeferredIx as legacyReclaimDeferredIx,
   createRegisterPayerIx as legacyRegisterPayerIx,
   createRemoveAuthorityIx as legacyRemoveAuthorityIx,
@@ -77,6 +79,8 @@ const TREASURY = 'Vote111111111111111111111111111111111111111';
 const PROTOCOL_CONFIG = 'BPFLoaderUpgradeab1e11111111111111111111111';
 const FEE_RECORD = 'BPFLoader2111111111111111111111111111111111';
 const TREASURY_SHARD = 'BPFLoader1111111111111111111111111111111111';
+const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
 const KIT = (s: string): Address => address(s);
 const PK = (s: string): PublicKey => new PublicKey(s);
@@ -620,5 +624,80 @@ describe('createInitializeTreasuryShard', () => {
       programId: PK(PROGRAM),
     });
     expectIxParity(kit, legacy);
+  });
+});
+
+// MigrateWallet is the one instruction whose parity matters after the upgrade
+// rather than before it: a v1 user gets exactly one signature to move, and both
+// SDKs must spend it on the same bytes.
+describe('createMigrateWallet', () => {
+  const tokens = [
+    { sourceAta: SESSION, destAta: REFUND, tokenProgram: TOKEN_PROGRAM },
+    { sourceAta: ADMIN, destAta: TREASURY, tokenProgram: TOKEN_2022_PROGRAM },
+  ];
+
+  it('byte-parity with a passkey payload and a mix of token programs', () => {
+    const kit = createMigrateWalletIx({
+      payer: KIT(PAYER),
+      v1Wallet: KIT(WALLET),
+      v1Authority: KIT(AUTHORITY),
+      v1Vault: KIT(VAULT),
+      destination: KIT(NEW_AUTHORITY),
+      refundDestination: KIT(PAYER),
+      authSigner: KIT(PAYER),
+      authSignerIsSigner: false,
+      tokens: tokens.map((t) => ({
+        sourceAta: KIT(t.sourceAta),
+        destAta: KIT(t.destAta),
+        tokenProgram: KIT(t.tokenProgram),
+      })),
+      authPayload,
+      programId: KIT(PROGRAM),
+    });
+    const legacy = legacyMigrateWalletIx({
+      payer: PK(PAYER),
+      v1Wallet: PK(WALLET),
+      v1Authority: PK(AUTHORITY),
+      v1Vault: PK(VAULT),
+      destination: PK(NEW_AUTHORITY),
+      refundDestination: PK(PAYER),
+      authSigner: PK(PAYER),
+      authSignerIsSigner: false,
+      tokens: tokens.map((t) => ({
+        sourceAta: PK(t.sourceAta),
+        destAta: PK(t.destAta),
+        tokenProgram: PK(t.tokenProgram),
+      })),
+      authPayload,
+      programId: PK(PROGRAM),
+    });
+    expectIxParity(kit, legacy);
+  });
+
+  it('byte-parity for an Ed25519 owner signing in the transaction', () => {
+    const kit = createMigrateWalletIx({
+      payer: KIT(PAYER),
+      v1Wallet: KIT(WALLET),
+      v1Authority: KIT(AUTHORITY),
+      v1Vault: KIT(VAULT),
+      destination: KIT(NEW_AUTHORITY),
+      refundDestination: KIT(REFUND),
+      authSigner: KIT(ADMIN),
+      authSignerIsSigner: true,
+      programId: KIT(PROGRAM),
+    });
+    const legacy = legacyMigrateWalletIx({
+      payer: PK(PAYER),
+      v1Wallet: PK(WALLET),
+      v1Authority: PK(AUTHORITY),
+      v1Vault: PK(VAULT),
+      destination: PK(NEW_AUTHORITY),
+      refundDestination: PK(REFUND),
+      authSigner: PK(ADMIN),
+      authSignerIsSigner: true,
+      programId: PK(PROGRAM),
+    });
+    expectIxParity(kit, legacy);
+    expect(Array.from(kit.data!)).toEqual([17, 0]);
   });
 });

@@ -31,5 +31,11 @@ export {
   DISC_REGISTER_PAYER,
   DISC_WITHDRAW_TREASURY,
   DISC_INITIALIZE_TREASURY_SHARD,
+  DISC_MIGRATE_WALLET,
   SECP256R1_PROGRAM_ADDRESS,
 } from './builders.js';
+
+// The migration builder is the one exception to the rule above: `MigrateWallet`
+// carries no fee suffix to get wrong, and an integrator moving users off v1 may
+// need to assemble the instruction themselves (batching, a custom relayer).
+export { createMigrateWalletIx, type MigrateTokenPair } from './builders.js';

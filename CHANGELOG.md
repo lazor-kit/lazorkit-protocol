@@ -6,6 +6,36 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## SDK — `@lazorkit/sdk` 1.0.0-rc.2, migration in the kit SDK
+
+The kit SDK had no way to move a user off v1, so an app built on it had nothing
+to offer its users on upgrade day. It now carries the same migration surface as
+`sdk-legacy`, and `tests/instructions.test.ts` asserts the `MigrateWallet`
+instruction it builds is byte-identical to the legacy one.
+
+- **`findV1WalletsByOwner`** (module function and client method) finds a user's
+  v1 wallets from their key material alone — no `userSeed`, which most users no
+  longer have. Each record carries `ownerPubkey`, read off the authority
+  account, because a WebAuthn assertion carries no public key.
+- **`migrateV1Wallet`** takes `v1Wallet` or `userSeed` and returns the setup
+  instructions, the migrate instruction (or a challenge plus `finalize` for a
+  passkey), and `destinationUserSeed` when it had to mint one.
+- **New modules**: `src/v1.ts` (v1 seeds, discriminators, PDA derivation,
+  `readV1WalletState`, `enumerateV1VaultTokens`) and `src/spl.ts` (ATA
+  derivation, idempotent ATA creation, token-account decoding).
+- `LazorKitRpc` now also requires `GetMultipleAccountsApi` and
+  `GetTokenAccountsByOwnerApi`. `createSolanaRpc(url)` already satisfies both.
+
+## SDK 1.1.1 — `@lazorkit/sdk-legacy`, the owner key comes back from the scan
+
+`migrateV1Wallet` needs the owner's 33-byte compressed key, and a returning
+user's browser cannot produce it: signing in with an existing passkey returns an
+assertion, and an assertion carries no public key — only registration does. Live
+testing hit exactly this, as `compressedPubkey must be exactly 33 bytes, got 0`.
+
+`findV1WalletsByOwner` now returns `ownerPubkey` from the authority account it
+has already fetched (33 compressed bytes for a passkey, 32 for Ed25519).
+
 ## SDK 1.1.0 — `@lazorkit/sdk-legacy`, migrate without the user seed
 
 Wallets created through `@lazorkit/wallet` used a random 32-byte `userSeed`

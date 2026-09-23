@@ -1,8 +1,11 @@
 # Migration UI flow
 
-How an app walks a v1 user through migrating to v2. The SDK
-(`@lazorkit/sdk-legacy`) does the orchestration; this is the sequence and the
-UX around it. All of it is client-side and user-authorized — no operator ever
+How an app walks a v1 user through migrating to v2. The SDK does the
+orchestration; this is the sequence and the UX around it. Snippets below use
+`@lazorkit/sdk-legacy` (web3.js v1); `@lazorkit/sdk` (Solana Kit) exposes the
+same `findV1WalletsByOwner` / `readV1WalletState` / `enumerateV1VaultTokens` /
+`migrateV1Wallet` surface, with addresses instead of `PublicKey`s and async PDA
+helpers. All of it is client-side and user-authorized — no operator ever
 moves a user's funds.
 
 After the v2 upgrade lands, a v1 wallet's normal operations revert (v2 rejects

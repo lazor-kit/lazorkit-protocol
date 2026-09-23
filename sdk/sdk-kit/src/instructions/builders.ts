@@ -42,6 +42,7 @@ export const DISC_WITHDRAW_TREASURY = 13;
 export const DISC_INITIALIZE_TREASURY_SHARD = 14;
 export const DISC_PROPOSE_PROTOCOL_ADMIN = 15;
 export const DISC_ACCEPT_PROTOCOL_ADMIN = 16;
+export const DISC_MIGRATE_WALLET = 17;
 
 // ─── Authority types ─────────────────────────────────────────────────
 export const AUTH_TYPE_ED25519 = 0;
@@ -690,5 +691,75 @@ export function createInitializeTreasuryShardIx(params: {
       meta(SYSVAR_RENT_ADDRESS, RO),
     ],
     data: new Uint8Array([DISC_INITIALIZE_TREASURY_SHARD, params.shardId]),
+  };
+}
+
+// ─── MigrateWallet ──────────────────────────────────────────────────
+
+export interface MigrateTokenPair {
+  /** The v1 vault's token account for this mint. */
+  sourceAta: Address;
+  /** A token account owned by `destination` for the same mint. */
+  destAta: Address;
+  /** The token program that owns both accounts (SPL Token or Token-2022). Each
+   *  token carries its own, so one call can migrate a mix of the two. */
+  tokenProgram: Address;
+}
+
+/**
+ * Build a `MigrateWallet` instruction — sweep a v1 wallet's SOL and SPL tokens
+ * to `destination` and close the v1 PDAs, authorized by the v1 authority.
+ *
+ * Derive the v1 accounts with `../v1.js` and the v2 `destination` (its vault)
+ * with `../pdas.js`. `authSigner` is the Ed25519 owner key for an Ed25519
+ * authority, or the fee payer as a non-signer placeholder for a passkey (whose
+ * approval rides in `authPayload` + a preceding Secp256r1 precompile
+ * instruction).
+ *
+ * The passkey's `authPayload` must be signed over the migration intent — build
+ * it with the usual `prepareSecp256r1`/`finalizeSecp256r1` flow using
+ * `DISC_MIGRATE_WALLET` and a `signedPayload` of
+ * `concat(destination, v1Wallet, [tokens.length], refundDestination, ...sourceAtas)`,
+ * and place the returned precompile instruction immediately before this one.
+ * Binding wallet, token count, refund destination and each source account keeps
+ * a relayer from replaying the signature against another wallet, dropping
+ * tokens to strand them, or redirecting the reclaimed rent.
+ */
+export function createMigrateWalletIx(params: {
+  payer: Address;
+  v1Wallet: Address;
+  v1Authority: Address;
+  v1Vault: Address;
+  destination: Address;
+  refundDestination: Address;
+  authSigner: Address;
+  authSignerIsSigner: boolean;
+  tokens?: ReadonlyArray<MigrateTokenPair>;
+  authPayload?: Uint8Array;
+  programId: Address;
+}): Instruction {
+  const tokens = params.tokens ?? [];
+  const accounts: AccountMeta[] = [
+    meta(params.payer, SIGNER_RW),
+    meta(params.v1Wallet, RW),
+    meta(params.v1Authority, RW),
+    meta(params.v1Vault, RW),
+    meta(params.destination, RW),
+    meta(params.refundDestination, RW),
+    meta(SYSTEM_PROGRAM_ADDRESS, RO),
+    meta(SYSVAR_INSTRUCTIONS_ADDRESS, RO),
+    meta(params.authSigner, params.authSignerIsSigner ? SIGNER_RO : RO),
+  ];
+  for (const t of tokens) {
+    accounts.push(meta(t.sourceAta, RW), meta(t.destAta, RW), meta(t.tokenProgram, RO));
+  }
+
+  return {
+    programAddress: params.programId,
+    accounts,
+    data: concatBytes([
+      new Uint8Array([DISC_MIGRATE_WALLET, tokens.length]),
+      params.authPayload ?? new Uint8Array(0),
+    ]),
   };
 }

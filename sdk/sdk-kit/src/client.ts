@@ -22,8 +22,10 @@ import {
   type Address,
   type Base58EncodedBytes,
   type GetAccountInfoApi,
+  type GetMultipleAccountsApi,
   type GetProgramAccountsApi,
   type GetSlotApi,
+  type GetTokenAccountsByOwnerApi,
   type Instruction,
   type Rpc,
 } from '@solana/kit';
@@ -40,6 +42,7 @@ import {
   DISC_AUTHORIZE,
   DISC_CREATE_SESSION,
   DISC_EXECUTE,
+  DISC_MIGRATE_WALLET,
   DISC_REMOVE_AUTHORITY,
   DISC_REVOKE_SESSION,
   DISC_TRANSFER_OWNERSHIP,
@@ -53,6 +56,7 @@ import {
   createExecuteIx,
   createInitializeProtocolIx,
   createInitializeTreasuryShardIx,
+  createMigrateWalletIx,
   createReclaimDeferredIx,
   createRegisterPayerIx,
   createRemoveAuthorityIx,
@@ -60,6 +64,7 @@ import {
   createTransferOwnershipIx,
   createUpdateProtocolIx,
   createWithdrawTreasuryIx,
+  type MigrateTokenPair,
 } from './instructions/builders.js';
 import {
   findAuthorityPda,
@@ -71,6 +76,21 @@ import {
   findVaultPda,
   findWalletPda,
 } from './pdas.js';
+import {
+  createAssociatedTokenAccountIdempotentIx,
+  getAssociatedTokenAddress,
+} from './spl.js';
+import {
+  deriveV1Accounts,
+  enumerateV1VaultTokens,
+  findV1AuthorityPda,
+  findV1VaultPda,
+  findV1WalletsByOwner,
+  readV1WalletState,
+  type V1Accounts,
+  type V1VaultToken,
+  type V1WalletRecord,
+} from './v1.js';
 import {
   finalizeSecp256r1,
   prepareSecp256r1,
@@ -112,6 +132,7 @@ const SYSVAR_IX_INDEX_EXECUTE = 4;
 const SYSVAR_IX_INDEX_CREATE_SESSION = 6;
 const SYSVAR_IX_INDEX_AUTHORIZE = 6;
 const SYSVAR_IX_INDEX_REVOKE_SESSION = 5;
+const SYSVAR_IX_INDEX_MIGRATE_WALLET = 7;
 
 // ─── Prepared types (Secp256r1 prepare/finalize flow) ────────────────
 
@@ -367,8 +388,21 @@ function concatBytes(parts: ReadonlyArray<Uint8Array>): Uint8Array {
   return out;
 }
 
-/** RPC capability bag the client needs. Use kit's `createSolanaRpc(url)`. */
-export type LazorKitRpc = Rpc<GetAccountInfoApi & GetSlotApi & GetProgramAccountsApi>;
+/**
+ * RPC capability bag the client needs. Use kit's `createSolanaRpc(url)`, which
+ * satisfies all of it.
+ *
+ * `GetMultipleAccountsApi` and `GetTokenAccountsByOwnerApi` are there for the
+ * v1 migration path, which has to read a v1 wallet's state and enumerate its
+ * token accounts before it can move anything.
+ */
+export type LazorKitRpc = Rpc<
+  GetAccountInfoApi &
+    GetMultipleAccountsApi &
+    GetProgramAccountsApi &
+    GetSlotApi &
+    GetTokenAccountsByOwnerApi
+>;
 
 /**
  * Construct a LazorKit client.
@@ -1714,6 +1748,242 @@ export class LazorKit {
       programId: this.programId,
     });
     return { instructions: [ix] };
+  }
+
+  // ─── v1 → v2 migration ───────────────────────────────────────────
+
+  /**
+   * Find this owner's v1 wallets from their key material alone.
+   *
+   * The v1 `userSeed` was random and lived in browser storage, so most
+   * returning users cannot derive their own wallet any more; the chain can,
+   * because the v1 authority account stores both the key and the wallet.
+   *
+   * The `ownerPubkey` on each record is what a returning passkey user needs
+   * and cannot produce: signing in yields a WebAuthn assertion, and an
+   * assertion carries no public key.
+   */
+  async findV1WalletsByOwner(
+    credential: Uint8Array,
+    authorityType: 'ed25519' | 'secp256r1' = 'secp256r1',
+  ): Promise<V1WalletRecord[]> {
+    return findV1WalletsByOwner(this.rpc, credential, this.programId, authorityType);
+  }
+
+  /**
+   * Move a v1 wallet's SOL and tokens into a v2 wallet owned by the same key,
+   * and close the v1 accounts.
+   *
+   * Pass `v1Wallet` (from {@link findV1WalletsByOwner}) for the common case of
+   * a user whose seed is gone; `userSeed` only when the app still holds it.
+   *
+   * The returned `setupInstructions` create whatever the destination needs —
+   * the v2 wallet, and an ATA per token — and must land before `migrate` in
+   * the same transaction or an earlier one. `migrate` is a single instruction
+   * for an Ed25519 owner, or a challenge to sign plus a `finalize` that turns
+   * the WebAuthn response into `[precompile, migrate]`.
+   *
+   * When this call has to mint a fresh v2 seed it comes back as
+   * `destinationUserSeed` — persist it, or the new wallet is as underivable as
+   * the old one.
+   */
+  async migrateV1Wallet(params: {
+    payer: Address;
+    owner: CreateWalletOwner;
+    /** The seed the v1 wallet was created with, when the app still has it. */
+    userSeed?: Uint8Array;
+    /** The v1 wallet address, for a wallet whose seed is gone. */
+    v1Wallet?: Address;
+    /** Seed for the v2 wallet, when one has to be created. Defaults to random. */
+    destinationUserSeed?: Uint8Array;
+  }): Promise<{
+    v1: V1Accounts;
+    destinationWallet: Address;
+    /** Set only when this call had to mint a fresh seed — persist it. */
+    destinationUserSeed?: Uint8Array;
+    v2Vault: Address;
+    tokens: V1VaultToken[];
+    setupInstructions: Instruction[];
+    migrate:
+      | { type: 'ed25519'; instruction: Instruction }
+      | {
+          type: 'secp256r1';
+          challenge: Uint8Array;
+          finalize: (response: WebAuthnResponse) => Instruction[];
+        };
+  }> {
+    const { authType, credentialOrPubkey } = resolveOwnerFields(params.owner);
+
+    let v1: V1Accounts;
+    if (params.v1Wallet) {
+      const [vault] = await findV1VaultPda(params.v1Wallet, this.programId);
+      const [authority] = await findV1AuthorityPda(
+        params.v1Wallet,
+        credentialOrPubkey,
+        this.programId,
+      );
+      v1 = { wallet: params.v1Wallet, vault, authority };
+    } else if (params.userSeed) {
+      v1 = await deriveV1Accounts(params.userSeed, credentialOrPubkey, this.programId);
+    } else {
+      throw new Error(
+        'migrateV1Wallet needs either userSeed or v1Wallet. A wallet created by ' +
+          '@lazorkit/wallet used a random seed that lived in browser storage, so for ' +
+          'most users the seed is gone: find the wallet with findV1WalletsByOwner and ' +
+          'pass v1Wallet instead.',
+      );
+    }
+
+    const state = await readV1WalletState(this.rpc, v1);
+    if (!state) {
+      throw new Error(
+        params.v1Wallet
+          ? `no v1 wallet at ${v1.wallet} for this owner`
+          : 'no v1 wallet exists for this userSeed',
+      );
+    }
+    if (state.ownerRole !== ROLE_OWNER) {
+      throw new Error('MigrateWallet requires an Owner-rank v1 authority');
+    }
+
+    // Where the funds land. With a seed, the destination is that seed's wallet.
+    // Without one, reuse whatever v2 wallet this owner already has, and only
+    // mint a seed when there is nothing to reuse.
+    let v2Wallet: Address;
+    let destinationUserSeed: Uint8Array | undefined;
+    if (params.userSeed) {
+      [v2Wallet] = await this.findWallet(params.userSeed);
+    } else {
+      const existing = await this.findWalletsByAuthority(
+        credentialOrPubkey,
+        authType === AUTH_TYPE_ED25519 ? 'ed25519' : 'secp256r1',
+      );
+      if (existing.length > 0) {
+        v2Wallet = existing[0]!.walletPda;
+      } else {
+        destinationUserSeed = params.destinationUserSeed ?? randomBytes(32);
+        [v2Wallet] = await this.findWallet(destinationUserSeed);
+      }
+    }
+    const [v2Vault] = await this.findVault(v2Wallet);
+
+    const tokens = await enumerateV1VaultTokens(this.rpc, v1.vault);
+
+    const setupInstructions: Instruction[] = [];
+    const v2WalletInfo = await this.rpc
+      .getAccountInfo(v2Wallet, { encoding: 'base64' })
+      .send();
+    if (!v2WalletInfo.value) {
+      // Creating the v2 wallet needs a seed even though migrating does not.
+      destinationUserSeed =
+        params.userSeed ?? destinationUserSeed ?? params.destinationUserSeed ?? randomBytes(32);
+      const created = await this.createWallet({
+        payer: params.payer,
+        userSeed: destinationUserSeed,
+        owner: params.owner,
+      });
+      setupInstructions.push(...created.instructions);
+      if (params.userSeed) destinationUserSeed = undefined; // caller already has it
+    }
+    const migrateTokens: MigrateTokenPair[] = [];
+    for (const t of tokens) {
+      const destAta = await getAssociatedTokenAddress(t.mint, v2Vault, t.tokenProgram);
+      setupInstructions.push(
+        createAssociatedTokenAccountIdempotentIx({
+          payer: params.payer,
+          ata: destAta,
+          owner: v2Vault,
+          mint: t.mint,
+          tokenProgram: t.tokenProgram,
+        }),
+      );
+      migrateTokens.push({ sourceAta: t.ata, destAta, tokenProgram: t.tokenProgram });
+    }
+
+    // signed_payload = destination || v1_wallet || num_tokens || refund_dest
+    //                  || source_ata[0] || … || source_ata[n-1]
+    // The trailing source ATAs bind WHICH token accounts move, not just how many
+    // — without them a relayer could keep the count and swap in dust it created,
+    // stranding the user's real tokens when the vault closes. Order must match
+    // the program's read order (the migrateTokens order used to build the ix).
+    const signedPayload = concatBytes([
+      addressEncoder.encode(v2Vault) as Uint8Array,
+      addressEncoder.encode(v1.wallet) as Uint8Array,
+      new Uint8Array([tokens.length]),
+      addressEncoder.encode(params.payer) as Uint8Array,
+      ...migrateTokens.map((t) => addressEncoder.encode(t.sourceAta) as Uint8Array),
+    ]);
+
+    if (authType === AUTH_TYPE_ED25519) {
+      const instruction = createMigrateWalletIx({
+        payer: params.payer,
+        v1Wallet: v1.wallet,
+        v1Authority: v1.authority,
+        v1Vault: v1.vault,
+        destination: v2Vault,
+        refundDestination: params.payer,
+        authSigner: (params.owner as { publicKey: Address }).publicKey,
+        authSignerIsSigner: true,
+        tokens: migrateTokens,
+        programId: this.programId,
+      });
+      return {
+        v1,
+        destinationWallet: v2Wallet,
+        destinationUserSeed,
+        v2Vault,
+        tokens,
+        setupInstructions,
+        migrate: { type: 'ed25519', instruction },
+      };
+    }
+
+    // Secp256r1 passkey. The key comes from the caller (it is on the v1
+    // authority account, which `findV1WalletsByOwner` already read) rather than
+    // from the WebAuthn response, which has none.
+    const owner = params.owner as { compressedPubkey: Uint8Array };
+    const [counter, slot] = await Promise.all([
+      this.readCounter(v1.authority).then((c) => c + 1),
+      this.rpc
+        .getSlot()
+        .send()
+        .then((value) => BigInt(value)),
+    ]);
+    const prepared = this.buildPasskeySigning({
+      discriminator: DISC_MIGRATE_WALLET,
+      sysvarIxIndex: SYSVAR_IX_INDEX_MIGRATE_WALLET,
+      signedPayload,
+      slot,
+      counter,
+      payer: params.payer,
+      publicKeyBytes: owner.compressedPubkey,
+    });
+    const finalize = (response: WebAuthnResponse): Instruction[] => {
+      const { authPayload, precompileIx } = finalizeSecp256r1(prepared, response);
+      const migrateIx = createMigrateWalletIx({
+        payer: params.payer,
+        v1Wallet: v1.wallet,
+        v1Authority: v1.authority,
+        v1Vault: v1.vault,
+        destination: v2Vault,
+        refundDestination: params.payer,
+        authSigner: params.payer,
+        authSignerIsSigner: false,
+        tokens: migrateTokens,
+        authPayload,
+        programId: this.programId,
+      });
+      return [precompileIx, migrateIx];
+    };
+    return {
+      v1,
+      destinationWallet: v2Wallet,
+      destinationUserSeed,
+      v2Vault,
+      tokens,
+      setupInstructions,
+      migrate: { type: 'secp256r1', challenge: prepared.challenge, finalize },
+    };
   }
 }
 
