@@ -222,9 +222,15 @@ match).
 
 lazor-kit/lazor-kit#89 replaces the literal with
 `EXPO_PUBLIC_PAYMASTER_API_KEY` and adds a `.env.example`; it is open and
-unmerged. Merging it removes the value from HEAD and **not** from history: the
-commit stays fetchable by anyone who clones, so the value must be treated as
-public permanently.
+unmerged. Merging it fixes `main` and nothing else: the same blob is reachable
+from **15 pushed branch tips** (main plus fourteen, mostly dependabot), and
+from history on every one of them. Treat the value as public permanently and
+rotate — do not try to scrub it.
+
+And note what the replacement does and does not buy: `babel-preset-expo`
+inlines `EXPO_PUBLIC_*` as string literals at build time, so the key still
+ships inside every distributed bundle. Moving it to an env var keeps it out of
+git; it does not make it a secret.
 
 Worth being honest about what an API key can do here at all: this key ships
 inside a mobile bundle and, for the web SDK, inside a browser bundle. A
@@ -246,17 +252,21 @@ in any repo, and the secret lives in Railway.
 2. Railway → the Kora service → Variables → set `KORA_API_KEY` to it (and
    consider `KORA_HMAC_SECRET` as well; when both are configured both are
    required). Redeploy.
-3. Verify the gate exists now. Without the header this must stop answering
-   200, and with it must answer 200:
+3. Verify the gate exists now. **Do not probe with `liveness`** — both auth
+   layers short-circuit it (`crates/lib/src/rpc_server/auth.rs:60-64` and
+   `:142-146`), so it answers 200 with no key even when auth is on, and reads
+   as a failed rotation. Probe with `getConfig`:
    ```bash
    curl -s -o /dev/null -w 'no key: %{http_code}\n' -X POST https://kora.devnet.lazorkit.com \
      -H 'content-type: application/json' \
-     -d '{"jsonrpc":"2.0","id":1,"method":"liveness","params":[]}'
+     -d '{"jsonrpc":"2.0","id":1,"method":"getConfig","params":[]}'
    curl -s -o /dev/null -w 'with key: %{http_code}\n' -X POST https://kora.devnet.lazorkit.com \
      -H 'content-type: application/json' -H "x-api-key: $NEW_KEY" \
-     -d '{"jsonrpc":"2.0","id":1,"method":"liveness","params":[]}'
+     -d '{"jsonrpc":"2.0","id":1,"method":"getConfig","params":[]}'
    ```
-   Read `$NEW_KEY` from your shell, not from a file in a repo.
+   Read `$NEW_KEY` from your shell, not from a file in a repo. Expect 401 then
+   200. `/metrics` stays outside the auth layer when it shares the RPC port,
+   which is the next item below.
 4. Put the new value in the consumers: the Expo example's `.env` (after #89
    merges), `app/migrate`'s env, and any deployed front end. Anything still
    sending the old key stops working at step 2 — that is the point.
