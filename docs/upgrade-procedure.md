@@ -178,15 +178,15 @@ Two things the deploy command hides:
   10240 additional bytes`). A build that grows by less must be preceded by
   `solana program extend <id> 10240`.
 - **With a multisig upgrade authority, only `Upgrade` goes through the vault.**
-  While the runtime feature `enable_extend_program_checked`
-  (`2oMRZEDWT2tqtYMofhmmfQ8SsjqUFzT6sYXppQDavxwz`) is inactive — as on devnet
-  and mainnet, 2026-09-11 — the runtime refuses the loader's extend
-  instructions via CPI, and the plain `ExtendProgram` it allows top-level needs
-  no authority. So any payer extends first, then the vault executes `Upgrade`.
-  Once the feature activates, the plain instruction is rejected and
-  `ExtendProgramChecked` needs the authority and may be invoked via CPI, so it
-  moves into the vault transaction. `scripts/rehearse/squads-upgrade.cjs` picks
-  the path from the feature account; the steps and a devnet run are in
+  The runtime refuses the upgradeable loader via CPI for everything except
+  `Upgrade` and `SetAuthority`, and the plain `ExtendProgram` it allows
+  top-level takes no authority account at all. So any payer extends first, then
+  the vault executes `Upgrade`. This is permanent, not a window: the
+  `ExtendProgramChecked` gate was retired to the burn address
+  `ExtendProgCheckedWi11BeDe1eted11111111111111` (visible in `solana feature
+  status`, inactive, unactivatable), and the id this document used to name is no
+  longer a known feature. `scripts/rehearse/squads-upgrade.cjs` has `extend` as
+  a separate command for that reason; the steps and a devnet run are in
   [`mainnet-deploy-checklist.md`](mainnet-deploy-checklist.md#multisig-rehearsal).
 
 ### 7. Publish the SDKs, and move the dist-tags last

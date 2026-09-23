@@ -46,10 +46,9 @@ is the human process: keys, comms, and the decisions in section 2.
       needs one key, not a quorum. Both the transfer and a vault-approved
       upgrade are rehearsed — see [Multisig rehearsal](#multisig-rehearsal).
       Once transferred, every upgrade needs the vault. The extend before it
-      does not: while `enable_extend_program_checked` is inactive (devnet and
-      mainnet, 2026-09-11) the loader's plain `ExtendProgram` needs no
-      authority, and the runtime refuses it via CPI, so any payer sends it
-      top-level first. The `PROTOCOL_INIT_AUTHORITY` key is still needed until
+      never does: the loader's `ExtendProgram` takes no authority account at
+      all, and the runtime refuses the upgradeable loader via CPI for anything
+      but `Upgrade` and `SetAuthority`, so any payer sends it top-level first. The `PROTOCOL_INIT_AUTHORITY` key is still needed until
       `InitializeProtocol` has run, whoever holds the upgrade authority.
 - [x] **Rollout: immediate in-place upgrade** (decided). One upgrade at the
       vanity id. Un-migrated v1 wallets can only call `MigrateWallet` until they
@@ -412,15 +411,22 @@ mainnet, 137904 bytes growing to 149296.
 
 What it found, and what carries to mainnet:
 
-- **The extend cannot go through the vault.** The first attempt put
-  `ExtendProgramChecked` inside the vault transaction and execution failed:
-  `BPFLoaderUpgradeab1e… not supported by inner instructions`. The runtime
-  feature `enable_extend_program_checked` is inactive on devnet and mainnet, so
-  via CPI the loader accepts only `Upgrade`, `SetAuthority` and `Close`, and the
-  plain `ExtendProgram` needs no authority at all. Extend top-level from any
-  payer first, then let the vault execute `Upgrade`. Re-check on the day:
-  `solana feature status 2oMRZEDWT2tqtYMofhmmfQ8SsjqUFzT6sYXppQDavxwz -um`. The
-  script reads the feature account and picks the path itself.
+- **The extend cannot go through the vault, and never will.** The first attempt
+  put `ExtendProgramChecked` inside the vault transaction and execution failed:
+  `BPFLoaderUpgradeab1e… not supported by inner instructions`. Via CPI the
+  loader accepts only `Upgrade` and `SetAuthority`; the plain `ExtendProgram`
+  needs no authority account at all, so any payer sends it top-level first and
+  the vault then executes `Upgrade`.
+
+  This was written as "while the feature is inactive, re-check on the day".
+  There is nothing to re-check: Agave retired the gate by pointing it at a burn
+  address. `solana feature status -um` lists
+  `ExtendProgCheckedWi11BeDe1eted11111111111111 | inactive | Enable
+  ExtendProgramChecked instruction`, and no one holds that address's key, so it
+  can never activate. The id this repo used to name, `2oMRZEDW…`, is not a
+  known feature to solana-cli 4.2.2 at all — `solana feature status 2oMRZEDW… -um`
+  answers `Unknown feature`. The script no longer reads it; `extend` is its own
+  command, because that transaction lands immediately and cannot be undone.
 - **`@sqds/multisig` 2.1.4 `rpc.proposalCreate` drops `rentPayer`,** so the
   proposer pays the proposal rent. A member wallet with no SOL fails with
   `insufficient lamports 0, need 2468880`. The script builds the instruction
@@ -518,13 +524,29 @@ Order of operations — none of it is reversible once step 4 lands:
       address from `preflight`, never by hand.
 - [ ] **5. Verify.** `preflight` again: `program authority` must read
       `already the vault`, and `solana program show <program id>` must agree.
-- [ ] **6. Note what stops working.** `solana program deploy` against this
-      program, `set-upgrade-authority`, and `--final` all now require a vault
-      transaction with three approvals. Buffers must have their authority set to
-      the vault **before** the proposal
-      (`solana program set-buffer-authority <buffer> --new-buffer-authority <vault>`)
-      — the script refuses to propose otherwise, and it now also refuses when
-      the program's authority is not yet the vault.
+- [ ] **6. Note what changes for every upgrade after this.**
+      - `solana program deploy` against this program, `set-upgrade-authority`
+        and `--final` all now need a vault transaction with three approvals.
+      - Buffers must have their authority set to the vault **before** the
+        proposal (`solana program set-buffer-authority <buffer>
+        --new-buffer-authority <vault>`); the script refuses to propose
+        otherwise, and also refuses while the program's authority is not yet the
+        vault.
+      - **Extend first, separately.** A bigger binary needs the programdata
+        grown, and that cannot go through the vault — `extend <bytes>` is its
+        own command because the transaction lands immediately, with no approval
+        and no undo.
+      - **`resume` needs the index** (`resume 3`). The newest transaction on the
+        multisig is not necessarily yours: anyone proposing from the Squads app
+        moves that index, and resuming blindly would spend your approval on
+        their transaction.
+      - **Name the spill account.** `Upgrade` refunds the buffer's rent and the
+        programdata's excess — for this program roughly 0.96 SOL — to whatever
+        `SPILL` says, defaulting to the fee payer. Point it somewhere you meant.
+      - The handover is one-way for the old key but **not** irreversible for the
+        multisig: `SetAuthority` is one of the two loader instructions the
+        runtime allows via CPI, so three members can always hand the authority
+        back out (`set-authority <key>`).
 
 `InitializeProtocol` is unaffected: it is authorized by the compiled-in
 `PROTOCOL_INIT_AUTHORITY`, not by the upgrade authority, so the order of the

@@ -72,9 +72,15 @@ const BUFFER_HEADER = 37;
 const PROGRAMDATA_HEADER = 45;
 // The loader refuses to extend by less than this unless it reaches the maximum.
 const MIN_EXTEND = 10240;
-// Runtime feature `enable_extend_program_checked`. Inactive on devnet and
-// mainnet as of 2026-09-11.
-const EXTEND_CHECKED_FEATURE = new PublicKey('2oMRZEDWT2tqtYMofhmmfQ8SsjqUFzT6sYXppQDavxwz');
+// `ExtendProgramChecked` is never coming. Agave retired the gate by pointing it
+// at a burn address — `solana feature status` on mainnet lists
+// ExtendProgCheckedWi11BeDe1eted11111111111111 "Enable ExtendProgramChecked
+// instruction", inactive, and nobody can hold that address's key to activate
+// it. The id this script used to watch (2oMRZEDW…) is not even a known feature
+// to solana-cli 4.2.2 any more. So there is one extend path: tag 6, top-level,
+// any payer, no authority — which is also the only one the runtime allows,
+// since it refuses the upgradeable loader via CPI for anything but Upgrade and
+// SetAuthority.
 
 function requireSigners() {
   if (!payer) throw new Error('set PAYER (a keypair file that pays fees)');
@@ -96,6 +102,10 @@ const memberList = process.env.MEMBERS ?? process.env.PROPOSER;
 const members = memberList ? memberList.split(',').map(load) : [];
 const threshold = Number(env('THRESHOLD', '2'));
 const vaultIndex = Number(env('VAULT_INDEX', '0'));
+// Upgrade refunds the buffer's rent and the programdata's excess here. It is a
+// live payout of roughly a SOL, so it is worth naming rather than defaulting
+// into whichever hot key happened to pay the fees.
+const spill = process.env.SPILL ? new PublicKey(process.env.SPILL) : null;
 const programId = new PublicKey(env('PROGRAM_ID'));
 const createKey = process.env.MULTISIG ? null : load(env('CREATE_KEY'));
 const multisigPda = process.env.MULTISIG
@@ -122,23 +132,6 @@ function extendProgram(bytes) {
   return loaderIx(
     6,
     [writable(programData), writable(programId), readonly(SystemProgram.programId), writable(payer.publicKey, true)],
-    fields,
-  );
-}
-// Tag 9. Needs the authority's signature and, with the feature active, may be
-// invoked via CPI — so it then belongs inside the vault transaction.
-function extendProgramChecked(bytes) {
-  const fields = Buffer.alloc(4);
-  fields.writeUInt32LE(bytes, 0);
-  return loaderIx(
-    9,
-    [
-      writable(programData),
-      writable(programId),
-      writable(vault, true), // authority
-      readonly(SystemProgram.programId),
-      writable(vault, true), // payer for the extra rent
-    ],
     fields,
   );
 }
@@ -284,16 +277,33 @@ async function preflight() {
   const vaultBalance = await connection.getBalance(vault);
   line(null, `vault[${vaultIndex}]`, `${vault.toBase58()}  ${(vaultBalance / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
 
-  // The vault only pays rent when the extend runs inside the vault transaction,
-  // which needs the runtime feature. Without it any payer extends top-level.
-  const feature = await connection.getAccountInfo(EXTEND_CHECKED_FEATURE);
-  const checkedActive = !!feature && feature.data.length > 0 && feature.data[0] === 1;
   line(
     null,
     'extend path',
-    checkedActive
-      ? 'enable_extend_program_checked ACTIVE — the extend runs inside the vault transaction and the VAULT pays the extra rent'
-      : 'enable_extend_program_checked inactive — any payer sends ExtendProgram top-level; the vault needs no SOL for it',
+    'top-level ExtendProgram, any payer, no authority — the vault needs no SOL for it ' +
+      '(ExtendProgramChecked is retired to a burn address and can never activate)',
+  );
+
+  // A spending limit lets one member move the vault's SOL with no vote. It
+  // cannot touch the program, but it is the kind of thing to know about a vault
+  // before trusting it with anything.
+  const limits = await connection
+    .getProgramAccounts(new PublicKey('SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf'), {
+      dataSlice: { offset: 0, length: 0 },
+      filters: [
+        { memcmp: { offset: 0, bytes: '2odkUytTTsV' } }, // SpendingLimit discriminator
+        { memcmp: { offset: 8, bytes: multisigPda.toBase58() } },
+      ],
+    })
+    .catch(() => null);
+  line(
+    limits === null ? null : limits.length === 0 ? true : 'warn',
+    'spending limits',
+    limits === null
+      ? 'could not scan (the RPC refused getProgramAccounts)'
+      : limits.length === 0
+        ? 'none'
+        : `${limits.length} — a member can move vault SOL without a vote`,
   );
 
   const info = await connection.getAccountInfo(programData);
@@ -423,8 +433,13 @@ async function finish(transactionIndex) {
     return;
   }
 
+  // The number of approvals is the multisig's business, not an env var: a
+  // THRESHOLD that disagrees with the chain either stops short of quorum or
+  // spends signatures for nothing.
+  const onChain = await multisig.accounts.Multisig.fromAccountAddress(connection, multisigPda);
+  const needed = onChain.threshold;
   const approved = new Set(proposal.approved.map((k) => k.toBase58()));
-  for (const member of members.slice(0, threshold)) {
+  for (const member of members.slice(0, needed)) {
     if (approved.has(member.publicKey.toBase58())) continue;
     await confirmed(
       `proposalApprove ${member.publicKey.toBase58().slice(0, 4)}`,
@@ -468,31 +483,35 @@ async function upgradeFromBuffer(bufferArg) {
     throw new Error(`buffer authority is ${bufferAuthority}; set it to the vault ${vault.toBase58()} first`);
   }
   const shortfall = bufferInfo.data.length - BUFFER_HEADER - (dataInfo.data.length - PROGRAMDATA_HEADER);
-  const instructions = [];
   if (shortfall > 0) {
-    const bytes = Math.max(shortfall, MIN_EXTEND);
-    console.log(`extend by ${bytes} bytes (needs ${shortfall}; loader minimum ${MIN_EXTEND})`);
-    const feature = await connection.getAccountInfo(EXTEND_CHECKED_FEATURE);
-    const checkedActive = !!feature && feature.data.length > 0 && feature.data[0] === 1;
-    if (!checkedActive) {
-      // The vault cannot do this one: the runtime refuses the loader's extend via
-      // CPI. It needs no authority either, so the payer sends it directly.
-      await send('extendProgram (top-level)', [extendProgram(bytes)], [payer]);
-    } else {
-      const rent =
-        (await connection.getMinimumBalanceForRentExemption(dataInfo.data.length + bytes)) - dataInfo.lamports;
-      const balance = await connection.getBalance(vault);
-      if (balance < rent) {
-        const top = rent - balance + 5_000_000;
-        await send(`fund vault ${(top / LAMPORTS_PER_SOL).toFixed(4)} SOL`, [
-          SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: vault, lamports: top }),
-        ], [payer]);
-      }
-      instructions.push(extendProgramChecked(bytes));
-    }
+    // Deliberately not folded into this command. The extend is a separate
+    // transaction that lands immediately, before any member has agreed to
+    // anything, and it cannot be undone — a program's data only grows. It
+    // belongs in its own step the operator chooses to take.
+    throw new Error(
+      `programdata is ${shortfall} bytes too small for this buffer — run ` +
+        `\`extend ${Math.max(shortfall, MIN_EXTEND)}\` first (top-level, any payer, irreversible)`,
+    );
   }
-  instructions.push(upgrade(buffer, payer.publicKey));
-  await propose(instructions, 'upgrade program');
+  const spillTo = spill ?? payer.publicKey;
+  console.log(`spill (reclaimed rent) -> ${spillTo.toBase58()}${spill ? '' : '  [SPILL unset: the fee payer]'}`);
+  await propose([upgrade(buffer, spillTo)], 'upgrade program');
+  await status();
+}
+
+// Grow the programdata account. No authority, no multisig, no undo.
+async function extend(bytesArg) {
+  requireSigners();
+  const requested = Number(bytesArg ?? env('EXTEND_BYTES'));
+  if (!Number.isInteger(requested) || requested <= 0) throw new Error('extend needs a positive byte count');
+  const bytes = Math.max(requested, MIN_EXTEND);
+  const info = await connection.getAccountInfo(programData);
+  if (!info) throw new Error('program is not deployed');
+  const rent = (await connection.getMinimumBalanceForRentExemption(info.data.length + bytes)) - info.lamports;
+  console.log(`extend ${programId.toBase58()} by ${bytes} bytes (loader minimum ${MIN_EXTEND})`);
+  console.log(`  current      ${info.data.length - PROGRAMDATA_HEADER} bytes`);
+  console.log(`  extra rent   ${rent > 0 ? (rent / LAMPORTS_PER_SOL).toFixed(6) + ' SOL' : 'none — already funded above the requirement'}`);
+  await send('extendProgram', [extendProgram(bytes)], [payer]);
   await status();
 }
 
@@ -506,12 +525,24 @@ async function main() {
     case 'create':
       requireSigners();
       return create();
-    case 'addresses':
+    case 'addresses': {
       console.log(`multisig      ${multisigPda.toBase58()}`);
-      console.log(`  vault       ${vault.toBase58()}`);
+      console.log(`  vault[${vaultIndex}]    ${vault.toBase58()}`);
+      // A vault is derived from whatever address you pass, so a typo prints a
+      // perfectly confident answer for a multisig that does not exist. Say so.
+      if (process.env.OFFLINE === '1') {
+        console.log('  (OFFLINE — not checked against the chain)');
+        return;
+      }
+      const ms = await multisig.accounts.Multisig.fromAccountAddress(connection, multisigPda).catch(() => null);
+      console.log(ms ? `  verified    ${ms.threshold} of ${ms.members.length} on ${connection.rpcEndpoint}` : '  NOT A SQUADS V4 MULTISIG at that address');
+      if (!ms) process.exitCode = 1;
       return;
+    }
     case 'status':
       return status();
+    case 'extend':
+      return extend(arg);
     case 'upgrade':
       requireSigners();
       return upgradeFromBuffer(arg ?? env('BUFFER'));
@@ -527,14 +558,25 @@ async function main() {
       const ms = await multisig.accounts.Multisig.fromAccountAddress(connection, multisigPda);
       const latest = BigInt(ms.transactionIndex.toString());
       if (latest === 0n) throw new Error('no vault transaction to resume');
-      console.log(`resuming vault transaction #${latest}`);
-      await finish(latest);
+      // Whatever is newest is not necessarily yours: anyone else proposing from
+      // the Squads app moves this index, and resuming blindly would approve and
+      // execute their transaction with your key. Name the index instead.
+      const index = arg === undefined ? null : BigInt(arg);
+      if (index === null) {
+        throw new Error(
+          `resume needs the transaction index, e.g. \`resume ${latest}\` — the newest on this ` +
+            'multisig. Check in the Squads app that it is yours before approving it.',
+        );
+      }
+      if (index > latest) throw new Error(`vault transaction #${index} does not exist (newest is #${latest})`);
+      console.log(`resuming vault transaction #${index}`);
+      await finish(index);
       return status();
     }
     default:
       throw new Error(
         'usage: squads-upgrade.cjs preflight | dry-run | create | addresses | status | ' +
-          'upgrade <buffer> | set-authority <key> | resume',
+          'extend <bytes> | upgrade <buffer> | set-authority <key> | resume <index>',
       );
   }
 }
