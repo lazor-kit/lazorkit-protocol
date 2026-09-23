@@ -182,18 +182,99 @@ v2 destination, v1 wallet + authority closed. `REHEARSAL PASSED`.
 
 ## Paymaster (Kora)
 
-Read out of `lazor-kit/kora` on 2026-09-21. The relayer sponsors every user
-transaction, so it is on the critical path, and none of this is visible from
-the protocol repo.
+Read out of `lazor-kit/kora` on 2026-09-21 and **measured against the live
+devnet relayer on 2026-09-23**. The relayer sponsors every user transaction, so
+it is on the critical path, and none of this is visible from the protocol repo.
+
+### What the live relayer answers today
+
+`https://kora.devnet.lazorkit.com` is a Railway service (`58btamsd.up.railway.app`).
+Every call below was made **with no `x-api-key` header** and answered 200:
+
+```
+liveness        {"result":null}
+getConfig       full config
+getPayerSigner  7Pkkhm8YeoBXFGKHTJXJ8ckdYiqtPdVWMefEVqK5vXed
+getBlockhash    {"blockhash":...}
+```
+
+That is the whole story on authentication: it is not enabled. In
+`crates/lib/src/rpc_server/server.rs` the API-key layer is an `option_layer`
+over `KORA_API_KEY` (env) or `[kora.auth] api_key` (config) — with neither set
+the layer does not exist and no request is checked. `signTransaction` and
+`signAndSendTransaction` are enabled on that endpoint, the price policy is
+`free`, and the sponsor holds **89.7 SOL on devnet** (0.086 on mainnet). CORS is
+`access-control-allow-origin: *`.
+
+So the leaked key is not a gate that someone else can now walk through — there
+is no gate. Rotating it changes nothing by itself; **enabling auth is the
+change**, and the key rotation rides along with it.
+
+### The key that leaked
+
+`lazor-kit/examples/expo-react-native/app/_layout.tsx:13` carries a literal
+`kora_live_…` (78 chars), introduced by commit `ca7ad8b` on **2026-05-02** and
+reachable from `origin/main` of a **public** repository ever since. It is the
+only live key in any of the six working trees; every other `kora_live_` hit is a
+documentation placeholder. The published npm packages are clean
+(`@lazorkit/wallet` 2.0.1 and `@lazorkit/wallet-mobile-adapter` 1.5.1 contain no
+match).
+
+lazor-kit/lazor-kit#89 replaces the literal with
+`EXPO_PUBLIC_PAYMASTER_API_KEY` and adds a `.env.example`; it is open and
+unmerged. Merging it removes the value from HEAD and **not** from history: the
+commit stays fetchable by anyone who clones, so the value must be treated as
+public permanently.
+
+Worth being honest about what an API key can do here at all: this key ships
+inside a mobile bundle and, for the web SDK, inside a browser bundle. A
+credential handed to every user is not a secret. It raises the cost of casual
+abuse and lets you cut off one client, but the controls that actually bound the
+damage are `allowed_programs`, `max_allowed_lamports`, the rate limit, usage
+limits, and how much SOL the sponsor is allowed to hold.
+
+### Rotation runbook
+
+Nothing here can be done from this repo — the config serving production is not
+in any repo, and the secret lives in Railway.
+
+1. Generate a fresh key locally; do not paste the value into a file that git
+   can see:
+   ```bash
+   printf 'kora_live_%s\n' "$(openssl rand -hex 32)"
+   ```
+2. Railway → the Kora service → Variables → set `KORA_API_KEY` to it (and
+   consider `KORA_HMAC_SECRET` as well; when both are configured both are
+   required). Redeploy.
+3. Verify the gate exists now. Without the header this must stop answering
+   200, and with it must answer 200:
+   ```bash
+   curl -s -o /dev/null -w 'no key: %{http_code}\n' -X POST https://kora.devnet.lazorkit.com \
+     -H 'content-type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"liveness","params":[]}'
+   curl -s -o /dev/null -w 'with key: %{http_code}\n' -X POST https://kora.devnet.lazorkit.com \
+     -H 'content-type: application/json' -H "x-api-key: $NEW_KEY" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"liveness","params":[]}'
+   ```
+   Read `$NEW_KEY` from your shell, not from a file in a repo.
+4. Put the new value in the consumers: the Expo example's `.env` (after #89
+   merges), `app/migrate`'s env, and any deployed front end. Anything still
+   sending the old key stops working at step 2 — that is the point.
+5. Do **not** pass the key as `--api-key` on the command line. That flag is
+   parsed into `RpcArgs.auth_args` and never read by the server
+   (`crates/cli/src/main.rs` calls `run_rpc_server(rpc, port)`), so it gives an
+   unauthenticated server *and* leaks the key into the process table.
+
+### Config gates for v2
 
 **The one gate that blocks a v2 transaction is the program allowlist.**
-`validation.allowed_programs` is checked by exact pubkey against every
-instruction. The config committed in that repo lists System, SPL Token, ATA,
-Address Lookup Table and ComputeBudget — neither the LazorKit program nor
-`Secp256r1SigVerify1111111111111111111111111`. The live relayer must already
-list both, since v1 passkey transactions work today, but **the file serving
-production is not in the repo, so confirm it by hand** and make sure the
-mainnet config lists the vanity id.
+`validate_programs` walks `all_instructions` and requires an exact pubkey match
+for every one of them, with no exemption for precompiles. The live devnet
+config lists System, SPL Token, ATA, Address Lookup Table, ComputeBudget,
+`LazorjRF…` and `4h3XoNRe…` — and **not**
+`Secp256r1SigVerify1111111111111111111111111`. Any passkey transaction carries
+that precompile instruction, so as configured this relayer refuses to sponsor
+one.
 
 Everything else about the v2 shape passes: Kora never parses LazorKit
 instruction data, so the four-account fee suffix, the forward-signer bit inside
@@ -201,12 +282,15 @@ the compact payload, the precompile sitting immediately before the program
 instruction, and a prepended ComputeBudget instruction are all invisible to it.
 It never reorders or inserts instructions.
 
-- [ ] Confirm the live `allowed_programs` contains the mainnet program id and
-      the Secp256r1 precompile, on the mainnet deployment specifically.
+- [ ] Add `Secp256r1SigVerify1111111111111111111111111` to `allowed_programs`,
+      on devnet and on whatever serves mainnet. Verify with `getConfig`, not by
+      reading a repo file — the repo's `kora.toml` is not what production runs
+      (it caps `max_allowed_lamports` at 0.001 SOL; the live one allows 0.1).
       **Confirmed the hard way on devnet (2026-09-21):** a migration through the
-      UI was refused with `Program 3AN3Wn… is not in the allowed list`. This is
-      not theoretical, and it fails at the relayer, before anything reaches the
-      chain.
+      UI was refused with `Program 3AN3Wn… is not in the allowed list`. This
+      fails at the relayer, before anything reaches the chain.
+- [ ] Confirm the live `allowed_programs` contains the mainnet vanity id on the
+      mainnet deployment specifically.
 - [ ] Kora simulates every transaction before signing and rejects on
       simulation failure, folding the simulated inner instructions into the
       accounts its validator walks. So a v2 transaction that would fail 4008
@@ -218,21 +302,24 @@ It never reorders or inserts instructions.
       `type = "memory"` reading a base58 key out of an environment variable.
       Turnkey and Vault handlers already exist in that repo; a mainnet fee
       payer holding real SOL should use one.
-- [ ] Turn on authentication. The sample `[kora.auth]` is empty, which means
-      anyone who finds the endpoint can spend the fee payer. At minimum an API
-      key, preferably the HMAC scheme.
+- [ ] Turn on authentication and rotate the key, per the runbook above. Until
+      then the endpoint is open to anyone who finds it, which is anyone who
+      reads the public client repo.
 - [ ] Move the metrics port off the RPC port. When they match, the metrics
       handler is mounted outside the auth layer.
-- [ ] Fund and monitor the sponsor. Rent dominates: creating a wallet costs the
-      payer about 0.00285 SOL (Wallet 8 bytes + Authority 145 bytes; the vault
-      PDA is not funded at creation), against a protocol fee measured in
-      thousandths of that. Ten thousand new wallets in a day is roughly 29 SOL,
-      of which the protocol fee is under 2 per cent.
-- [ ] Point the client at a mainnet endpoint. There is none in the client
-      repo: the React package defaults to an onrender host and React Native to
-      `kora.devnet.lazorkit.com`.
-- [ ] Rotate the Kora API key committed in the public client repo
-      (lazor-kit/lazor-kit#89). Removing it from HEAD does not rotate it.
+- [ ] Narrow CORS off `*` once the front ends have fixed origins.
+- [ ] Fund and monitor the sponsor, and keep the mainnet balance to what a bad
+      day may cost. Rent dominates: creating a wallet costs the payer about
+      0.00285 SOL (Wallet 8 bytes + Authority 145 bytes; the vault PDA is not
+      funded at creation), against a protocol fee measured in thousandths of
+      that. Ten thousand new wallets in a day is roughly 29 SOL, of which the
+      protocol fee is under 2 per cent.
+- [ ] Point the client at a mainnet endpoint. There is none in the client repo,
+      and the React package's default
+      (`https://lazorkit-paymaster.onrender.com`, in
+      `packages/react/config/defaults.ts` and the react-native README) now
+      answers **503 "Service suspended"** — every app on that default is
+      already broken.
 
 ## Seedless migration rehearsal
 
