@@ -1,3 +1,4 @@
+import { getBase64Decoder, getBase64Encoder } from '@solana/kit';
 /**
  * Shared input/output types for the LazorKit kit-flavored SDK.
  *
@@ -123,7 +124,21 @@ export interface DeferredPayload {
 }
 
 /** JSON-serializable form of DeferredPayload (for HTTP / WebSocket transport). */
+/**
+ * Wire version of the serialized deferred payload.
+ *
+ * `accountIndexes` crosses a transaction boundary — tx1 authorizes, tx2
+ * executes, often in a different process at a different SDK version — and since
+ * v2 those bytes carry the forward-signer flag in their high bit. A v1 payload
+ * replayed through a v2 client would mean something different, and the failure
+ * would surface as an unexplained instructions-hash mismatch rather than as a
+ * version error. So the version is explicit and mismatches are refused.
+ */
+export const DEFERRED_PAYLOAD_VERSION = 2;
+
 export interface DeferredPayloadJson {
+  /** See DEFERRED_PAYLOAD_VERSION. Absent on payloads written before v2. */
+  version?: number;
   walletPda: string;
   deferredExecPda: string;
   compactInstructions: {
@@ -137,14 +152,18 @@ export interface DeferredPayloadJson {
   }[];
 }
 
+const base64Encoder = getBase64Encoder();
+const base64Decoder = getBase64Decoder();
+
 export function serializeDeferredPayload(p: DeferredPayload): string {
   const json: DeferredPayloadJson = {
+    version: DEFERRED_PAYLOAD_VERSION,
     walletPda: p.walletPda,
     deferredExecPda: p.deferredExecPda,
     compactInstructions: p.compactInstructions.map((ix) => ({
       programIdIndex: ix.programIdIndex,
       accountIndexes: ix.accountIndexes,
-      data: Buffer.from(ix.data).toString('base64'),
+      data: base64Decoder.decode(ix.data),
     })),
     remainingAccounts: p.remainingAccounts.map((a) => ({
       address: a.address,
@@ -166,13 +185,20 @@ export function deserializeDeferredPayload(serialized: string): DeferredPayload 
   ) {
     throw new Error('Invalid DeferredPayload JSON shape');
   }
+  if (json.version !== DEFERRED_PAYLOAD_VERSION) {
+    throw new Error(
+      `DeferredPayload is version ${json.version ?? 1}, this SDK writes and reads ` +
+        `version ${DEFERRED_PAYLOAD_VERSION}. Account index bytes changed meaning ` +
+        `between them; re-authorize rather than replaying this payload.`,
+    );
+  }
   return {
     walletPda: json.walletPda as Address,
     deferredExecPda: json.deferredExecPda as Address,
     compactInstructions: json.compactInstructions.map((ix) => ({
       programIdIndex: ix.programIdIndex,
       accountIndexes: ix.accountIndexes,
-      data: new Uint8Array(Buffer.from(ix.data, 'base64')),
+      data: new Uint8Array(base64Encoder.encode(ix.data)),
     })),
     remainingAccounts: json.remainingAccounts.map((a) => ({
       address: a.address as Address,

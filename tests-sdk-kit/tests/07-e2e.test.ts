@@ -29,6 +29,7 @@ import {
   ed25519,
 } from '@lazorkit/sdk';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   airdrop,
@@ -137,6 +138,7 @@ describe('E2E Company Workflow', () => {
         rpId: spenderKey.rpId,
       },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     spenderAuthPda = newAuthorityPda;
 
@@ -187,6 +189,8 @@ describe('E2E Company Workflow', () => {
       adminSigner: ed25519(adminSigner.address, adminAuthPda),
       sessionKey: sessionKey.address,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, instructions, [adminSigner]);
   });

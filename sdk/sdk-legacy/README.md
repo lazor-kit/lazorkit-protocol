@@ -1,6 +1,6 @@
 # @lazorkit/sdk-legacy
 
-TypeScript SDK for the LazorKit smart wallet on Solana. Built for `@solana/web3.js` v1. (A `@lazorkit/sdk` for web3.js v2 is coming soon.)
+TypeScript SDK for the LazorKit smart wallet on Solana. Built for `@solana/web3.js` v1. For `@solana/kit` there is [`@lazorkit/sdk`](../sdk-kit/).
 
 Provides:
 
@@ -12,9 +12,34 @@ Provides:
 
 ## Install
 
+Which version you need depends on which protocol version your target cluster runs.
+
+| npm | protocol | where it works |
+|---|---|---|
+| `0.3.x` (`latest`) | v1 | mainnet today |
+| `1.x` (`next`) | v2 | devnet staging today, mainnet after the upgrade |
+
+The two are not wire-compatible: v2 namespaces every PDA seed, so the same
+`userSeed` derives a different wallet address. See
+[CHANGELOG.md](../../CHANGELOG.md) for the full list, and
+[`docs/migration-ui-flow.md`](../../docs/migration-ui-flow.md) for moving an
+existing user's funds across.
+
 ```bash
-npm install @lazorkit/sdk-legacy
+npm install @lazorkit/sdk-legacy          # 0.3.x, talks to mainnet today
+npm install @lazorkit/sdk-legacy@next     # 1.x, protocol v2
 ```
+
+### Browser and React Native
+
+The SDK needs no Node polyfills. Hashing and randomness come from
+`@noble/hashes` and `Buffer` is imported from the `buffer` package, so a
+browser or React Native bundle resolves everything on its own. Verified by
+bundling for the browser and comparing every output byte for byte against Node.
+
+On React Native, add `react-native-get-random-values` once at app start. That
+is the same polyfill `@solana/web3.js` already needs for `Keypair.generate()`,
+and the SDK uses `crypto.getRandomValues` for treasury shard selection.
 
 ## Quick start
 
@@ -65,7 +90,7 @@ validator running the foundation binary).
 
 ### Create a wallet
 
-The `owner` field accepts either of two auth types. A wallet can later hold any mix of Ed25519 and Secp256r1 authorities across its owner / admin / spender roles.
+The `owner` field accepts either of two auth types. A wallet can later hold any mix of Ed25519 and Secp256r1 authorities at any rank, and several of them may be Owners.
 
 **Passkey owner** (Secp256r1 — end-user WebAuthn flows):
 
@@ -109,10 +134,11 @@ const [wallet] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes()
 Any mix of auth types on the same wallet. Typical patterns:
 
 - Passkey owner + Ed25519 admin — user's phone is the owner, a backend bot manages sessions on their behalf.
-- Ed25519 owner + Secp256r1 spender — the backend creates and manages the wallet, the user's passkey does day-to-day spends.
+- Ed25519 owner + Secp256r1 delegate — the backend creates and manages the wallet, the user's passkey does day-to-day spends inside a policy.
+- Several passkey owners — one per device, so a surviving device can revoke a lost one.
 
 ```typescript
-import { ROLE_ADMIN, ROLE_SPENDER } from '@lazorkit/sdk-legacy';
+import { ROLE_OWNER, ROLE_ADMIN, ROLE_SPENDER, Actions, serializeActions } from '@lazorkit/sdk-legacy';
 
 // Ed25519 owner adds an Ed25519 admin
 const adminKp = Keypair.generate();
@@ -137,6 +163,21 @@ const { instructions: addPasskeyIxs } = await client.addAuthority({
     rpId: 'your-app.com',
   },
   role: ROLE_SPENDER,
+  // A Delegate must carry a policy. Rank says what an authority may manage;
+  // the policy says what it may spend, and the two are independent — without
+  // one, "spender" would name a tier with full control of the vault.
+  policy: serializeActions([Actions.solLimit(1_000_000_000n)]),
+});
+
+// A second device, as a full Owner. `allowOwner` is required: an Owner can
+// manage and revoke every authority on the wallet, including the one adding it.
+const { instructions: addOwnerIxs } = await client.addAuthority({
+  payer: payer.publicKey,
+  walletPda,
+  adminSigner: ed25519(ownerKp.publicKey),
+  newAuthority: { type: 'secp256r1', credentialIdHash, compressedPubkey, rpId: 'your-app.com' },
+  role: ROLE_OWNER,
+  allowOwner: true,
 });
 ```
 
@@ -498,11 +539,21 @@ DISC_REVOKE_SESSION = 9
 AUTH_TYPE_ED25519 = 0
 AUTH_TYPE_SECP256R1 = 1
 
-// Roles
-ROLE_OWNER = 0
-ROLE_ADMIN = 1
-ROLE_SPENDER = 2
+// Ranks — what an authority may *manage*. What it may *spend* is its policy.
+ROLE_OWNER = 0     // manages everything, including other Owners
+ROLE_ADMIN = 1     // manages Delegates
+ROLE_SPENDER = 2   // manages nothing; must carry a policy
 ```
+
+Rank rules:
+
+| Rank | May add | May remove |
+|---|---|---|
+| Owner | Owner, Admin, Delegate | Owner (not the last), Admin, Delegate |
+| Admin | Delegate | Delegate |
+| Delegate | nothing | nothing |
+
+An authority that carries a policy itself may not add authorities at all.
 
 ## Error codes
 

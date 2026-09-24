@@ -12,6 +12,7 @@ use pinocchio::{
 use crate::{
     error::AuthError,
     state::{authority::AuthorityAccountHeader, wallet::WalletAccount, AccountDiscriminator},
+    utils::is_all_zero,
 };
 
 /// Arguments for the `CreateWallet` instruction.
@@ -85,6 +86,9 @@ pub fn process(
                 return Err(ProgramError::InvalidInstructionData);
             }
             let (pubkey, _) = rest.split_at(32);
+            if is_all_zero(pubkey) {
+                return Err(AuthError::InvalidPubkey.into());
+            }
             (pubkey, pubkey)
         },
         1 => {
@@ -93,6 +97,10 @@ pub fn process(
                 return Err(ProgramError::InvalidInstructionData);
             }
             let (credential_id_hash, rest_after_cred) = rest.split_at(32);
+            let compressed_pubkey = &rest_after_cred[..33];
+            if is_all_zero(credential_id_hash) || is_all_zero(compressed_pubkey) {
+                return Err(AuthError::InvalidPubkey.into());
+            }
             let rp_id_len = rest_after_cred[33] as usize;
             // Enforce a sane upper bound: max valid domain name is 253 chars.
             // Without this an attacker-controlled payer could create a 369-byte
@@ -114,6 +122,13 @@ pub fn process(
     let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. The payer's signature was only ever enforced as a side effect: the
+    // System Program demands it during the funding CPI. `initialize_pda_account`
+    // skips that CPI when the PDA already holds enough lamports — anyone can
+    // pre-fund a PDA — so on that path nothing checked it at all.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -133,14 +148,15 @@ pub fn process(
     // Get rent from sysvar (fixes audit issue #5 - hardcoded rent calculations)
     let rent = Rent::from_account_info(rent_sysvar)?;
 
-    let (wallet_key, wallet_bump) = find_program_address(&[b"wallet", &args.user_seed], program_id);
+    let (wallet_key, wallet_bump) =
+        find_program_address(&[crate::seeds::WALLET, &args.user_seed], program_id);
     if !sol_assert_bytes_eq(wallet_pda.key().as_ref(), wallet_key.as_ref(), 32) {
         return Err(ProgramError::InvalidSeeds);
     }
     check_zero_data(wallet_pda, ProgramError::AccountAlreadyInitialized)?;
 
     let (vault_key, _vault_bump) =
-        find_program_address(&[b"vault", wallet_key.as_ref()], program_id);
+        find_program_address(&[crate::seeds::VAULT, wallet_key.as_ref()], program_id);
     if !sol_assert_bytes_eq(vault_pda.key().as_ref(), vault_key.as_ref(), 32) {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -148,8 +164,10 @@ pub fn process(
     // Derive canonical authority PDA and verify user-provided bump matches (audit N1)
     // Must use find_program_address to ensure canonical bump - user-supplied bump
     // could create a valid but non-canonical PDA
-    let (auth_key, auth_bump) =
-        find_program_address(&[b"authority", wallet_key.as_ref(), id_seed], program_id);
+    let (auth_key, auth_bump) = find_program_address(
+        &[crate::seeds::AUTHORITY, wallet_key.as_ref(), id_seed],
+        program_id,
+    );
     if !sol_assert_bytes_eq(auth_pda.key().as_ref(), auth_key.as_ref(), 32) {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -163,7 +181,7 @@ pub fn process(
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
     let wallet_bump_arr = [wallet_bump];
     let wallet_seeds = [
-        Seed::from(b"wallet"),
+        Seed::from(crate::seeds::WALLET),
         Seed::from(&args.user_seed),
         Seed::from(&wallet_bump_arr),
     ];
@@ -187,7 +205,9 @@ pub fn process(
         discriminator: AccountDiscriminator::Wallet as u8,
         bump: wallet_bump,
         version: crate::state::CURRENT_ACCOUNT_VERSION,
-        _padding: [0; 5],
+        _padding: [0; 1],
+        // The authority created just below is this wallet's first Owner.
+        owner_count: 1,
     };
     unsafe {
         std::ptr::write_unaligned(
@@ -214,7 +234,7 @@ pub fn process(
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
     let auth_bump_arr = [auth_bump];
     let auth_seeds = [
-        Seed::from(b"authority"),
+        Seed::from(crate::seeds::AUTHORITY),
         Seed::from(wallet_key.as_ref()),
         Seed::from(id_seed),
         Seed::from(&auth_bump_arr),
@@ -240,7 +260,8 @@ pub fn process(
         version: crate::state::CURRENT_ACCOUNT_VERSION,
         _padding1: [0; 3],
         counter: 0,
-        _padding2: [0; 4],
+        policy_len: 0,
+        _padding2: [0; 2],
         wallet: *wallet_pda.key(),
     };
 
@@ -284,7 +305,10 @@ pub fn process(
                 auth_account_data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
             }
         },
-        _ => unreachable!(),
+        // Validated to 0 or 1 well before here. An error rather than
+        // `unreachable!()` so a future edit that widens the parse cannot turn a
+        // missed arm into a BPF panic — which costs code size to report less.
+        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
 
     Ok(())

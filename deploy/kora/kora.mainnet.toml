@@ -1,0 +1,258 @@
+# Kora paymaster — mainnet.
+#
+# Written against kora v2.2.0-beta.8. Do not apply it to an older build: beta.7
+# parses `--api-key` and ignores it, races past usage limits under concurrency,
+# and leaks the RPC URL's query string in client-facing errors. Check what is
+# running with `getVersion`, or `scripts/kora-check.cjs <url> --cluster mainnet`.
+#
+# No secret belongs in this file. The API key, HMAC secret, reCAPTCHA secret,
+# signer key and Redis URL all come from the environment:
+#   KORA_API_KEY  KORA_HMAC_SECRET  KORA_RECAPTCHA_SECRET  KORA_PRIVATE_KEY  KORA_REDIS_URL
+
+[kora]
+# Requests per second, server-wide.
+rate_limit = 100
+
+[kora.auth]
+# Left empty on purpose — set KORA_API_KEY (and ideally KORA_HMAC_SECRET) in the
+# host's environment. An empty section here is not a safe default: with no key
+# configured anywhere, the auth layer is not mounted at all and every method
+# answers a stranger.
+#
+# Be honest about what the API key buys. It ships inside a browser bundle and an
+# app bundle, so every user has it and so does anyone who reads the bundle. It
+# lets you cut off a client and raises the cost of casual abuse; it is not a
+# secret. reCAPTCHA is the control that a public dApp can actually hold, because
+# a token is minted per visitor and cannot be scraped in bulk.
+# recaptcha_score_threshold = 0.5
+protected_methods = ["signTransaction", "signAndSendTransaction"]
+
+[kora.lighthouse]
+# Lighthouse appends balance assertions that abort a transaction if the fee
+# payer loses more than expected — the direct answer to fee-payer drains.
+#
+# It is off because it cannot work with the flow the clients use today: adding
+# an instruction invalidates signatures already collected, so it only applies to
+# `signTransaction` → client re-signs → client sends. `packages/react` and
+# `packages/react-native` both call `signAndSendTransaction` on the main path.
+# Turning this on is worth doing, but it is a client change first.
+enabled = false
+fail_if_transaction_size_overflow = true
+
+[kora.cache]
+# Account/price caching is an optimisation, and it wants its own `url`. Turn it
+# on once Redis is attached and you have watched a deploy come up with it; the
+# usage limits below resolve their store from KORA_REDIS_URL independently.
+enabled = false
+# url = "redis://..."
+default_ttl = 300
+account_ttl = 60
+price_ttl = 0
+
+[kora.enabled_methods]
+liveness = true
+get_version = true
+get_blockhash = true
+get_config = true
+get_payer_signer = true
+estimate_transaction_fee = true
+sign_transaction = true
+sign_and_send_transaction = true
+# Off: nothing in LazorKit calls them, and each is a way to ask the payer for
+# something. `transfer_transaction` in particular builds a transfer funded by
+# the fee payer.
+transfer_transaction = false
+get_supported_tokens = false
+
+[validation]
+# What one sponsored transaction may cost the fee payer, in lamports.
+#
+# Measured on mainnet (getMinimumBalanceForRentExemption):
+#   Wallet, 8 bytes                 0.00069088 SOL
+#   Authority, 145 bytes (passkey)  0.00138684 SOL
+#   FeeRecord, 32 bytes (once/payer) 0.0008128 SOL
+#   token account, 165 bytes        0.00148844 SOL
+# so CreateWallet costs the payer ~0.0029 SOL, and the heaviest flow — a
+# migration that creates the v2 wallet and several destination ATAs in one
+# transaction — lands around 0.01. 0.015 leaves room for about eight ATAs and is
+# still six times tighter than the 0.1 this relayer runs today.
+max_allowed_lamports = 15000000
+
+# Payer, plus an Ed25519 owner where one signs. Passkey flows add no signature:
+# the precompile verifies, it does not sign.
+max_signatures = 4
+
+# "Jupiter" fails validation without JUPITER_API_KEY, and nothing reads the
+# oracle while price.type = "free" — no conversion happens, so there is no price
+# to fetch. The validator's "Mock is not suitable for production" warning is
+# about paid pricing; revisit this the day fees are charged in tokens.
+price_source = "Mock"
+allow_durable_transactions = false
+cross_cluster_check = false
+
+# Every instruction's program id must appear here — precompiles included, with
+# no exemption, and instructions that only appear in simulation are checked too.
+# A missing entry is a refusal at the relayer, before anything reaches the chain.
+allowed_programs = [
+    "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",   # LazorKit
+    "Secp256r1SigVerify1111111111111111111111111",   # passkey precompile — every v2 user action carries one
+    "11111111111111111111111111111111",              # System
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # SPL Token
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   # Token-2022 — a wallet holding one cannot migrate without it
+    "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",  # Associated Token Account
+    "ComputeBudget111111111111111111111111111111",   # the compute-limit instruction the SDK prepends
+    # "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95", # Lighthouse — uncomment with [kora.lighthouse].enabled
+]
+
+# The line that turns a general-purpose relayer into this protocol's relayer: a
+# transaction that never touches LazorKit is refused outright, whatever else it
+# asks for. Without it, `allowed_programs` alone still sponsors a bare System
+# transfer.
+require_one_of_programs = [
+    "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",
+]
+
+# Only meaningful for token-denominated payment, which this deployment does not
+# use. Kept to USDC rather than opened.
+allowed_tokens = [
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+]
+allowed_spl_paid_tokens = []
+disallowed_accounts = []
+
+# The sponsor pays; that is the product. What bounds it is authentication, the
+# lamport cap above, and the usage limits below — not the price policy.
+[validation.price]
+type = "free"
+
+# What the FEE PAYER may be used for. Two flags have to stay open because the
+# protocol itself needs them: the program funds its PDAs and pays the protocol
+# fee through System CPIs with the payer as source. Everything else is shut.
+#
+# If a legitimate flow starts being refused, the relayer's error names the
+# instruction — open that one flag, rather than reverting this block.
+[validation.fee_payer_policy.system]
+allow_transfer = true        # the protocol fee CPI, payer -> treasury shard
+allow_create_account = true  # rent for Wallet, Authority, FeeRecord, ATAs
+allow_assign = false
+allow_allocate = false
+
+[validation.fee_payer_policy.system.nonce]
+allow_initialize = false
+allow_advance = false
+allow_authorize = false
+allow_withdraw = false
+
+[validation.fee_payer_policy.spl_token]
+# The payer is never the source of a token movement in any LazorKit flow — the
+# vault is. Nothing here needs to be true.
+allow_transfer = false
+allow_burn = false
+allow_close_account = false
+allow_approve = false
+allow_revoke = false
+allow_set_authority = false
+allow_mint_to = false
+allow_initialize_mint = false
+allow_initialize_account = false
+allow_initialize_multisig = false
+allow_freeze_account = false
+allow_thaw_account = false
+allow_withdraw_excess_lamports = false
+allow_unwrap_lamports = false
+
+[validation.fee_payer_policy.token_2022]
+allow_transfer = false
+allow_burn = false
+allow_close_account = false
+allow_approve = false
+allow_revoke = false
+allow_set_authority = false
+allow_mint_to = false
+allow_initialize_mint = false
+allow_initialize_account = false
+allow_initialize_multisig = false
+allow_freeze_account = false
+allow_thaw_account = false
+allow_withdraw_excess_lamports = false
+allow_unwrap_lamports = false
+
+[validation.fee_payer_policy.alt]
+allow_create = false
+allow_extend = false
+allow_freeze = false
+allow_deactivate = false
+allow_close = false
+
+[validation.token_2022]
+# deny_all, not the laxer default. Under
+# `deny_mutable_for_delayed_signing` a mint whose transfer-hook authority is
+# still mutable is accepted on `signAndSendTransaction` — which is the flow both
+# clients use — and that authority can swap the hook program between the moment
+# we sign and the moment it executes. The cost of denying: a user holding a
+# transfer-hook token cannot move it through the sponsor. That is the right way
+# round.
+transfer_hook_policy = "deny_all"
+
+# PermanentDelegate is deliberately NOT blocked, against the validator's advice.
+# Its warning is about payment tokens — a delegate seizing what it was paid —
+# and this relayer takes no token payment at all (price.type = "free"). Blocking
+# it here would only refuse to sponsor a user moving their own token out of a v1
+# vault. Revisit if fees are ever charged in tokens.
+blocked_mint_extensions = []
+blocked_account_extensions = []
+
+# A per-caller ceiling, which is the only thing that makes "free" survivable on
+# a public endpoint. Needs Redis (KORA_REDIS_URL) to hold across instances and
+# restarts; in memory it resets on every deploy.
+#
+# `enabled = true` with no rules FAILS STARTUP on beta.8 — it used to be a
+# silent no-op, which is why the rules below are not optional.
+[kora.usage_limit]
+enabled = true
+fallback_if_unavailable = false  # cache down = refuse, not sponsor blindly
+
+[[kora.usage_limit.rules]]
+type = "transaction"
+max = 50
+window_seconds = 3600
+
+# An instruction rule can only name an instruction Kora's own parser
+# recognises: System `createaccount` / `createaccountwithseed`, ATA `create` /
+# `createidempotent`, and the loaders. `InstructionIdentifier::identify` returns
+# None for any other program, so a rule naming a LazorKit instruction would
+# silently never match — bound the rent instead, which is what a caller actually
+# spends of ours.
+[[kora.usage_limit.rules]]
+type = "instruction"
+program = "11111111111111111111111111111111"
+instruction = "createaccount"
+max = 10
+window_seconds = 3600
+
+[[kora.usage_limit.rules]]
+# Destination token accounts during a migration. Counted only where the fee
+# payer is the one funding them.
+type = "instruction"
+program = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+instruction = "createidempotent"
+max = 20
+window_seconds = 3600
+
+# Its own port. On the RPC port the metrics handler is mounted before the auth
+# layer, so anyone who can reach the relayer can read them.
+[metrics]
+enabled = true
+endpoint = "/metrics"
+port = 9090
+scrape_interval = 60
+
+[metrics.fee_payer_balance]
+enabled = true
+expiry_seconds = 30
+
+[kora.plugins]
+enabled = []
+
+[kora.bundle]
+enabled = false

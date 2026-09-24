@@ -21,6 +21,7 @@ import {
   ed25519,
 } from '@lazorkit/sdk';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -99,6 +100,7 @@ describe('Authority Management', () => {
           rpId: key.rpId,
         },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
 
       await sendTx(ctx, instructions, [ownerSigner]);
@@ -117,6 +119,7 @@ describe('Authority Management', () => {
           adminSigner: ed25519(ownerSigner.address, ownerAuthorityPda),
           newAuthority: { type: 'ed25519', publicKey: spenderSigner.address },
           role: ROLE_SPENDER,
+          policy: delegatePolicy(),
         });
       await sendTx(ctx, addIxs, [ownerSigner]);
 
@@ -143,6 +146,7 @@ describe('Authority Management', () => {
         adminSigner: ed25519(randomSigner.address, ownerAuthorityPda),
         newAuthority: { type: 'ed25519', publicKey: newSigner.address },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       await sendTxExpectError(ctx, instructions, [randomSigner]);
     });

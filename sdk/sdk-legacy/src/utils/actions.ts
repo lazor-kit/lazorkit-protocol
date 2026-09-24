@@ -283,3 +283,113 @@ export function serializeActions(actions: SessionAction[]): Uint8Array {
   }
   return result;
 }
+
+// ─── Parsing (reading a policy back) ─────────────────────────────────
+//
+// `serializeActions` is only half the story: an operator needs to answer
+// "is this delegate bounded, and how much of its allowance is left?" for a
+// key that already exists on chain. The recurring/lifetime actions carry
+// mutable counters the program writes on every Execute, so a parsed action
+// reports both what was granted and what has been consumed.
+
+function readU64LE(buf: Uint8Array, offset: number): bigint {
+  let value = 0n;
+  for (let i = 7; i >= 0; i--) value = (value << 8n) | BigInt(buf[offset + i]);
+  return value;
+}
+
+function readU16LE(buf: Uint8Array, offset: number): number {
+  return buf[offset] | (buf[offset + 1] << 8);
+}
+
+/** One action as it currently stands on chain, including its live counters. */
+export interface ParsedAction {
+  type: SessionActionType;
+  /** Per-action expiry slot. 0 = inherit the session/authority expiry. */
+  expiresAt: bigint;
+  /** Lifetime or per-window cap, in lamports or token base units. */
+  limit?: bigint;
+  /** Consumed so far in the current window (recurring actions only). */
+  spent?: bigint;
+  /** Window length in slots (recurring actions only). */
+  window?: bigint;
+  /** Slot the current window was last reset to (recurring actions only). */
+  lastReset?: bigint;
+  /** The mint a Token* action applies to. */
+  mint?: PublicKey;
+  /** The program a ProgramWhitelist / ProgramBlacklist action names. */
+  programId?: PublicKey;
+  /** Raw data bytes, for a type this parser does not model. */
+  raw: Uint8Array;
+}
+
+/**
+ * Parse an on-chain action buffer — an authority's policy or a session's
+ * actions — into its individual actions.
+ *
+ * Read the buffer straight off the account: it sits after the fixed header
+ * and key material (80 bytes for an Ed25519 authority, 145 for Secp256r1,
+ * 80 for a session), and its length is the authority's `policyLen`.
+ *
+ * Throws on a malformed buffer rather than returning a partial list, since a
+ * short read here would silently understate what a key is allowed to do.
+ */
+export function parseActions(buffer: Uint8Array): ParsedAction[] {
+  const out: ParsedAction[] = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    if (offset + ACTION_HEADER_SIZE > buffer.length) {
+      throw new Error(
+        `Malformed action buffer: truncated header at offset ${offset} (${buffer.length} bytes total)`,
+      );
+    }
+    const type = buffer[offset] as SessionActionType;
+    const dataLen = readU16LE(buffer, offset + 1);
+    const expiresAt = readU64LE(buffer, offset + 3);
+    const dataStart = offset + ACTION_HEADER_SIZE;
+    if (dataStart + dataLen > buffer.length) {
+      throw new Error(
+        `Malformed action buffer: action at offset ${offset} declares ${dataLen} data bytes, past the end`,
+      );
+    }
+    const data = buffer.subarray(dataStart, dataStart + dataLen);
+    const parsed: ParsedAction = { type, expiresAt, raw: new Uint8Array(data) };
+
+    switch (type) {
+      case SessionActionType.SolLimit:
+      case SessionActionType.SolMaxPerTx:
+        parsed.limit = readU64LE(data, 0);
+        break;
+      case SessionActionType.SolRecurringLimit:
+        parsed.limit = readU64LE(data, 0);
+        parsed.spent = readU64LE(data, 8);
+        parsed.window = readU64LE(data, 16);
+        parsed.lastReset = readU64LE(data, 24);
+        break;
+      case SessionActionType.TokenLimit:
+      case SessionActionType.TokenMaxPerTx:
+        parsed.mint = new PublicKey(data.subarray(0, 32));
+        parsed.limit = readU64LE(data, 32);
+        break;
+      case SessionActionType.TokenRecurringLimit:
+        parsed.mint = new PublicKey(data.subarray(0, 32));
+        parsed.limit = readU64LE(data, 32);
+        parsed.spent = readU64LE(data, 40);
+        parsed.window = readU64LE(data, 48);
+        parsed.lastReset = readU64LE(data, 56);
+        break;
+      case SessionActionType.ProgramWhitelist:
+      case SessionActionType.ProgramBlacklist:
+        parsed.programId = new PublicKey(data.subarray(0, 32));
+        break;
+      default:
+        // Unknown type — the program would reject it, but report it rather
+        // than dropping it, so an operator sees what is actually stored.
+        break;
+    }
+
+    out.push(parsed);
+    offset = dataStart + dataLen;
+  }
+  return out;
+}

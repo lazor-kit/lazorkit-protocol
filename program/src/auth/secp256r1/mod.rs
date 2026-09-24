@@ -88,7 +88,18 @@ impl Authenticator for Secp256r1Authenticator {
         };
 
         // --- Odometer validation ---
-        let expected_counter = header.counter.wrapping_add(1);
+        //
+        // The counter lives in the authority account, so removing an authority
+        // and re-adding the same key resets it to zero and makes that key's old
+        // signatures acceptable again. There is no cheaper durable fix: once the
+        // account is closed there is no state left to remember it by, and the
+        // wallet has no monotonic counter of its own to fold into the challenge.
+        //
+        // What bounds it is the slot check above. A replayed signature must
+        // still be inside MAX_SLOT_AGE, so the attacker has ~60 seconds to
+        // remove and re-add the authority — and removing one already requires
+        // Owner or Admin rank, which is enough privilege to do worse directly.
+        let expected_counter = next_counter(header.counter)?;
         if submitted_counter != expected_counter {
             return Err(AuthError::SignatureReused.into());
         }
@@ -276,9 +287,17 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
+#[inline(always)]
+fn next_counter(counter: u32) -> Result<u32, ProgramError> {
+    counter
+        .checked_add(1)
+        .ok_or(ProgramError::ArithmeticOverflow)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ct_eq;
+    use super::{ct_eq, next_counter};
+    use pinocchio::program_error::ProgramError;
 
     #[test]
     fn ct_eq_equal() {
@@ -306,5 +325,19 @@ mod tests {
     #[test]
     fn ct_eq_differs_at_middle() {
         assert!(!ct_eq(b"axc", b"abc"));
+    }
+
+    #[test]
+    fn next_counter_increments_without_wrapping() {
+        assert_eq!(next_counter(0).unwrap(), 1);
+        assert_eq!(next_counter(u32::MAX - 1).unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn next_counter_rejects_overflow() {
+        assert!(matches!(
+            next_counter(u32::MAX),
+            Err(ProgramError::ArithmeticOverflow)
+        ));
     }
 }

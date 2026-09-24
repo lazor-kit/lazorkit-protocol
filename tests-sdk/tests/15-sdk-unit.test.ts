@@ -331,3 +331,50 @@ describe('WalletAuthorityRecord', () => {
     expect(typeof record.authorityType).toBe('number');
   });
 });
+
+// ─── protocol-fee suffix ────────────────────────────────────────────
+
+describe('protocol-fee suffix — required on disc 0/4/7 even with no live fee', () => {
+  const SYSTEM = '11111111111111111111111111111111';
+
+  it('createWallet appends [config, feeRecord, shard 0, System] when the protocol is not initialised', async () => {
+    // The window between an upgrade and InitializeProtocol, or a paused
+    // protocol. The program rejects CreateWallet without the four-account
+    // suffix (4008) before it reads the config, and strips it when nothing is
+    // charged — so the SDK must send it anyway.
+    const nullConnection = { getAccountInfo: async () => null } as unknown as Connection;
+    const client = makeClient(nullConnection);
+    const payer = Keypair.generate().publicKey;
+    const { instructions } = await client.createWallet({
+      payer,
+      userSeed: crypto.randomBytes(32),
+      owner: { type: 'ed25519', publicKey: Keypair.generate().publicKey },
+    });
+    // No RegisterPayer: with no live fee there is nothing to register.
+    expect(instructions).toHaveLength(1);
+    const [config] = client.findProtocolConfig();
+    const [record] = client.findFeeRecord(payer);
+    const [shard0] = client.findTreasuryShard(0);
+    expect(instructions[0].keys.slice(-4).map((k) => k.pubkey.toBase58())).toEqual([
+      config.toBase58(),
+      record.toBase58(),
+      shard0.toBase58(),
+      SYSTEM,
+    ]);
+  });
+
+  it('omits the suffix, with no RPC at all, only when built with { protocolFees: false }', async () => {
+    const conn = new StrictNoRpcConnection();
+    const client = new LazorKitClient(conn as unknown as Connection, DEVNET_PROGRAM_ID, {
+      protocolFees: false,
+    });
+    const { instructions } = await client.createWallet({
+      payer: Keypair.generate().publicKey,
+      userSeed: crypto.randomBytes(32),
+      owner: { type: 'ed25519', publicKey: Keypair.generate().publicKey },
+    });
+    const [config] = client.findProtocolConfig();
+    expect(instructions[0].keys.map((k) => k.pubkey.toBase58())).not.toContain(config.toBase58());
+    expect(conn.callCount).toBe(0);
+  });
+});

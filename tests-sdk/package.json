@@ -6,8 +6,9 @@
   "scripts": {
     "test": "vitest run --fileParallelism=false",
     "test:watch": "vitest --fileParallelism=false",
-    "test:local": "npm run validator:start & sleep 3 && npm test; npm run validator:stop",
-    "validator:start": "cd ../program && cargo build-sbf --features devnet && cd - && solana-test-validator --ledger \"$HOME/test-ledger\" --bpf-program $(solana-keygen pubkey ../target/deploy/lazorkit_program-keypair.json) ../target/deploy/lazorkit_program.so --reset --quiet &",
+    "test:local": "npm run validator:start; npm run validator:wait && npm test; npm run validator:stop",
+    "validator:start": "../scripts/start-validator.sh",
+    "validator:wait": "../scripts/wait-for-validator.sh",
     "validator:stop": "pkill -f solana-test-validator || true",
     "benchmark": "npx tsx tests/benchmark.ts"
   },

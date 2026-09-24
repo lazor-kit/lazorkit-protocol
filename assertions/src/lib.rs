@@ -1,31 +1,43 @@
 #![allow(unexpected_cfgs)]
 #[cfg(target_os = "solana")]
-use pinocchio::syscalls::{sol_curve_validate_point, sol_get_stack_height, sol_memcmp_};
+use pinocchio::syscalls::sol_memcmp_;
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
-    pubkey::{create_program_address, find_program_address, Pubkey},
+    pubkey::{find_program_address, Pubkey},
     ProgramResult,
 };
 use pinocchio_pubkey::declare_id;
-use pinocchio_system::ID as SYSTEM_ID;
 
-// LazorKit Program ID — chosen at build time via the `mainnet` / `devnet`
-// cargo features. Exactly one must be enabled; otherwise the build fails
-// loudly via the `compile_error!` below. This prevents accidental cross-
+// LazorKit Program ID — chosen at build time via the `mainnet` / `devnet` /
+// `staging` cargo features. Exactly one must be enabled; otherwise the build
+// fails loudly via the `compile_error!` below. This prevents accidental cross-
 // cluster deploys (a binary compiled with one ID malfunctions if deployed
-// to a slot at the other ID — every internal `crate::ID` check fails).
-#[cfg(all(feature = "mainnet", not(feature = "devnet")))]
+// to a slot at another ID — every internal `crate::ID` check fails).
+//
+// `staging` is a throwaway devnet slot for integration rehearsals (e.g. giving
+// a direct integrator a v2 wire-format target to test against before the
+// mainnet swap). Its ID is a fresh keypair, not a vanity address.
+#[cfg(all(feature = "mainnet", not(feature = "devnet"), not(feature = "staging")))]
 declare_id!("LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi");
 
-#[cfg(all(feature = "devnet", not(feature = "mainnet")))]
+#[cfg(all(feature = "devnet", not(feature = "mainnet"), not(feature = "staging")))]
 declare_id!("4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS");
+
+#[cfg(all(feature = "staging", not(feature = "mainnet"), not(feature = "devnet")))]
+declare_id!("HQ584adp8ub2FzrTx1fdNmXmrL5yuyVndafPB3x4NYG3");
 
 #[cfg(any(
     all(feature = "mainnet", feature = "devnet"),
-    all(not(feature = "mainnet"), not(feature = "devnet"))
+    all(feature = "mainnet", feature = "staging"),
+    all(feature = "devnet", feature = "staging"),
+    all(
+        not(feature = "mainnet"),
+        not(feature = "devnet"),
+        not(feature = "staging")
+    )
 ))]
-compile_error!("LazorKit: pick exactly one cluster — `--features mainnet` OR `--features devnet`");
+compile_error!("LazorKit: pick exactly one cluster — `--features mainnet` | `devnet` | `staging`");
 
 #[allow(unused_imports)]
 use std::mem::MaybeUninit;
@@ -86,99 +98,6 @@ sol_assert_return!(check_any_pda, u8, seeds: &[&[u8]], target_key: &Pubkey, prog
   }
 });
 
-sol_assert_return!(check_self_pda, u8, seeds: &[&[u8]], target_key: &Pubkey | {
-let pda = create_program_address(seeds, &crate::ID)?;
-if sol_assert_bytes_eq(pda.as_ref(), target_key.as_ref(), 32) {
-  Some(seeds[seeds.len()-1][0])
-} else {
-  None
-}
-});
-
-sol_assert_return!(find_self_pda, u8, seeds: &[&[u8]], target_key: &Pubkey | {
-let (pda, bump) = find_program_address(seeds, &crate::ID);
-if sol_assert_bytes_eq(pda.as_ref(), target_key.as_ref(), 32) {
-  Some( bump )
-} else {
-  None
-}
-});
-
-sol_assert!(check_writable_signer, account: &AccountInfo |
-  account.is_writable() && account.is_signer()
-);
-
-sol_assert!(check_writable, account: &AccountInfo |
-  account.is_writable()
-);
-
-sol_assert!(check_key_match, account: &AccountInfo, target_key: &Pubkey |
-  sol_assert_bytes_eq(account.key().as_ref(), target_key.as_ref(), 32)
-);
-
-sol_assert!(check_bytes_match, left: &[u8], right: &[u8], len: usize |
-  sol_assert_bytes_eq(left, right, len)
-);
-
-sol_assert!(check_owner, account: &AccountInfo, owner: &Pubkey |
-  sol_assert_bytes_eq(account.owner().as_ref(), owner.as_ref(), 32)
-);
-
-sol_assert!(check_system_owner, account: &AccountInfo |
-  sol_assert_bytes_eq(account.owner().as_ref(), SYSTEM_ID.as_ref(), 32)
-);
-
-sol_assert!(check_self_owned, account: &AccountInfo |
-  sol_assert_bytes_eq(account.owner().as_ref(), crate::ID.as_ref(), 32)
-);
-
-sol_assert!(check_zero_lamports, account: &AccountInfo |
-  unsafe {
-      *account.borrow_mut_lamports_unchecked() == 0
-  }
-);
-
-sol_assert!(check_stack_height, expected: u64 |
-      get_stack_height(expected)
-);
-
 sol_assert!(check_zero_data, account: &AccountInfo |
   account.data_len() == 0
 );
-
-sol_assert!(check_zero_balance, account: &AccountInfo |
-  unsafe {
-      *account.borrow_mut_lamports_unchecked() == 0 && account.data_len() == 0
-  }
-);
-
-sol_assert!(check_on_curve, point: &[u8] |
-  is_on_curve(point)
-);
-
-sol_assert!(check_signer, account: &AccountInfo |
-  account.is_signer()
-);
-
-#[cfg(target_os = "solana")]
-pub fn is_on_curve(point: &[u8]) -> bool {
-    let mut intermediate = MaybeUninit::<u8>::uninit();
-    unsafe { sol_curve_validate_point(0, point.as_ptr(), intermediate.as_mut_ptr()) == 0 }
-}
-
-#[cfg(not(target_os = "solana"))]
-pub fn is_on_curve(_point: &[u8]) -> bool {
-    unimplemented!()
-}
-
-#[cfg(target_os = "solana")]
-#[inline(always)]
-pub fn get_stack_height(expected: u64) -> bool {
-    unsafe { sol_get_stack_height() == expected }
-}
-
-#[cfg(not(target_os = "solana"))]
-#[inline(always)]
-pub fn get_stack_height(_expected: u64) -> bool {
-    unimplemented!()
-}

@@ -1,5 +1,7 @@
+import { Buffer } from 'buffer';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { createHash } from 'crypto';
+import { sha256 } from '@noble/hashes/sha2';
+import { ACCOUNT_DISCRIMINATOR } from '../constants';
 
 /**
  * Generates WebAuthn authenticator data for a given RP ID.
@@ -9,7 +11,7 @@ import { createHash } from 'crypto';
  * - Counter: 0 (LazorKit uses its own odometer counter, not WebAuthn counter)
  */
 export function generateAuthenticatorData(rpId: string): Uint8Array {
-  const rpIdHash = createHash('sha256').update(rpId).digest();
+  const rpIdHash = sha256(rpId);
   const data = new Uint8Array(37);
   data.set(rpIdHash, 0);
   data[32] = 0x01; // User Present flag
@@ -87,8 +89,9 @@ export async function readAuthorityPubkey(
   // Header is 48 bytes, credential_id_hash is 32 bytes, pubkey is 33 bytes.
   // Min size = 48 + 32 + 33 = 113 bytes for a Secp256r1 authority.
   if (info.data.length < 113) throw new Error('Authority account too small for Secp256r1');
-  // Byte 0 is the account discriminator: Authority = 2.
-  if (info.data[0] !== 2) throw new Error('Not an Authority account');
+  // Byte 0 is the account discriminator.
+  if (info.data[0] !== ACCOUNT_DISCRIMINATOR.AUTHORITY)
+    throw new Error('Not an Authority account');
   // Byte 1 is the authority_type: Secp256r1 = 1.
   if (info.data[1] !== 1) throw new Error('Authority is not Secp256r1');
   // Pubkey at offset 48 + 32 = 80, length 33.
@@ -178,12 +181,12 @@ export function buildSecp256r1Challenge(params: {
   const counterBuf = Buffer.alloc(4);
   counterBuf.writeUInt32LE(params.counter);
 
-  const hash = createHash('sha256');
+  const hash = sha256.create();
   hash.update(params.discriminator);
   hash.update(params.authPayload);
   hash.update(params.signedPayload);
   hash.update(params.payer.toBuffer());
   hash.update(counterBuf);
   hash.update(pid.toBuffer());
-  return new Uint8Array(hash.digest());
+  return hash.digest();
 }

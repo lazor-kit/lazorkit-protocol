@@ -35,3 +35,7 @@ test-ledger
 build_error.log
 validator.log
 .test-ledger
+tmp/
+
+# Survey output: real user wallets + balances. Operational intel, never committed.
+docs/surveys/

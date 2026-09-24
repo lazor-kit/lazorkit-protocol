@@ -35,11 +35,13 @@ LazorKit V2 underwent an audit by **Accretion** plus internal pre-mainnet review
 
 ## Security mechanisms
 
-- Odometer counter replay protection (monotonic u32 per authority; works with synced passkeys).
+- Odometer counter replay protection (monotonic u32 per authority; checked increment never wraps; works with synced passkeys).
 - Clock-based slot freshness (150-slot window via `Clock::get()`).
 - CPI `stack_height` anti-reentrancy check on every authenticated path.
 - Challenge hash binds signature to payer, accounts, counter, and program ID.
+- Authority creation rejects all-zero Ed25519 public keys and all-zero Secp256r1 credential/public-key material.
 - Account ownership + discriminator checks on every PDA read.
+- Fee-eligible instructions require canonical protocol fee suffix accounts and canonical per-payer `FeeRecord` accounting.
 - Transfer-allocate-assign pattern prevents create-account DoS.
 - Session action enforcement: expired spending limits are a hard deny; expired whitelists block all programs.
 - `SolMaxPerTx` uses per-CPI gross-outflow tracking (DeFi round-trips can't bypass the per-tx cap).

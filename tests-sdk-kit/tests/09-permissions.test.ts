@@ -9,12 +9,21 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import * as crypto from 'node:crypto';
 import {
+  getAddressEncoder,
   generateKeyPairSigner,
   type Address,
   type KeyPairSigner,
 } from '@solana/kit';
-import { LazorKit, ROLE_ADMIN, ROLE_SPENDER, ed25519 } from '@lazorkit/sdk';
 import {
+  AUTH_TYPE_ED25519,
+  LazorKit,
+  ROLE_ADMIN,
+  ROLE_OWNER,
+  ROLE_SPENDER,
+  ed25519,
+} from '@lazorkit/sdk';
+import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -23,6 +32,9 @@ import {
   makeClient,
 } from './common.js';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils.js';
+import { createAddAuthorityIx } from '../../sdk/sdk-kit/src/instructions/builders.js';
+
+const addressEncoder = getAddressEncoder();
 
 describe('Permission Boundaries', () => {
   let ctx: TestContext;
@@ -71,6 +83,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(adminSigner.address, adminAuthPda),
       newAuthority: { type: 'ed25519', publicKey: spenderSigner.address },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     spenderAuthPda = addSpenderResult.newAuthorityPda;
     await sendTx(ctx, addSpenderResult.instructions, [adminSigner]);
@@ -84,6 +97,7 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderSigner.address, spenderAuthPda),
       newAuthority: { type: 'ed25519', publicKey: newSigner.address },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     await sendTxExpectError(ctx, instructions, [spenderSigner], 3002);
   });
@@ -108,6 +122,54 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
       newAuthority: { type: 'ed25519', publicKey: newSigner.address },
       role: ROLE_ADMIN,
+    });
+    await sendTx(ctx, instructions, [ownerSigner]);
+  });
+
+  // A person with several devices holds several passkeys, and each of them is an
+  // Owner — that is what lets a surviving device revoke a lost one.
+  it('owner can add another owner through AddAuthority', async () => {
+    const newOwnerSigner = await generateKeyPairSigner();
+    const newOwnerKey = addressEncoder.encode(newOwnerSigner.address) as Uint8Array;
+    const [newOwnerAuthPda] = await client.findAuthority(walletPda, newOwnerKey);
+    const ix = createAddAuthorityIx({
+      payer: ctx.payer.address,
+      walletPda,
+      adminAuthorityPda: ownerAuthPda,
+      newAuthorityPda: newOwnerAuthPda,
+      newType: AUTH_TYPE_ED25519,
+      newRole: ROLE_OWNER,
+      credentialOrPubkey: newOwnerKey,
+      authorizerSigner: ownerSigner.address,
+      programId: client.programId,
+    });
+
+    await sendTx(ctx, [ix], [ownerSigner]);
+    const auth = await ctx.rpc.getAccountInfo(newOwnerAuthPda, { encoding: 'base64' }).send();
+    expect(Buffer.from(auth.value!.data[0], 'base64')[2]).toBe(ROLE_OWNER);
+  });
+
+  // The client keeps the safe default: creating an Owner is an explicit opt-in,
+  // not something a mistyped role constant can do.
+  it('the client refuses role 0 unless allowOwner is passed', async () => {
+    const newOwnerSigner = await generateKeyPairSigner();
+    await expect(
+      client.addAuthority({
+        payer: ctx.payer.address,
+        walletPda,
+        adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
+        newAuthority: { type: 'ed25519', publicKey: newOwnerSigner.address },
+        role: ROLE_OWNER,
+      }),
+    ).rejects.toThrow(/allowOwner/);
+
+    const { instructions } = await client.addAuthority({
+      payer: ctx.payer.address,
+      walletPda,
+      adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
+      newAuthority: { type: 'ed25519', publicKey: newOwnerSigner.address },
+      role: ROLE_OWNER,
+      allowOwner: true,
     });
     await sendTx(ctx, instructions, [ownerSigner]);
   });
@@ -169,6 +231,8 @@ describe('Permission Boundaries', () => {
       adminSigner: ed25519(spenderSigner.address, spenderAuthPda),
       sessionKey: sessionSigner.address,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTxExpectError(ctx, instructions, [spenderSigner], 3002);
   });
@@ -213,6 +277,7 @@ describe('Permission Boundaries', () => {
           rpId: secpSpenderKey.rpId,
         },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(secpOwnerKey, prepared.challenge);
       const addResult = client.finalizeAddAuthority(prepared, response);
@@ -232,6 +297,7 @@ describe('Permission Boundaries', () => {
         },
         newAuthority: { type: 'ed25519', publicKey: newSigner.address },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
       const response = await fakeWebAuthnSign(secpSpenderKey, prepared.challenge);
       const { instructions } = client.finalizeAddAuthority(prepared, response);
@@ -252,6 +318,8 @@ describe('Permission Boundaries', () => {
         },
         sessionKey: sessionSigner.address,
         expiresAt: currentSlot + 9000n,
+        // Deliberately unrestricted: this test exercises the actionless session.
+        unrestricted: true,
       });
       const response = await fakeWebAuthnSign(secpSpenderKey, prepared.challenge);
       const { instructions } = client.finalizeCreateSession(prepared, response);

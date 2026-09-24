@@ -1,7 +1,4 @@
-use crate::{
-    error::AuthError,
-    state::{deferred::DeferredExecAccount, AccountDiscriminator},
-};
+use crate::{error::AuthError, state::deferred::DeferredExecAccount};
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
@@ -43,16 +40,10 @@ pub fn process(
 
     // Read DeferredExec account
     let deferred_data = unsafe { deferred_pda.borrow_mut_data_unchecked() };
-    if deferred_data.len() < std::mem::size_of::<DeferredExecAccount>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    DeferredExecAccount::check(deferred_data)?;
 
     let deferred =
         unsafe { std::ptr::read_unaligned(deferred_data.as_ptr() as *const DeferredExecAccount) };
-
-    if deferred.discriminator != AccountDiscriminator::DeferredExec as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
 
     // Only the original payer can reclaim
     if deferred.payer != *payer.key() {
@@ -63,6 +54,16 @@ pub fn process(
     let clock = Clock::get()?;
     if clock.slot <= deferred.expires_at {
         return Err(AuthError::DeferredAuthorizationNotExpired.into());
+    }
+
+    // Guard: if refund_dest == deferred_pda the double-write below burns the
+    // lamports — the second store wins and the balance lands at zero — and the
+    // runtime's conservation check then aborts the whole transaction after the
+    // data has already been cleared. The other two closers in this program
+    // (`manage::process_remove_authority`, `transfer_ownership`) already had
+    // this; reclaim did not.
+    if refund_dest.key() == deferred_pda.key() {
+        return Err(ProgramError::InvalidAccountData);
     }
 
     // Close the account — zero data and drain lamports

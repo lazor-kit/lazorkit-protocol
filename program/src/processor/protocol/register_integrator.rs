@@ -56,7 +56,7 @@ pub fn process(
 
     // Verify PDA: ["fee_record", payer]
     let (record_key, record_bump) =
-        find_program_address(&[b"fee_record", target_payer], program_id);
+        find_program_address(&[crate::seeds::FEE_RECORD, target_payer], program_id);
     if record_pda.key() != &record_key {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -73,7 +73,7 @@ pub fn process(
 
     let bump_arr = [record_bump];
     let seeds = [
-        Seed::from(b"fee_record"),
+        Seed::from(crate::seeds::FEE_RECORD),
         Seed::from(target_payer.as_ref()),
         Seed::from(&bump_arr),
     ];

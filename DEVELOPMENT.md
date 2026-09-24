@@ -11,7 +11,9 @@
 
 ```
 /program           Rust smart contract (pinocchio, zero-copy)
+/sdk/sdk-kit       Modern TypeScript SDK
 /sdk/sdk-legacy    TypeScript SDK (@solana/web3.js v1, hand-written)
+/tests-sdk-kit     Integration tests for sdk-kit
 /tests-sdk         Integration tests (vitest, ~118 tests across 16 files)
 /scripts           Build/deploy automation
 /no-padding        Custom NoPadding derive macro
@@ -105,6 +107,37 @@ shank idl -o . --out-filename idl.json -p "$PROGRAM_ID"
 ```bash
 cargo build-sbf --features devnet
 solana program deploy target/deploy/lazorkit_program.so -u d
+```
+
+## Continuous Integration
+
+GitHub Actions runs the `lint` workflow on every pull request and on pushes to
+`main` / `develop`:
+
+- Rust: `cargo fmt --all -- --check`, clippy with `devnet` features, and
+  `cargo test --features devnet -p lazorkit-program --lib`.
+- SDK packages: `sdk/sdk-kit` installs, builds, and runs vitest; `sdk/sdk-legacy`
+  installs and builds.
+- Integration suites: `tests-sdk-kit` and `tests-sdk` install and typecheck with
+  `npx tsc -p tsconfig.json --noEmit`.
+
+The `SBF cluster feature check` workflow also runs on pull requests touching
+program/assertions code and on pushes to `main` / `develop`. It builds both
+mainnet and devnet SBF binaries, verifies they differ, and verifies invalid
+feature selections fail at compile time.
+
+Local-validator integration tests are still a manual release/audit check:
+
+```bash
+cd tests-sdk && npm run test:local
+```
+
+For `tests-sdk-kit`, start the validator and run vitest in separate terminals:
+
+```bash
+cd tests-sdk-kit && npm run validator:start
+cd tests-sdk-kit && npm test
+cd tests-sdk-kit && npm run validator:stop
 ```
 
 ### I. Benchmarks

@@ -35,7 +35,7 @@ const payer = new PublicKey('11111111111111111111111111111112');
 describe('PDA derivation parity with sdk-legacy', () => {
   it('wallet PDA matches PublicKey.findProgramAddressSync', async () => {
     const [legacyPda, legacyBump] = PublicKey.findProgramAddressSync(
-      [Buffer.from('wallet'), userSeed],
+      [Buffer.from('lk2:wallet'), userSeed],
       DEVNET_PROGRAM,
     );
     const [kitPda, kitBump] = await findWalletPda(userSeed, PROGRAM_ID_DEVNET);
@@ -45,11 +45,11 @@ describe('PDA derivation parity with sdk-legacy', () => {
 
   it('vault PDA matches', async () => {
     const [walletPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('wallet'), userSeed],
+      [Buffer.from('lk2:wallet'), userSeed],
       DEVNET_PROGRAM,
     );
     const [legacy, legacyBump] = PublicKey.findProgramAddressSync(
-      [Buffer.from('vault'), walletPda.toBuffer()],
+      [Buffer.from('lk2:vault'), walletPda.toBuffer()],
       DEVNET_PROGRAM,
     );
     const [kitWallet] = await findWalletPda(userSeed, PROGRAM_ID_DEVNET);
@@ -60,11 +60,11 @@ describe('PDA derivation parity with sdk-legacy', () => {
 
   it('authority PDA matches', async () => {
     const [walletPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('wallet'), userSeed],
+      [Buffer.from('lk2:wallet'), userSeed],
       DEVNET_PROGRAM,
     );
     const [legacy, legacyBump] = PublicKey.findProgramAddressSync(
-      [Buffer.from('authority'), walletPda.toBuffer(), credentialIdHash],
+      [Buffer.from('lk2:authority'), walletPda.toBuffer(), credentialIdHash],
       DEVNET_PROGRAM,
     );
     const [kitWallet] = await findWalletPda(userSeed, PROGRAM_ID_DEVNET);
@@ -79,11 +79,11 @@ describe('PDA derivation parity with sdk-legacy', () => {
 
   it('session PDA matches', async () => {
     const [walletPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('wallet'), userSeed],
+      [Buffer.from('lk2:wallet'), userSeed],
       DEVNET_PROGRAM,
     );
     const [legacy, legacyBump] = PublicKey.findProgramAddressSync(
-      [Buffer.from('session'), walletPda.toBuffer(), sessionKey],
+      [Buffer.from('lk2:session'), walletPda.toBuffer(), sessionKey],
       DEVNET_PROGRAM,
     );
     const [kitWallet] = await findWalletPda(userSeed, PROGRAM_ID_DEVNET);
@@ -98,7 +98,7 @@ describe('PDA derivation parity with sdk-legacy', () => {
 
   it('protocol config PDA matches', async () => {
     const [legacy, legacyBump] = PublicKey.findProgramAddressSync(
-      [Buffer.from('protocol_config')],
+      [Buffer.from('lk2:protocol_config')],
       DEVNET_PROGRAM,
     );
     const [kit, kitBump] = await findProtocolConfigPda(PROGRAM_ID_DEVNET);
@@ -108,7 +108,7 @@ describe('PDA derivation parity with sdk-legacy', () => {
 
   it('fee record PDA matches', async () => {
     const [legacy, legacyBump] = PublicKey.findProgramAddressSync(
-      [Buffer.from('fee_record'), payer.toBuffer()],
+      [Buffer.from('lk2:fee_record'), payer.toBuffer()],
       DEVNET_PROGRAM,
     );
     const [kit, kitBump] = await findFeeRecordPda(
@@ -122,7 +122,7 @@ describe('PDA derivation parity with sdk-legacy', () => {
   it('treasury shard PDA matches', async () => {
     for (const shardId of [0, 1, 7, 255]) {
       const [legacy, legacyBump] = PublicKey.findProgramAddressSync(
-        [Buffer.from('treasury_shard'), Buffer.from([shardId])],
+        [Buffer.from('lk2:treasury_shard'), Buffer.from([shardId])],
         DEVNET_PROGRAM,
       );
       const [kit, kitBump] = await findTreasuryShardPda(
@@ -136,11 +136,11 @@ describe('PDA derivation parity with sdk-legacy', () => {
 
   it('deferred exec PDA matches (counter is u32 LE)', async () => {
     const [walletPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('wallet'), userSeed],
+      [Buffer.from('lk2:wallet'), userSeed],
       DEVNET_PROGRAM,
     );
     const [authorityPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from('authority'), walletPda.toBuffer(), credentialIdHash],
+      [Buffer.from('lk2:authority'), walletPda.toBuffer(), credentialIdHash],
       DEVNET_PROGRAM,
     );
 
@@ -149,7 +149,7 @@ describe('PDA derivation parity with sdk-legacy', () => {
       counterBuf.writeUInt32LE(counter);
       const [legacy, legacyBump] = PublicKey.findProgramAddressSync(
         [
-          Buffer.from('deferred'),
+          Buffer.from('lk2:deferred'),
           walletPda.toBuffer(),
           authorityPda.toBuffer(),
           counterBuf,

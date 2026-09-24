@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { Keypair } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import {
+  delegatePolicy,
   setupTest,
   sendTx,
   sendTxExpectError,
@@ -83,6 +84,7 @@ describe('Authority Management', () => {
           rpId: key.rpId,
         },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
 
       await sendTx(ctx, instructions, [ownerKp]);
@@ -106,6 +108,7 @@ describe('Authority Management', () => {
           adminSigner: ed25519(ownerKp.publicKey, ownerAuthorityPda),
           newAuthority: { type: 'ed25519', publicKey: spenderKp.publicKey },
           role: ROLE_SPENDER,
+          policy: delegatePolicy(),
         });
 
       await sendTx(ctx, addIxs, [ownerKp]);
@@ -135,6 +138,7 @@ describe('Authority Management', () => {
         adminSigner: ed25519(randomKp.publicKey, ownerAuthorityPda),
         newAuthority: { type: 'ed25519', publicKey: newKp.publicKey },
         role: ROLE_SPENDER,
+        policy: delegatePolicy(),
       });
 
       // Use the random keypair as signer instead of owner — should fail

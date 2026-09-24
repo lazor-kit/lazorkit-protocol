@@ -22,9 +22,36 @@ pub struct AuthorityAccountHeader {
     /// Monotonically increasing counter to prevent replay attacks (Secp256r1 only).
     /// u32 supports ~4 billion operations per authority — more than sufficient.
     pub counter: u32,
-    /// Alignment padding after u32 counter.
-    pub _padding2: [u8; 4],
+    /// Length in bytes of the policy buffer that follows this authority's key
+    /// material, or 0 when it carries none.
+    ///
+    /// Lives in what was `_padding2`, so the header stays 48 bytes and `wallet`
+    /// stays at offset 16. Zero — what every v1 authority held here — means "no
+    /// policy", which is exactly the previous behaviour, so the field needs no
+    /// version gate of its own.
+    pub policy_len: u16,
+    /// Alignment padding after policy_len.
+    pub _padding2: [u8; 2],
     /// The wallet this authority belongs to.
     pub wallet: Pubkey,
 }
-// 1+1+1+1+1+3+4+4+32 = 48. Divisible by 8. wallet stays at offset 16.
+// 1+1+1+1+1+3+4+2+2+32 = 48. Divisible by 8. wallet stays at offset 16.
+
+impl AuthorityAccountHeader {
+    /// Minimum byte length for this account to be readable.
+    pub const MIN_LEN: usize = core::mem::size_of::<Self>();
+
+    /// Validate discriminator, length and layout version before trusting any
+    /// field. Every read path calls this instead of comparing `data[0]` by
+    /// hand, so a future version gate is one edit rather than a hunt through
+    /// every processor.
+    #[inline]
+    pub fn check(data: &[u8]) -> Result<(), pinocchio::program_error::ProgramError> {
+        crate::state::check_header(
+            data,
+            crate::state::AccountDiscriminator::Authority,
+            crate::state::version_offset::AUTHORITY,
+            Self::MIN_LEN,
+        )
+    }
+}

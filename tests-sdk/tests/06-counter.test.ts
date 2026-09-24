@@ -7,7 +7,14 @@ import {
   type AccountMeta,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
-import { setupTest, sendTx, getSlot, resolveFeeAccts, type TestContext } from './common';
+import {
+  setupTest,
+  sendTx,
+  getSlot,
+  resolveFeeAccts,
+  delegatePolicy,
+  type TestContext,
+} from './common';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
   prepareSecp256r1,
@@ -35,6 +42,12 @@ import {
   createExecuteIx,
 } from '../../sdk/sdk-legacy/src/utils/instructions';
 import { AuthorityAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
+
+function policyLenLe(policy: Uint8Array): Buffer {
+  const b = Buffer.alloc(2);
+  b.writeUInt16LE(policy.length, 0);
+  return b;
+}
 
 describe('Counter Edge Cases', () => {
   let ctx: TestContext;
@@ -89,6 +102,9 @@ describe('Counter Edge Cases', () => {
       Buffer.from([AUTH_TYPE_ED25519, ROLE_ADMIN]),
       Buffer.alloc(6),
       adminPubkey,
+      // policy_len = 0 — createAddAuthorityIx always emits these two bytes, and
+      // the program hashes them, so a hand-built payload must match.
+      Buffer.alloc(2),
     ]);
     // On-chain extends: extended_data_payload = data_payload + payer.key()
     const signedPayload1 = Buffer.concat([
@@ -243,6 +259,7 @@ describe('Counter Edge Cases', () => {
     const [auth2Pda] = findAuthorityPda(walletPda, key2.credentialIdHash, PROGRAM_ID_DEVNET);
     const slot = await getSlot(ctx);
 
+    const spenderPolicy = delegatePolicy();
     const rpIdBytes = Buffer.from(key2.rpId, 'utf-8');
     const dataPayload2 = Buffer.concat([
       Buffer.from([AUTH_TYPE_SECP256R1, ROLE_SPENDER]),
@@ -251,6 +268,10 @@ describe('Counter Edge Cases', () => {
       key2.publicKeyBytes,
       Buffer.from([rpIdBytes.length]),
       rpIdBytes,
+      // `[policy_len u16 LE][policy]` — part of the signed region, so it has to
+      // be here as well as in the instruction the SDK builds.
+      policyLenLe(spenderPolicy),
+      spenderPolicy,
     ]);
     // On-chain extends: extended_data_payload = data_payload + payer.key()
     const signedPayloadAdd = Buffer.concat([
@@ -280,6 +301,7 @@ describe('Counter Edge Cases', () => {
         newAuthorityPda: auth2Pda,
         newType: AUTH_TYPE_SECP256R1,
         newRole: ROLE_SPENDER,
+        policy: spenderPolicy,
         credentialOrPubkey: key2.credentialIdHash,
         secp256r1Pubkey: key2.publicKeyBytes,
         rpId: key2.rpId,

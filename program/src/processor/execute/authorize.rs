@@ -63,9 +63,7 @@ pub fn process(
 
     // Validate Wallet discriminator
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     if !authority_pda.is_writable() {
         return Err(ProgramError::InvalidAccountData);
@@ -89,12 +87,7 @@ pub fn process(
 
     // Read authority header
     let authority_data = unsafe { authority_pda.borrow_mut_data_unchecked() };
-    if authority_data.is_empty() || authority_data[0] != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    if authority_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(authority_data)?;
 
     let authority_header = unsafe {
         std::ptr::read_unaligned(authority_data.as_ptr() as *const AuthorityAccountHeader)
@@ -109,8 +102,19 @@ pub fn process(
         return Err(AuthError::InvalidAuthenticationKind.into());
     }
 
-    // Only Owner or Admin can authorize (not Spender)
+    // Only Owner or Admin can authorize (not Delegate)
     if authority_header.role > 1 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+
+    // A policy-bearing authority may not use the deferred path. `ExecuteDeferred`
+    // does not run the action engine — the pre/post spending checks that
+    // `immediate.rs` runs for any authority with a policy — so a bounded Admin's
+    // policy could not be honoured here, and it could spend without limit via
+    // Authorize + ExecuteDeferred. Same principle as the escalation guard in
+    // `manage.rs`: a bounded actor is kept off paths that cannot enforce its
+    // bound. (Delegates are already excluded above; this covers a bounded Admin.)
+    if authority_header.policy_len != 0 {
         return Err(AuthError::PermissionDenied.into());
     }
 
@@ -138,12 +142,15 @@ pub fn process(
 
     // Compute expiry
     let clock = Clock::get()?;
-    let expires_at = clock.slot + expiry_offset as u64;
+    let expires_at = clock
+        .slot
+        .checked_add(expiry_offset as u64)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
 
     // Derive DeferredExec PDA
     let counter_bytes = counter_for_seed.to_le_bytes();
     let seeds: &[&[u8]] = &[
-        b"deferred",
+        crate::seeds::DEFERRED,
         wallet_pda.key().as_ref(),
         authority_pda.key().as_ref(),
         &counter_bytes,
@@ -162,7 +169,7 @@ pub fn process(
     // Create DeferredExec PDA
     let bump_arr = [bump];
     let pda_seeds: &[Seed] = &[
-        Seed::from(b"deferred"),
+        Seed::from(crate::seeds::DEFERRED),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(authority_pda.key().as_ref()),
         Seed::from(&counter_bytes),

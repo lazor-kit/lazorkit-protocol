@@ -6,6 +6,306 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — `CloseExpiredSession` (instruction 18)
+
+A session ends two ways now. Before expiry, as before: `RevokeSession`, signed
+by the wallet's own Owner or Admin. After expiry, by anyone — the account
+authorises nothing at that point (`execute` refuses a session past
+`expires_at`), and the only key that could free its rent belongs to a user with
+no reason to come back. The caller names the refund destination and keeps the
+rent, which turns cleanup from a chore nobody does into something that pays for
+itself.
+
+It accepts a **v1** session as well as a v2 one. The two headers are identical
+apart from the discriminator, and this is the only way the sessions stranded by
+the upgrade are ever recovered — 0.29 SOL of them on mainnet today.
+
+The boundary matters: the close uses the same comparison `execute` does, so a
+session is closable only when the slot is strictly past `expires_at`. Its final
+slot still belongs to it. A live session is refused with **3036**
+(`SessionNotExpired`).
+
+Both SDKs export `createCloseExpiredSessionIx`; there is no high-level client
+method, because the instruction needs no wallet, no authority and no fee
+accounts.
+
+## SDK — `@lazorkit/sdk` 1.0.0-rc.2, migration in the kit SDK
+
+The kit SDK had no way to move a user off v1, so an app built on it had nothing
+to offer its users on upgrade day. It now carries the same migration surface as
+`sdk-legacy`, and `tests/instructions.test.ts` asserts the `MigrateWallet`
+instruction it builds is byte-identical to the legacy one.
+
+- **`findV1WalletsByOwner`** (module function and client method) finds a user's
+  v1 wallets from their key material alone — no `userSeed`, which most users no
+  longer have. Each record carries `ownerPubkey`, read off the authority
+  account, because a WebAuthn assertion carries no public key.
+- **`migrateV1Wallet`** takes `v1Wallet` or `userSeed` and returns the setup
+  instructions, the migrate instruction (or a challenge plus `finalize` for a
+  passkey), and `destinationUserSeed` when it had to mint one.
+- **New modules**: `src/v1.ts` (v1 seeds, discriminators, PDA derivation,
+  `readV1WalletState`, `enumerateV1VaultTokens`) and `src/spl.ts` (ATA
+  derivation, idempotent ATA creation, token-account decoding).
+- `LazorKitRpc` now also requires `GetMultipleAccountsApi` and
+  `GetTokenAccountsByOwnerApi`. `createSolanaRpc(url)` already satisfies both.
+
+## SDK 1.1.1 — `@lazorkit/sdk-legacy`, the owner key comes back from the scan
+
+`migrateV1Wallet` needs the owner's 33-byte compressed key, and a returning
+user's browser cannot produce it: signing in with an existing passkey returns an
+assertion, and an assertion carries no public key — only registration does. Live
+testing hit exactly this, as `compressedPubkey must be exactly 33 bytes, got 0`.
+
+`findV1WalletsByOwner` now returns `ownerPubkey` from the authority account it
+has already fetched (33 compressed bytes for a passkey, 32 for Ed25519).
+
+## SDK 1.1.0 — `@lazorkit/sdk-legacy`, migrate without the user seed
+
+Wallets created through `@lazorkit/wallet` used a random 32-byte `userSeed`
+that lived in the browser's storage. `migrateV1Wallet` required it, so a user
+who cleared storage or moved to another device had no way to migrate — their
+funds would have been stranded in the v1 vault after the upgrade.
+
+The program never needed the seed: `MigrateWallet` takes the v1 wallet as an
+account and derives the vault from that key. Only the SDK helper insisted.
+
+- **`findV1WalletsByOwner(connection, ownerIdSeed, programId, authorityType)`**
+  and the client method of the same name find a user's v1 wallets from their
+  passkey alone, by scanning v1 authority accounts (needs an RPC that allows
+  `getProgramAccounts` with memcmp filters).
+- **`migrateV1Wallet` now takes `v1Wallet`** as an alternative to `userSeed`,
+  and returns `destinationWallet` plus, when it had to mint one,
+  `destinationUserSeed`. Passing neither throws and says which to use.
+- With no `userSeed`, the destination is whatever v2 wallet the owner already
+  has; a fresh one is created only when there is none.
+
+## SDK 1.0.0 — protocol v2 (`@lazorkit/sdk-legacy` 1.0.0, `@lazorkit/sdk` 1.0.0-rc.1)
+
+The SDKs move to a new major because they speak protocol v2, which is not wire
+compatible with the program running on mainnet today. **`latest` on npm stays
+on `0.3.2` until the mainnet upgrade lands**; 1.x publishes under the `next`
+dist-tag.
+
+```bash
+npm install @lazorkit/sdk-legacy          # 0.3.x — protocol v1, mainnet today
+npm install @lazorkit/sdk-legacy@next     # 1.x   — protocol v2
+npm install @lazorkit/sdk@next            # kit SDK, release candidate
+```
+
+### Breaking — what an app has to change
+
+- **Every address moves.** PDA seeds are namespaced `lk2:`, so the same
+  `userSeed` derives a different wallet and vault. No error is raised: a cached
+  address, a deposit address shown to a user, or a wallet row in your own
+  database all keep pointing at the v1 account, which no v2 code path reads.
+  Move funds with `migrateV1Wallet` rather than re-creating.
+- **`createSession` with no actions now throws** unless you pass
+  `unrestricted: true`. An empty action buffer is an unbounded session key, so
+  it has to be named.
+- **`addAuthority` with `role: ROLE_SPENDER` requires a non-empty `policy`**,
+  and a policy is refused on any other rank (3033, 3035 on-chain). Creating an
+  Owner requires `allowOwner: true`.
+- **All-zero key material is rejected** at the client before anything is
+  signed.
+- **`AddAuthority` and `RemoveAuthority` need the wallet account writable.**
+  Only matters if you build those instructions by hand.
+- **The signed bytes changed**: the accounts hash binds each account's
+  signer/writable flags, account index bytes use bit 7 as a forward-signer
+  request (so indices cap at 127), and the `AddAuthority` payload always
+  carries `[policy_len u16][policy]`.
+- **`buildCompactLayout` takes the payer as a third argument.**
+- **Serialized `DeferredPayload`s carry a version and are refused across the
+  boundary.** Drain anything in flight before upgrading both sides.
+- **The protocol fee suffix is mandatory** on `CreateWallet`, `Execute` and
+  `ExecuteDeferred` — the program answers 4008 without it even when it charges
+  nothing. The high-level client handles this; direct callers of the low-level
+  builders must pass the fee accounts.
+- **The low-level `create*Ix` builders are no longer exported from the package
+  root.** Use the client, or import them from the module path.
+
+An app that only uses `LazorKitClient` and holds no cached addresses is
+typically a handful of call-site changes: the session and authority guards
+above, plus the migration of existing wallets.
+
+## SDK 0.3.2 — `@lazorkit/sdk-legacy`, protocol v1
+
+- Dropped the Node `crypto` dependency (`@noble/hashes` and the `buffer`
+  package instead), so the SDK bundles for browsers and React Native with no
+  polyfill configuration. No behaviour change: outputs are byte-identical to
+  0.3.1 and the type declarations are unchanged. Cut from the v1 line, so
+  0.3.x keeps talking to the program that is live on mainnet.
+
+## SDK 0.3.1 — `@lazorkit/sdk-legacy`, protocol v1
+
+- Republished 0.3.0 under a new number after that version was tombstoned on
+  npm. This is the line mainnet integrators run today.
+
+## Protocol v2 (program 2.0.0)
+
+An audit of `program/src` produced 26 findings, five proven by reproduction
+tests. The audit that already existed (Accretion / Solana Foundation, A26SFR1,
+Feb 2026) covered `program-v2`, **not this repo** — this is a fork that added an
+entire fee layer nobody had reviewed, and the heaviest findings all lived in that
+delta.
+
+Underneath the individual bugs was a structural problem: `role` answered two
+independent questions — what may you *manage* and what may you *spend* — while
+gating only the first. That is why "Spender" named a tier with full control of
+the vault.
+
+v2 ships every fix and the new permission model as one in-place upgrade at the
+existing program ID. v1 wallets cross over with one Owner-signed `MigrateWallet`.
+
+### Critical and high
+
+- **C-1 — an admin could freeze every user's funds.** The entrypoint reverted
+  every `CreateWallet`/`Execute`/`ExecuteDeferred` when the protocol config was
+  disabled or its fee was zero, and those are the only paths that move funds out
+  of a vault. One admin write, permanent, unrecoverable. Fee collection is now
+  *skipped* rather than reverting, the config PDA address is pinned so "not
+  configured" cannot be spoofed, and both fees are capped at 0.01 SOL so an
+  unpayable fee cannot be a freeze in disguise.
+- **H-1 — authentication could be driven from another program.** Both the
+  Secp256r1 authenticator and `Execute` now refuse to run below the top level.
+- **H-2 — rank governed management and nothing else.** `Execute` never read
+  `role`, so a "Spender" spent exactly like an Owner. Rank and policy are now
+  separate fields answering separate questions; a Delegate must carry a policy,
+  and an authority that carries one may not create authorities at all.
+- **H-3 — `Execute` conscripted the paymaster.** Every outer signer was forwarded
+  into every inner CPI, so a session limited to 0.001 SOL could move 2 SOL out of
+  the fee payer's own wallet. Forwarding is now opt-in per account, never covers
+  the fee payer, and on the session path covers only the session's own key.
+- **H-4 — token authority escapes** are caught by the pre/post snapshot, which
+  now runs for policy-bearing authorities as well as sessions.
+
+### Medium
+
+- **M-2** — the program refuses to run at any address other than the one
+  compiled into it.
+- **M-3** — the ProtocolConfig PDA address is verified at every read site, not
+  just its owner.
+- **M-4** — the accounts hash binds each referenced account's
+  `is_signer`/`is_writable`, not only its key. A relayer could previously take an
+  account approved as read-only and submit it writable.
+- **M-5** — an all-zero Secp256r1 pubkey is rejected in `TransferOwnership`.
+- **M-6** — `payer.is_signer()` is explicit in the six processors that relied on
+  the System Program enforcing it during a CPI that is skipped for a pre-funded
+  PDA.
+- **M-1, M-7** — documented rather than changed, with the reasoning: an Ed25519
+  authority's transaction signature already binds strictly more than a payload
+  signature would, and a program whitelist constrains one level of CPI while the
+  value limits constrain the whole call graph.
+
+### Added
+
+- **Several Owners per wallet.** Each device holds its own passkey and passkeys
+  cannot be copied, so multi-device means multi-authority — and only if they are
+  all Owners can a surviving device revoke a lost one. `WalletAccount.owner_count`
+  refuses the removal of the last Owner.
+- **Per-authority spending policies.** The action buffer that bounded sessions
+  now bounds authorities too, on the same engine.
+- **Two-step protocol admin rotation** (propose / accept). `UpdateProtocol` could
+  not write `admin` at all, and a one-step write would make a typo permanent.
+- **Version discipline.** PDA seeds namespaced by protocol major version, account
+  discriminators carrying it in their high nibble, and a validated `version` byte
+  that is finally read rather than only written. See
+  [`docs/upgrade-procedure.md`](docs/upgrade-procedure.md).
+- **Golden vectors** for the accounts-hash wire format
+  ([`test-vectors/accounts-hash.json`](test-vectors/accounts-hash.json)),
+  asserted against by the program and both SDKs.
+- **`MigrateWallet`** (discriminator 17). One Owner-signed transaction moves a
+  v1 wallet's vault SOL and every token account it names into a v2 wallet, then
+  closes the v1 wallet and authority. The signed payload binds the destination
+  and the exact token-account set, so a relayer cannot redirect or drop assets.
+  No operator path exists: a wallet whose owner never signs stays in v1.
+
+### SDK
+
+- **Both SDKs run in the browser** with no Node polyfills. Hashing and
+  randomness come from `@noble/hashes`; the legacy SDK imports `Buffer` from the
+  `buffer` package and the kit SDK uses `@solana/kit` codecs.
+- **The fee suffix is always sent** on `CreateWallet`, `Execute` and
+  `ExecuteDeferred`. The program requires it (4008) even when no fee is charged,
+  and the SDK used to omit it whenever the protocol config was missing or
+  disabled — which broke every client between an upgrade and
+  `InitializeProtocol`. `{ protocolFees: false }` omits it, for a build without
+  the fee layer.
+- **`migrateV1Wallet`** and the v1 readers (`deriveV1Accounts`,
+  `readV1WalletState`, `enumerateV1VaultTokens`) in `@lazorkit/sdk-legacy`; see
+  [`docs/migration-ui-flow.md`](docs/migration-ui-flow.md).
+
+### Breaking — protocol v2
+
+- **Every PDA address changes.** Seeds are namespaced `lk2:`. v1 wallets, vaults,
+  authorities, sessions and the protocol singletons are unreachable from v2 code.
+  This is deliberate: the singleton seeds would otherwise collide with accounts
+  that already exist, and `initialize_protocol` requires a zero-length account, so
+  the protocol would have been permanently un-initialisable.
+- **Account discriminators renumbered** to `0x21`–`0x27`. A v1 account fails
+  immediately rather than being reinterpreted under a moved layout.
+- **Account index bytes cap at 127.** Bit 7 is now the forward-signer flag. An
+  index of 128 or above is rejected, not masked.
+- **v1 signatures no longer verify.** The accounts hash covers privilege.
+- **`AddAuthority` payload gained `[policy_len u16][policy]`** between the key
+  material and the auth payload, inside the signed region.
+- **`AddAuthority` and `RemoveAuthority` need the wallet account writable.** The
+  instruction data is unchanged, so this fails at runtime rather than at compile
+  time — and only on the paths that touch an Owner.
+- **Serialized `DeferredPayload`s do not cross the version boundary.** They carry
+  a version and are rejected on mismatch; re-authorize instead of replaying.
+
+### Migration
+
+v1 wallets still hold user funds, so the upgrade ships with a way across. After
+it lands a v1 wallet can do one thing — `MigrateWallet`, signed by its Owner —
+and its funds are safe in the v1 vault until then. Nobody else can move them.
+
+**Before upgrading mainnet** work through
+[`docs/mainnet-deploy-checklist.md`](docs/mainnet-deploy-checklist.md). In short:
+
+1. Run `scripts/survey-v1.ts` and keep its report private (it lists real user
+   wallets and balances — operational intel, not repo content).
+2. Have the migration UI live — built on `migrateV1Wallet`, see
+   [`docs/migration-ui-flow.md`](docs/migration-ui-flow.md) — and announce the
+   window: a v1 wallet needs one signed migration before it transacts again.
+3. Confirm `PROTOCOL_INIT_AUTHORITY` for the mainnet build. It defaults to the
+   existing deployer key and gates `InitializeProtocol` permanently.
+4. Rehearse with the live v1 binary (`solana program dump`), not a rebuild, and
+   record both SBF SHA-256 hashes.
+
+For clients:
+
+```diff
+- const [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
++ // Same call — the seed prefix is internal to the SDK. The address it
++ // returns is different, and any v1 address you cached is stale.
++ const [walletPda] = findWalletPda(userSeed, PROGRAM_ID_DEVNET);
+```
+
+```diff
+  await client.addAuthority({
+    payer, walletPda, adminSigner,
+    newAuthority: { type: 'ed25519', publicKey: delegate.publicKey },
+    role: ROLE_SPENDER,
++   // A Delegate must carry a policy — this is what makes the name true.
++   policy: serializeActions([Actions.solLimit(1_000_000_000n)]),
+  });
+```
+
+```diff
++ // Creating an Owner is now possible, and deliberately explicit.
++ await client.addAuthority({
++   payer, walletPda, adminSigner,
++   newAuthority: { type: 'secp256r1', credentialIdHash, compressedPubkey, rpId },
++   role: ROLE_OWNER,
++   allowOwner: true,
++ });
+```
+
+If you build instructions with the low-level builders rather than the client,
+make the wallet account writable on `AddAuthority` and `RemoveAuthority`.
+
+
 ### Added — foundation devnet support (SDK 0.3.0)
 
 The single source of truth for both LazorKit on-chain builds. `@lazorkit/sdk-legacy`
