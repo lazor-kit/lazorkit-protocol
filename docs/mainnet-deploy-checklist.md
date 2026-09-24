@@ -189,6 +189,63 @@ V1_SO=<v1-mainnet.so> V2_SO=<v2-mainnet.so> \
 Result: `Data Length 135704 → 148352` in place, vault SOL + token migrated to the
 v2 destination, v1 wallet + authority closed. `REHEARSAL PASSED`.
 
+## What the v1 estate is worth, and what the upgrade forfeits
+
+Read off mainnet on **2026-09-24** with
+[`scripts/survey-v1-rent.ts`](../scripts/survey-v1-rent.ts) (read-only):
+
+| account | count | avg bytes | rent held | closed by |
+|---|---:|---:|---:|---|
+| Authority | 171 | 133 | 0.304119 SOL | `MigrateWallet` (Owner) |
+| Session | 133 | 196 | 0.290408 SOL | `RevokeSession` — **v1 only** |
+| DeferredExec | 91 | 176 | 0.189684 SOL | `ReclaimDeferred` — **v1 only** |
+| Wallet | 150 | 8 | 0.138745 SOL | `MigrateWallet` (Owner) |
+| TreasuryShard | 16 | 8 | 0.016620 SOL | drained by `WithdrawTreasury`; the account stays |
+| FeeRecord | 2 | 32 | 0.002227 SOL | nothing |
+| ProtocolConfig | 1 | 88 | 0.001503 SOL | nothing — v2 uses a new seed |
+| **total** | **564** | | **0.943306 SOL** | |
+
+Three piles, and they behave differently:
+
+- **0.443 SOL comes back through migration** (Wallet + Authority), to each
+  migration's refund destination. The SDK sets that to the payer, so on a
+  sponsored migration it returns to us; a user who pays their own gets it. The
+  emptied source ATAs are closed to the same destination.
+- **0.480 SOL is forfeited unless it is closed before the upgrade** (Session +
+  DeferredExec). After v2 lands, no instruction in the binary accepts a v1
+  discriminator, so those accounts can never be closed by anyone.
+- **0.020 SOL is gone either way** — ProtocolConfig, FeeRecord and the sixteen
+  TreasuryShards are simply abandoned at their v1 addresses.
+
+The two v1-only paths are not equally reachable:
+
+- **`ReclaimDeferred` is ours to run.** It requires the *original payer* to
+  sign, after expiry — and that payer is the paymaster sponsor on every
+  sponsored authorization. 91 accounts, **0.19 SOL**, recoverable by us in a
+  batch before the upgrade window.
+- **`RevokeSession` is not.** It requires the wallet's own Owner or Admin
+  authority, which is the user's passkey. 133 accounts, **0.29 SOL**, and
+  realistically most of it is lost: asking every user to revoke a session before
+  a deadline is not a plan.
+
+Two smaller facts worth knowing before the day:
+
+- There are **21 more Authority accounts than Wallets**. `MigrateWallet` closes
+  the one authority that authorises it, so a wallet with a second authority
+  leaves that account behind — roughly 0.037 SOL, unreachable afterwards.
+- **User assets are not ours and are not at risk**: the vaults' SOL and tokens
+  move to each user's v2 vault as part of their migration. What is at risk is a
+  vault whose owner never migrates — their funds stay reachable only through
+  `MigrateWallet`, indefinitely, which is inherent to non-custodial.
+
+- [ ] Before the upgrade window: reclaim the expired DeferredExec accounts with
+      the sponsor key (0.19 SOL), and drain the treasury shards.
+- [ ] Decide whether the 133 sessions are worth a user-facing "revoke before the
+      upgrade" prompt, or written off at 0.29 SOL.
+- [ ] Re-run the survey on the day. Between 2026-09-11 and 2026-09-24 the estate
+      grew by 10 wallets, 12 authorities, 12 sessions and 5 deferred accounts —
+      it is still in use, so these numbers move.
+
 ## Paymaster (Kora)
 
 Read out of `lazor-kit/kora` on 2026-09-21 and **measured against the live
