@@ -238,6 +238,13 @@ Two smaller facts worth knowing before the day:
   vault whose owner never migrates — their funds stay reachable only through
   `MigrateWallet`, indefinitely, which is inherent to non-custodial.
 
+  The estate behind that sentence, same survey: **64 of the 150 vaults hold SOL**
+  (5.609562 SOL in total) and **54 hold tokens** — 125 token accounts across 50
+  distinct mints, 24 of them with a non-zero balance. Those token accounts carry
+  **0.246663 SOL of their own rent**, which `MigrateWallet` reclaims when it
+  closes each emptied source account, to the same refund destination as the rest.
+  So a fully migrated estate returns roughly 0.69 SOL of rent, not 0.44.
+
 - [ ] Before the upgrade window: reclaim the expired DeferredExec accounts
       (0.19 SOL), and drain the treasury shards.
 
