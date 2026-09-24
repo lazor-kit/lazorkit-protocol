@@ -84,8 +84,23 @@ in front of a deploy.
 ## Applying it on Railway
 
 The relayer runs as a Railway service (`kora.devnet.lazorkit.com` →
-`58btamsd.up.railway.app`). Set the variables above in the service, ship the
-file the way that service already gets its config, and redeploy.
+`58btamsd.up.railway.app`).
+
+There is no way to hand Kora a config through the environment: the path comes
+only from the global `--config <PATH>` flag (default `kora.toml`, resolved
+against the process working directory) and no env var overrides it. Upstream's
+own Railway guide bakes the file into the image — `COPY kora.toml ./` in the
+Dockerfile — so **applying a config change is a rebuild and a redeploy**, not a
+variable edit. Nothing in the file is hot-reloadable either; every field is read
+once at startup.
+
+Two mechanical notes that cost a deploy each when missed: `--config` is a
+top-level flag and must come **before** the subcommand
+(`kora --config /cfg/kora.mainnet.toml rpc start`), and a config that fails to
+load exits 1 immediately with no partial start and no fallback.
+
+Set the environment variables above in the Railway service, ship the file in the
+image, and redeploy.
 
 Then check from the outside — no key, no transaction, non-zero exit on a
 failure, so it can gate the deploy:
