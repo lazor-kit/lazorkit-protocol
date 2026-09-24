@@ -500,42 +500,57 @@ of operations — step 4 ends the old key's control of the program for good:
 
 - [x] **1. Reach three signers.** The maintainer holds four of the five member
       keys, against a threshold of three, so quorum does not depend on anyone
-      else being available. Worth re-confirming on the day that four are still
-      reachable and none is on a device that cannot sign (the script cannot
-      drive a hardware wallet — a Ledger member proposes and approves in the
-      Squads app instead).
+      else being available.
+
+      **None of the five is a keypair file on the deploy machine**, and no
+      Ledger is attached (`solana-keygen pubkey usb://ledger` → `no device
+      found`; a scan of every 64-byte keypair JSON under `~/.config/solana` and
+      the repo tree matched none of the members). They are wallets, not files —
+      which is the right place for them, and which decides how the day runs:
+      **`scripts/rehearse/squads-upgrade.cjs` cannot propose, approve or execute
+      anything here.** It signs with keypair files only. Its job is
+      `preflight`, `addresses`, `status`, and the top-level `extend`, all of
+      which need no member key. Everything that needs a member signature
+      happens in the Squads app.
 - [ ] **2. Prove the multisig works, on mainnet, before it owns anything.** The
       transaction index is 0: these five keys have never approved anything
-      together. `dry-run` proposes a memo signed by the vault — the cheapest
-      transaction that still exercises propose → 3 approvals → execute:
-      ```bash
-      PROPOSE_ONLY=1 RPC_URL=https://api.mainnet-beta.solana.com \
-      PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
-      MULTISIG=Gb65EbMEZocGgotuTzJEfogfT3GPr8t8fARWYfMCHaw9 \
-      PAYER=<payer.json> PROPOSER=<your-member-key.json> \
-      NODE_PATH="$DEPS/node_modules" node scripts/rehearse/squads-upgrade.cjs dry-run
-      # approve with two more members and execute, in the Squads app
-      ```
-      Then `preflight` again: `proven` flips to PASS. Do not skip this — the
-      alternative is that the first time these keys are used together is also
-      the first time a live program depends on it.
+      together, and the first time they do should not be the hour a live
+      program depends on it. In the app: **Programs → Add Program** with
+      `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` is itself a Squad
+      transaction, so it doubles as the rehearsal — propose it, collect three
+      approvals, execute. Then `preflight` again: `proven` flips to PASS.
+
+      (If you would rather prove it without touching the program at all, the
+      script's `dry-run` proposes a memo signed by the vault — but it needs a
+      member keypair *file*, which is exactly what we do not have and should
+      not create.)
 - [ ] **3. Rehearse a full upgrade against a throwaway program**, with the same
       shape as mainnet, as recorded under [Multisig rehearsal](#multisig-rehearsal).
       That rehearsal used a 2-of-3 with all keys local; repeat the
       propose-then-approve-in-the-app half with this 3-of-5 so the operator has
       seen the actual UI path once.
-- [ ] **4. Hand over.** Run with the current authority key:
-      ```bash
-      solana program set-upgrade-authority LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
-        --new-upgrade-authority E11nkm79w4rEnB2ZNmTKhWKF4BH5z34LUkTw2L4LBjKa \
-        --skip-new-upgrade-authority-signer-check \
-        --upgrade-authority <current-authority-keypair> \
-        --url https://api.mainnet-beta.solana.com
-      ```
-      The flag waives only the new authority's signature, which a PDA cannot
-      give. It does **not** check that the address is a vault, or that anyone
-      controls it — a typo here is a permanently frozen program. Paste the vault
-      address from `preflight`, never by hand.
+- [ ] **4. Hand over — prefer Safe Authority Transfer.** The Squads app's
+      Add Program step offers three ways to move the authority, and they are not
+      equally safe:
+      - **Safe Authority Transfer (SAT)** — the app builds a transaction inside
+        the Squad that is signed by *both* the vault PDA and the current
+        authority. The vault proving it can sign is exactly the check the CLI
+        cannot do, so a wrong destination fails instead of bricking the
+        program. Use this one.
+      - The CLI fallback, if SAT is unavailable:
+        ```bash
+        solana program set-upgrade-authority LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+          --new-upgrade-authority E11nkm79w4rEnB2ZNmTKhWKF4BH5z34LUkTw2L4LBjKa \
+          --skip-new-upgrade-authority-signer-check \
+          --upgrade-authority <current-authority-keypair> \
+          --url https://api.mainnet-beta.solana.com
+        ```
+        The flag waives only the new authority's signature, which a PDA cannot
+        give. It does **not** check that the address is a vault, or that anyone
+        controls it — a typo here is a permanently frozen program. Paste the
+        vault address from `preflight`, never by hand.
+
+      Docs: [Squads — Programs](https://docs.squads.so/main/navigating-your-squad/developers-assets/programs).
 - [ ] **5. Verify.** `preflight` again: `program authority` must read
       `already the vault`, and `solana program show <program id>` must agree.
 - [ ] **6. Note what changes for every upgrade after this.**
@@ -546,17 +561,24 @@ of operations — step 4 ends the old key's control of the program for good:
         --new-buffer-authority <vault>`); the script refuses to propose
         otherwise, and also refuses while the program's authority is not yet the
         vault.
+      - **The upgrade itself runs in the app**: Programs → the program → *Add
+        upgrade*, giving the buffer address, a spill address and a refund
+        address. The app then hands you a CLI line to move the buffer's
+        authority, and verifies it before the upgrade can be proposed.
       - **Extend first, separately.** A bigger binary needs the programdata
-        grown, and that cannot go through the vault — `extend <bytes>` is its
-        own command because the transaction lands immediately, with no approval
-        and no undo.
-      - **`resume` needs the index** (`resume 3`). The newest transaction on the
-        multisig is not necessarily yours: anyone proposing from the Squads app
-        moves that index, and resuming blindly would spend your approval on
-        their transaction.
-      - **Name the spill account.** `Upgrade` refunds the buffer's rent and the
-        programdata's excess — for this program roughly 0.96 SOL — to whatever
-        `SPILL` says, defaulting to the fee payer. Point it somewhere you meant.
+        grown, and that cannot go through the vault at all — the loader's
+        `ExtendProgram` is top-level and needs no authority, so the deploy key
+        sends it (`squads-upgrade.cjs extend <bytes>`, or `solana program
+        extend`). It lands immediately, with no approval and no undo.
+      - **The spill address is real money.** `Upgrade` refunds the buffer's rent
+        and the programdata's excess — for this program roughly 0.96 SOL — to
+        whatever address is given. The app asks for it; do not leave it on a
+        throwaway.
+      - The script's own `upgrade` / `resume` / `set-authority` paths stay for
+        environments where member keys are files (the devnet rehearsal). On
+        mainnet they cannot sign; `resume` there also insists on an explicit
+        index, because the newest transaction on the multisig is whatever
+        anyone last proposed in the app.
       - The handover is one-way for the old key but **not** irreversible for the
         multisig: `SetAuthority` is one of the two loader instructions the
         runtime allows via CPI, so three members can always hand the authority

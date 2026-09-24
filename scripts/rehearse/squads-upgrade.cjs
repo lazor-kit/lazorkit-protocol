@@ -2,9 +2,12 @@
 // Upgrade a program whose upgrade authority is a Squads v4 vault.
 //
 // Rehearsal tool: every member key is a local file, so one process can
-// propose, approve and execute. On mainnet the same vault transaction is
-// proposed here (or in the Squads app) and each member approves from their own
-// wallet — only `create`'s output and the instruction layout carry over.
+// propose, approve and execute. That is the rehearsal, not the real thing —
+// members of a real multisig hold wallets, not keypair files, and this script
+// cannot sign with a wallet or a hardware device. On mainnet, propose, approve
+// and execute in the Squads app (Programs → Add upgrade), and use this script
+// for the parts that need no member signature: `preflight`, `addresses`,
+// `status`, and the top-level `extend`.
 //
 // Needs @sqds/multisig 2.1.x and @solana/web3.js 1.x resolvable:
 //   npm i --prefix "$DIR" @sqds/multisig@2.1.4 @solana/web3.js@1.98.4
