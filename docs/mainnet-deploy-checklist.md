@@ -321,7 +321,27 @@ This flips the 0.290408 SOL of v1 sessions from *burned by the upgrade* to
 the window — the opposite of the DeferredExec accounts, which really do have to
 be reclaimed first.
 
-Six litesvm tests cover it: a stranger closes an expired session and keeps the
+The keeper is written and proven on a live chain:
+[`scripts/rehearse/close-expired-sessions.cjs`](../scripts/rehearse/close-expired-sessions.cjs)
+scans both discriminators, filters on the same expiry comparison the program
+uses, and batches the closes. Run on the devnet staging program
+`HQ584adp8ub2FzrTx1fdNmXmrL5yuyVndafPB3x4NYG3` on 2026-09-24 against a binary
+built with instruction 18: three expired sessions closed in one transaction
+(`2efVmYyLgABSeo7EPeh7tTW3QsT2VFayd6yXCdvtARx5WYjqN4crduYn771BcQT3CecHayAtttVfjb6BLZEVwmTd`),
+the keeper's balance moved 6.094155 → 6.097319 SOL, and all three accounts read
+back as gone. Dry run by default.
+
+```bash
+NODE_PATH=tests-sdk/node_modules \
+RPC_URL=https://api.mainnet-beta.solana.com \
+PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+KEEPER=<keypair.json> node scripts/rehearse/close-expired-sessions.cjs
+```
+
+Run it after the upgrade, and do not count on being first: the rent goes to
+whoever gets there, which is the point of making it permissionless.
+
+Six litesvm tests cover the instruction itself: a stranger closes an expired session and keeps the
 rent; a live one is refused; the session's **final slot still belongs to it**
 (the close uses the same `>` as `execute`, so a keeper cannot end it a slot
 early); a v1-shaped session closes; a live v1 one does not; and an Authority
