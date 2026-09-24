@@ -238,8 +238,37 @@ Two smaller facts worth knowing before the day:
   vault whose owner never migrates — their funds stay reachable only through
   `MigrateWallet`, indefinitely, which is inherent to non-custodial.
 
-- [ ] Before the upgrade window: reclaim the expired DeferredExec accounts with
-      the sponsor key (0.19 SOL), and drain the treasury shards.
+- [ ] Before the upgrade window: reclaim the expired DeferredExec accounts
+      (0.19 SOL), and drain the treasury shards.
+
+      **Rehearsed on devnet, 2026-09-24** with
+      [`scripts/rehearse/reclaim-deferred.cjs`](../scripts/rehearse/reclaim-deferred.cjs):
+      16 of the 17 accounts there belonged to the sponsor and had expired; two
+      transactions closed all 16 and returned 0.033853 SOL. Verified after the
+      fact — one DeferredExec account left on devnet, the one with a different
+      payer, and the sponsor's balance moved 89.748167104 → 89.765088824 SOL
+      across the first batch, which is 8 × 0.00211584 minus the 5000-lamport fee
+      exactly.
+
+      The useful part is how it signs. `ReclaimDeferred` demands the *original*
+      payer, and on every sponsored authorization that is the Kora fee payer — a
+      key inside the relayer's environment, not on anyone's laptop. The script
+      does not need it: it builds the transactions with the sponsor as fee payer
+      and asks the relayer to sign and send them. No key export, and it works
+      the same on mainnet.
+
+      ```bash
+      RPC_URL=https://api.mainnet-beta.solana.com \
+      PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+      PAYMASTER_URL=<mainnet relayer> KORA_API_KEY=<key> \
+      NODE_PATH=tests-sdk/node_modules node scripts/rehearse/reclaim-deferred.cjs
+      # then --execute
+      ```
+
+      One caveat carried from the rehearsal: an account whose payer is not the
+      sponsor can only be reclaimed by that payer. Devnet had one; mainnet will
+      have its own share, and the script counts them rather than failing on
+      them.
 - [ ] Decide whether the 133 sessions are worth a user-facing "revoke before the
       upgrade" prompt, or written off at 0.29 SOL.
 - [ ] Re-run the survey on the day. Between 2026-09-11 and 2026-09-24 the estate
