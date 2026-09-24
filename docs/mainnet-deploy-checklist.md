@@ -274,6 +274,14 @@ Upstream has also been fuzzing fee-payer drains specifically (#618, #640,
 - [ ] Note the one breaking change: `usage_limit.enabled = true` with no rules
       now **fails startup** instead of silently doing nothing.
 
+The configuration itself is written out, for both clusters, in
+[`deploy/kora/`](../deploy/kora/) — `kora.mainnet.toml`, `kora.devnet.toml` and
+a README covering the env vars and the Railway steps. Every value carries its
+reasoning inline; the four things that actually bound a stranger are
+`require_one_of_programs` (a transaction that never touches LazorKit is refused
+outright), authentication, `max_allowed_lamports` set from measured cost, and
+the usage limits.
+
 Check any relayer against all of this from the outside, with no key and no
 transaction:
 
