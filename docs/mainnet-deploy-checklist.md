@@ -275,10 +275,48 @@ The 16 TreasuryShard accounts keep their 0.011054 SOL of rent either way:
 `WithdrawTreasury` drains the fees and leaves the account. There is no
 instruction that closes a shard, a FeeRecord or the ProtocolConfig.
 
-And what stays out of reach: the 133 Sessions (0.290408 SOL) need each wallet's
-own Owner or Admin authority, which is the user's passkey — there is no
+And what stays out of reach today: the 133 Sessions (0.290408 SOL) need each
+wallet's own Owner or Admin authority, which is the user's passkey — v1 has no
 expiry-based close, so a session's rent is recoverable only by its user, and
 only before the upgrade.
+
+#### Making an expired session closable by anyone
+
+The proposal: keep `RevokeSession` as it is before expiry — only the wallet's
+authority may end a live session — and let **anyone** close it once it has
+expired, claiming the rent. Three things checked against the code, because they
+decide the shape:
+
+- **It is safe.** `immediate.rs:210` already refuses a session with
+  `current_slot > session.expires_at`, so an expired session authorises nothing
+  and closing it removes no capability. The boundary has to match that
+  comparison exactly — `>`, not `>=` — or a keeper can kill a session that is
+  still valid in its final slot.
+- **No replay window opens.** Closing and re-creating the same session PDA does
+  not reset anything an attacker can use: the session key signs the transaction
+  itself, so an old signature dies with its blockhash. There is no session
+  counter to roll back.
+- **The account does not remember who paid.** `SessionAccount` is
+  `disc | bump | version | pad(5) | wallet(32) | session_key(32) | expires_at(8)`
+  — 80 bytes, no payer field. So "whoever closes it keeps the rent" is the only
+  permissionless design that works *as the layout stands*, and for sponsored
+  sessions that rent was ours. Refunding the funder instead needs a
+  `rent_payer: Pubkey` in the header, which is **free to add only until v2
+  ships** and a layout migration afterwards.
+
+The second question is whether this also reaches backwards. The v1 and v2
+session headers are byte-identical apart from the discriminator — v1 puts
+`wallet` at 8, `session_key` at 40, `expires_at` at 72, exactly as v2 does — so
+a v2 instruction can read and close a **v1** session with no extra parsing, the
+same trick `MigrateWallet` already uses for v1 wallets. That is the difference
+between recovering the 0.290408 SOL sitting on mainnet and burning it.
+
+- [ ] Decide where the rent goes: the closer (a keeper market, our sponsored
+      rent leaking to strangers at ~0.0022 SOL a session), the original payer
+      (needs the header field, needs deciding before v2 ships, and leaves nobody
+      with a reason to crank), or a split.
+- [ ] Decide whether the close accepts v1 sessions as well as v2 ones — 0.29 SOL
+      today, and the only way that money is ever recovered.
 
 - [ ] Before the upgrade window: reclaim the sponsor's 68 expired DeferredExec
       accounts (0.141 SOL) and drain the sixteen treasury shards (0.0056 SOL).
