@@ -774,6 +774,57 @@ PROPOSE_ONLY=1 RPC_URL=<mainnet-rpc> PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipv
 `MULTISIG` is the multisig account the Squads app shows, not its vault. The
 proposer must be a member with the Initiate permission.
 
+## Key custody
+
+Four keys matter, and they are not the same kind of thing. Sorting them by what
+a leak costs is what decides where each one lives.
+
+| key | what it can do | today | target |
+|---|---|---|---|
+| upgrade authority `4fZM6RPR…` | replace the program binary — every vault | plaintext file on one laptop | the Squads vault, after v2 |
+| ProtocolConfig admin `24fx48GA…` | withdraw treasury, rewrite fee config | plaintext file on the same laptop | the same Squads vault |
+| Kora sponsor `7Pkkhm8…` | spend the paymaster's balance | the relayer's environment | unchanged — but split per cluster and kept thin |
+| devnet throwaway `9AmBA2C7…` | nothing that matters | committed in the repo | unchanged |
+
+**Both catastrophic keys can stop being keys.** The upgrade authority moves to
+the vault through Squads' Safe Authority Transfer, which is already written up
+below. The admin can follow it: `withdraw_treasury` and `rotate_admin` check
+nothing but `admin.is_signer()` and the stored pubkey, and a Squads vault PDA
+signing inside a vault transaction satisfies both. The two-step rotation is a
+gift here — `accept_protocol_admin` requires the **new** admin to sign, so the
+vault proves it can sign before the rotation completes, and a wrong address
+fails instead of orphaning the protocol.
+
+`PROTOCOL_INIT_AUTHORITY` is compiled in and permanent, but its power is
+one-shot: once `InitializeProtocol` has run, that key can do nothing else. It
+does not need long-term custody, only the deploy window.
+
+- [ ] After v2: move the upgrade authority to the vault (below), then rotate the
+      ProtocolConfig admin to the same vault with propose/accept.
+- [ ] Until then, the two keys are hot files. At minimum `chmod 600` the keypair
+      at `~/.config/solana/`, and delete the commented-out copy of the deployer
+      secret from `lazorkit-admin/.env` — being commented out does not protect
+      plaintext.
+
+**The sponsor is one key across two clusters.** `7Pkkhm8…` signs on devnet and
+on mainnet, and the devnet relayer accepts unauthenticated requests while
+holding 89.78 SOL. A compromise there is a compromise of the mainnet payer. Give
+each cluster its own signer; there is no reason they are the same key beyond
+convenience during setup.
+
+- [ ] Separate the devnet and mainnet paymaster signers before mainnet traffic
+      starts.
+- [ ] Keep the mainnet float thin and topped up on a schedule rather than
+      funded once. It sits at 0.0802 SOL today — about 27 wallet creations —
+      so the number to pick is a week of expected traffic, not a year of it.
+
+**For anything a human holds**, the rule is that a key never becomes a
+screenshot, a chat message, a repo file or an iCloud-synced document. A hardware
+wallet for anything with mainnet authority; a password manager if it has to be
+software. A key that has been through any of those channels is not secured by
+moving it somewhere better — it is rotated, and the funds and roles move to a
+fresh one.
+
 ## Handing the upgrade authority to the Squads vault
 
 The multisig already exists on mainnet. Read on 2026-09-23 straight off the
