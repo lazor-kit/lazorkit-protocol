@@ -63,6 +63,24 @@ parsed and ignored, so the server comes up **unauthenticated** while the key
 sits in the process table. beta.8 applies it, but the process table is still the
 wrong place for it.
 
+## Validate before deploying
+
+These files were written from the beta.8 source and parse as TOML, but they have
+never been through Kora's own validator — several of its structs are
+`deny_unknown_fields`, so a field name that drifted between releases fails at
+startup rather than being ignored. Check them with the binary that will run
+them, in the same image:
+
+```bash
+docker run --rm -v "$PWD/deploy/kora:/cfg" ghcr.io/solana-foundation/kora:v2.2.0-beta.8 \
+  kora --config /cfg/kora.devnet.toml config validate
+```
+
+`config validate` is fast and makes no RPC calls; `config validate-with-rpc` is
+slower and checks more. Both exit non-zero on failure (upstream
+[#567](https://github.com/solana-foundation/kora/pull/567)), so either belongs
+in front of a deploy.
+
 ## Applying it on Railway
 
 The relayer runs as a Railway service (`kora.devnet.lazorkit.com` →
