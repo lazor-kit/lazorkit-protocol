@@ -245,8 +245,46 @@ Two smaller facts worth knowing before the day:
   closes each emptied source account, to the same refund destination as the rest.
   So a fully migrated estate returns roughly 0.69 SOL of rent, not 0.44.
 
-- [ ] Before the upgrade window: reclaim the expired DeferredExec accounts
-      (0.19 SOL), and drain the treasury shards.
+### What the operator can close alone
+
+Everything else on this page needs a user's signature. Two things do not, and
+both only work while the v1 binary is still running. Measured on mainnet
+2026-09-24:
+
+| | accounts | amount | key needed |
+|---|---:|---:|---|
+| expired DeferredExec, sponsor's | 68 | **0.141020 SOL** | the paymaster's fee payer — via the relayer, not in hand |
+| TreasuryShard fees above rent | 16 shards | **0.005566 SOL** | the ProtocolConfig admin `24fx48GA…` |
+| **total, with no user involved** | | **0.146586 SOL** | |
+
+All 91 DeferredExec accounts on mainnet are expired (the newest expired at slot
+447676152, against 449960747 now), but 23 of them belong to four other payers:
+
+```
+81BjYyuQ9QirHbopz7UQfEUfit5aSCs3jrD3GND6keon  10 accounts  0.021158 SOL
+BXp29W5mbaZBauwfyJ54776cGBoNHEE2cpt63jH8ib2F   9 accounts  0.019043 SOL
+H7h12NiJiaFGcsgi2XT6V5Nrnp3MoRjtfXMdJf2zetwH   3 accounts  0.006348 SOL
+Cg3DeyKhAmkGTN3pJXwZH1STs9SYRthLLK8AeN7Gq8ds   1 account   0.002116 SOL
+```
+
+Those are integrators running their own payer. `ReclaimDeferred` demands the
+original payer, so only they can recover that 0.049 SOL — worth one message
+before the window rather than silently burning it on their behalf.
+
+The 16 TreasuryShard accounts keep their 0.011054 SOL of rent either way:
+`WithdrawTreasury` drains the fees and leaves the account. There is no
+instruction that closes a shard, a FeeRecord or the ProtocolConfig.
+
+And what stays out of reach: the 133 Sessions (0.290408 SOL) need each wallet's
+own Owner or Admin authority, which is the user's passkey — there is no
+expiry-based close, so a session's rent is recoverable only by its user, and
+only before the upgrade.
+
+- [ ] Before the upgrade window: reclaim the sponsor's 68 expired DeferredExec
+      accounts (0.141 SOL) and drain the sixteen treasury shards (0.0056 SOL).
+      Both need the v1 binary, so both are inside the window, not after it.
+- [ ] Tell the four integrator payers above that their 0.049 SOL is reclaimable
+      until the upgrade and not after.
 
       **Rehearsed on devnet, 2026-09-24** with
       [`scripts/rehearse/reclaim-deferred.cjs`](../scripts/rehearse/reclaim-deferred.cjs):

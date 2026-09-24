@@ -21,6 +21,9 @@
 //   PROGRAM_ID    default the devnet v1 program
 //   PAYMASTER_URL default https://kora.devnet.lazorkit.com
 //   KORA_API_KEY  sent as x-api-key when set
+//   SPONSOR       the payer to match, when no relayer is up to ask. A dry run
+//                 then needs no paymaster at all — useful for a cluster whose
+//                 relayer does not exist yet.
 //   BATCH         instructions per transaction (default 8)
 'use strict';
 const {
@@ -78,9 +81,12 @@ function reclaimIx(payer, deferredPda, refundDestination) {
 (async () => {
   const connection = new Connection(RPC_URL, 'confirmed');
 
-  const { signer_address } = await kora('getPayerSigner', []);
-  const sponsor = new PublicKey(signer_address);
-  console.log(`paymaster    ${PAYMASTER_URL}`);
+  // Ask the relayer who it signs as, unless we were told — a dry run against a
+  // cluster with no relayer yet still has a question worth answering.
+  const sponsor = process.env.SPONSOR
+    ? new PublicKey(process.env.SPONSOR)
+    : new PublicKey((await kora('getPayerSigner', [])).signer_address);
+  console.log(`paymaster    ${process.env.SPONSOR && !EXECUTE ? '(not consulted — SPONSOR given)' : PAYMASTER_URL}`);
   console.log(`sponsor      ${sponsor.toBase58()}`);
   console.log(`program      ${PROGRAM_ID.toBase58()}`);
 
@@ -90,6 +96,7 @@ function reclaimIx(payer, deferredPda, refundDestination) {
   });
 
   const mine = [];
+  const others = new Map();
   let otherPayer = 0;
   let notExpired = 0;
   for (const { pubkey, account } of accounts) {
@@ -99,6 +106,10 @@ function reclaimIx(payer, deferredPda, refundDestination) {
     const expiresAt = Number(d.readBigUInt64LE(OFF_EXPIRES));
     if (!payer.equals(sponsor)) {
       otherPayer++;
+      const row = others.get(payer.toBase58()) ?? { count: 0, lamports: 0 };
+      row.count++;
+      row.lamports += account.lamports;
+      others.set(payer.toBase58(), row);
       continue;
     }
     // The program refuses a reclaim before expiry, so filter here rather than
@@ -114,6 +125,9 @@ function reclaimIx(payer, deferredPda, refundDestination) {
   console.log(`\ndeferred accounts   ${accounts.length}`);
   console.log(`  sponsor's, expired ${mine.length}  →  ${sol(total)} SOL`);
   console.log(`  another payer      ${otherPayer}  (only that payer can reclaim them)`);
+  for (const [payer, row] of [...others.entries()].sort((a, b) => b[1].lamports - a[1].lamports)) {
+    console.log(`      ${payer}  ${row.count} account(s)  ${sol(row.lamports)} SOL`);
+  }
   console.log(`  not yet expired    ${notExpired}  (current slot ${slot})`);
   if (!mine.length) return;
 
