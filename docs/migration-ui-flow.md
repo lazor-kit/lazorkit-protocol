@@ -121,6 +121,21 @@ After the migrate confirms:
 
 Re-run step 1: `readV1WalletState` returns `null`, so the banner disappears.
 
+**The old address is dead after this, not merely stale.** `MigrateWallet` reads
+the v1 wallet and authenticates against the v1 authority, and it closed both —
+so a second migration is impossible, and anything sent to the old vault address
+afterwards can never be moved by anyone. Before the migration that address is
+merely frozen; after it, it is a hole.
+
+Two consequences for the app:
+- Stop showing the v1 address the moment migration succeeds. If it was ever
+  published as a deposit address — in a profile, a QR code, an exchange
+  withdrawal entry — the user has to be told to replace it, because the failure
+  is silent and total.
+- The v2 wallet is at a **different** address: the seeds are namespaced `lk2:`,
+  so the same `userSeed` derives a different wallet and vault. Nothing carries
+  over automatically.
+
 ## Notes for the operator
 
 - **Only an Owner-rank v1 authority may migrate.** `migrateV1Wallet` throws
