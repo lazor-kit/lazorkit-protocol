@@ -32,6 +32,7 @@ export {
   DISC_WITHDRAW_TREASURY,
   DISC_INITIALIZE_TREASURY_SHARD,
   DISC_MIGRATE_WALLET,
+  DISC_CLOSE_EXPIRED_SESSION,
   SECP256R1_PROGRAM_ADDRESS,
 } from './builders.js';
 
@@ -39,3 +40,7 @@ export {
 // carries no fee suffix to get wrong, and an integrator moving users off v1 may
 // need to assemble the instruction themselves (batching, a custom relayer).
 export { createMigrateWalletIx, type MigrateTokenPair } from './builders.js';
+
+// Likewise permissionless and fee-free: anyone may close an expired session, so
+// there is no high-level client method to route it through.
+export { createCloseExpiredSessionIx } from './builders.js';

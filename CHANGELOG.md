@@ -6,6 +6,29 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — `CloseExpiredSession` (instruction 18)
+
+A session ends two ways now. Before expiry, as before: `RevokeSession`, signed
+by the wallet's own Owner or Admin. After expiry, by anyone — the account
+authorises nothing at that point (`execute` refuses a session past
+`expires_at`), and the only key that could free its rent belongs to a user with
+no reason to come back. The caller names the refund destination and keeps the
+rent, which turns cleanup from a chore nobody does into something that pays for
+itself.
+
+It accepts a **v1** session as well as a v2 one. The two headers are identical
+apart from the discriminator, and this is the only way the sessions stranded by
+the upgrade are ever recovered — 0.29 SOL of them on mainnet today.
+
+The boundary matters: the close uses the same comparison `execute` does, so a
+session is closable only when the slot is strictly past `expires_at`. Its final
+slot still belongs to it. A live session is refused with **3036**
+(`SessionNotExpired`).
+
+Both SDKs export `createCloseExpiredSessionIx`; there is no high-level client
+method, because the instruction needs no wallet, no authority and no fee
+accounts.
+
 ## SDK — `@lazorkit/sdk` 1.0.0-rc.2, migration in the kit SDK
 
 The kit SDK had no way to move a user off v1, so an app built on it had nothing

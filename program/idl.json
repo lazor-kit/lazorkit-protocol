@@ -1136,6 +1136,15 @@
         "type": "u8",
         "value": 17
       }
+    },
+    {
+      "name": "CloseExpiredSession",
+      "accounts": [],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 18
+      }
     }
   ],
   "metadata": {

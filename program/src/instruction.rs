@@ -426,6 +426,9 @@ pub enum ProgramIx {
         desc = "Ed25519 owner signer (must sign for Ed25519 auth; placeholder for passkeys)"
     )]
     MigrateWallet { num_tokens: u8 },
+    /// Close a session whose `expires_at` has passed. Permissionless: the
+    /// caller keeps the rent. Accepts a v1 session as well as a v2 one.
+    CloseExpiredSession,
 }
 
 // `ProgramIx` above is the only instruction enum. A second hand-written

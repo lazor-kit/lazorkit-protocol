@@ -311,12 +311,21 @@ a v2 instruction can read and close a **v1** session with no extra parsing, the
 same trick `MigrateWallet` already uses for v1 wallets. That is the difference
 between recovering the 0.290408 SOL sitting on mainnet and burning it.
 
-- [ ] Decide where the rent goes: the closer (a keeper market, our sponsored
-      rent leaking to strangers at ~0.0022 SOL a session), the original payer
-      (needs the header field, needs deciding before v2 ships, and leaves nobody
-      with a reason to crank), or a split.
-- [ ] Decide whether the close accepts v1 sessions as well as v2 ones — 0.29 SOL
-      today, and the only way that money is ever recovered.
+**Decided and built** (2026-09-24): the closer keeps the rent — no header
+change, and cleanup pays for itself — and the instruction accepts v1 sessions as
+well as v2 ones. `CloseExpiredSession` is instruction **18**; a session that is
+still live is refused with **3036**.
+
+This flips the 0.290408 SOL of v1 sessions from *burned by the upgrade* to
+*recoverable after it, by anyone*. So there is no rush to sweep sessions before
+the window — the opposite of the DeferredExec accounts, which really do have to
+be reclaimed first.
+
+Six litesvm tests cover it: a stranger closes an expired session and keeps the
+rent; a live one is refused; the session's **final slot still belongs to it**
+(the close uses the same `>` as `execute`, so a keeper cannot end it a slot
+early); a v1-shaped session closes; a live v1 one does not; and an Authority
+account owned by the same program is not closable as a session.
 
 - [ ] Before the upgrade window: reclaim the sponsor's 68 expired DeferredExec
       accounts (0.141 SOL) and drain the sixteen treasury shards (0.0056 SOL).

@@ -32,6 +32,7 @@ export const DISC_INITIALIZE_TREASURY_SHARD = 14;
 export const DISC_PROPOSE_PROTOCOL_ADMIN = 15;
 export const DISC_ACCEPT_PROTOCOL_ADMIN = 16;
 export const DISC_MIGRATE_WALLET = 17;
+export const DISC_CLOSE_EXPIRED_SESSION = 18;
 
 // ─── Authority types ─────────────────────────────────────────────────
 export const AUTH_TYPE_ED25519 = 0;
@@ -842,4 +843,38 @@ export function createMigrateWalletIx(params: {
   );
 
   return new TransactionInstruction({ programId: params.programId, keys, data });
+}
+
+// ─── CloseExpiredSession ────────────────────────────────────────────
+
+/**
+ * Close a session whose `expires_at` has passed, and keep its rent.
+ *
+ * Permissionless on purpose. Before expiry a session ends only through
+ * `RevokeSession`, signed by the wallet's Owner or Admin; afterwards the
+ * account authorises nothing — `Execute` refuses a session past its expiry —
+ * and the only key that could free the rent belongs to a user with no reason to
+ * come back. So anyone may close it, and `refundDestination` is whoever they
+ * say, usually themselves.
+ *
+ * It accepts a **v1** session as well as a v2 one: the headers are identical
+ * apart from the discriminator, and the sessions stranded by the upgrade have
+ * no other way home.
+ */
+export function createCloseExpiredSessionIx(params: {
+  /** Any signer. Pays the fee and, by convention, receives the rent. */
+  caller: PublicKey;
+  sessionPda: PublicKey;
+  refundDestination: PublicKey;
+  programId: PublicKey;
+}): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: params.programId,
+    keys: [
+      { pubkey: params.caller, isSigner: true, isWritable: true },
+      { pubkey: params.sessionPda, isSigner: false, isWritable: true },
+      { pubkey: params.refundDestination, isSigner: false, isWritable: true },
+    ],
+    data: Buffer.from([DISC_CLOSE_EXPIRED_SESSION]),
+  });
 }

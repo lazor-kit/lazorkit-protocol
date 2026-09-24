@@ -68,6 +68,7 @@ pub fn process_instruction(
         15 => crate::processor::protocol::rotate_admin::process_propose(program_id, accounts, data),
         16 => crate::processor::protocol::rotate_admin::process_accept(program_id, accounts, data),
         17 => crate::processor::migrate::process(program_id, accounts, data),
+        18 => session::close_expired::process(program_id, processor_accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

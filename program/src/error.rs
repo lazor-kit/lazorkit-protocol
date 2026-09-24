@@ -53,6 +53,12 @@ pub enum AuthError {
     /// widen nothing, leaving the wallet unmanageable with its funds inside —
     /// and a bounded Admin could revoke what it could not recreate.
     PolicyRankMismatch = 3035,
+    /// `CloseExpiredSession` was called on a session that is still live. Before
+    /// expiry a session ends only through `RevokeSession`, signed by the
+    /// wallet's own Owner or Admin; the permissionless path exists because an
+    /// expired session can no longer authorise anything, and that is only true
+    /// once the slot is strictly past `expires_at`.
+    SessionNotExpired = 3036,
 }
 
 impl From<AuthError> for ProgramError {

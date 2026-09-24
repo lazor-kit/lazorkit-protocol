@@ -34,6 +34,7 @@ import {
   createExecuteIx,
   createInitializeProtocolIx,
   createInitializeTreasuryShardIx,
+  createCloseExpiredSessionIx,
   createMigrateWalletIx,
   createReclaimDeferredIx,
   createRegisterPayerIx,
@@ -54,6 +55,7 @@ import {
   createExecuteIx as legacyExecuteIx,
   createInitializeProtocolIx as legacyInitProtocolIx,
   createInitializeTreasuryShardIx as legacyInitTreasuryShardIx,
+  createCloseExpiredSessionIx as legacyCloseExpiredSessionIx,
   createMigrateWalletIx as legacyMigrateWalletIx,
   createReclaimDeferredIx as legacyReclaimDeferredIx,
   createRegisterPayerIx as legacyRegisterPayerIx,
@@ -699,5 +701,24 @@ describe('createMigrateWallet', () => {
     });
     expectIxParity(kit, legacy);
     expect(Array.from(kit.data!)).toEqual([17, 0]);
+  });
+});
+
+describe('createCloseExpiredSession', () => {
+  it('byte-parity', () => {
+    const kit = createCloseExpiredSessionIx({
+      caller: KIT(PAYER),
+      sessionPda: KIT(SESSION),
+      refundDestination: KIT(REFUND),
+      programId: KIT(PROGRAM),
+    });
+    const legacy = legacyCloseExpiredSessionIx({
+      caller: PK(PAYER),
+      sessionPda: PK(SESSION),
+      refundDestination: PK(REFUND),
+      programId: PK(PROGRAM),
+    });
+    expectIxParity(kit, legacy);
+    expect(Array.from(kit.data!)).toEqual([18]);
   });
 });

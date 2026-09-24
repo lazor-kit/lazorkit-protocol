@@ -43,6 +43,7 @@ export const DISC_INITIALIZE_TREASURY_SHARD = 14;
 export const DISC_PROPOSE_PROTOCOL_ADMIN = 15;
 export const DISC_ACCEPT_PROTOCOL_ADMIN = 16;
 export const DISC_MIGRATE_WALLET = 17;
+export const DISC_CLOSE_EXPIRED_SESSION = 18;
 
 // ─── Authority types ─────────────────────────────────────────────────
 export const AUTH_TYPE_ED25519 = 0;
@@ -761,5 +762,34 @@ export function createMigrateWalletIx(params: {
       new Uint8Array([DISC_MIGRATE_WALLET, tokens.length]),
       params.authPayload ?? new Uint8Array(0),
     ]),
+  };
+}
+
+// ─── CloseExpiredSession ────────────────────────────────────────────
+
+/**
+ * Close a session whose `expires_at` has passed, and keep its rent.
+ *
+ * Permissionless: before expiry a session ends only through `RevokeSession`,
+ * signed by the wallet's Owner or Admin, but afterwards it authorises nothing
+ * and the only key that could free the rent belongs to a user with no reason to
+ * return. Accepts a v1 session as well as a v2 one — the headers are identical
+ * apart from the discriminator.
+ */
+export function createCloseExpiredSessionIx(params: {
+  /** Any signer. Pays the fee and, by convention, receives the rent. */
+  caller: Address;
+  sessionPda: Address;
+  refundDestination: Address;
+  programId: Address;
+}): Instruction {
+  return {
+    programAddress: params.programId,
+    accounts: [
+      meta(params.caller, SIGNER_RW),
+      meta(params.sessionPda, RW),
+      meta(params.refundDestination, RW),
+    ],
+    data: new Uint8Array([DISC_CLOSE_EXPIRED_SESSION]),
   };
 }
