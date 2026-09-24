@@ -82,7 +82,11 @@ max_allowed_lamports = 15000000
 # the precompile verifies, it does not sign.
 max_signatures = 4
 
-price_source = "Jupiter"
+# "Jupiter" fails validation without JUPITER_API_KEY, and nothing reads the
+# oracle while price.type = "free" — no conversion happens, so there is no price
+# to fetch. The validator's "Mock is not suitable for production" warning is
+# about paid pricing; revisit this the day fees are charged in tokens.
+price_source = "Mock"
 allow_durable_transactions = false
 cross_cluster_check = false
 
@@ -181,7 +185,20 @@ allow_deactivate = false
 allow_close = false
 
 [validation.token_2022]
-transfer_hook_policy = "deny_mutable_for_delayed_signing"
+# deny_all, not the laxer default. Under
+# `deny_mutable_for_delayed_signing` a mint whose transfer-hook authority is
+# still mutable is accepted on `signAndSendTransaction` — which is the flow both
+# clients use — and that authority can swap the hook program between the moment
+# we sign and the moment it executes. The cost of denying: a user holding a
+# transfer-hook token cannot move it through the sponsor. That is the right way
+# round.
+transfer_hook_policy = "deny_all"
+
+# PermanentDelegate is deliberately NOT blocked, against the validator's advice.
+# Its warning is about payment tokens — a delegate seizing what it was paid —
+# and this relayer takes no token payment at all (price.type = "free"). Blocking
+# it here would only refuse to sponsor a user moving their own token out of a v1
+# vault. Revisit if fees are ever charged in tokens.
 blocked_mint_extensions = []
 blocked_account_extensions = []
 

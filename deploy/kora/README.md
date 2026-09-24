@@ -81,6 +81,31 @@ slower and checks more. Both exit non-zero on failure (upstream
 [#567](https://github.com/solana-foundation/kora/pull/567)), so either belongs
 in front of a deploy.
 
+**Both files pass** against `v2.2.0-beta.8` (run 2026-09-24). Two things it
+caught that reading the source had not:
+
+- `price_source = "Jupiter"` is a **hard error** without `JUPITER_API_KEY`, even
+  though `price.type = "free"` means no price is ever fetched. Both files use
+  `"Mock"`; revisit the day fees are charged in tokens.
+- `transfer_hook_policy` was too lax. Under
+  `deny_mutable_for_delayed_signing`, a mint whose transfer-hook authority is
+  still mutable is accepted on `signAndSendTransaction` — the flow both clients
+  use — and that authority can swap the hook program between our signature and
+  execution. Both files now say `deny_all`.
+
+The warnings that remain are answered, not ignored:
+
+| warning | our answer |
+|---|---|
+| Mock price source "not suitable for production" | nothing reads the oracle while pricing is free |
+| LazorKit and the Secp256r1 precompile have "no dedicated fee-payer instruction parser" | expected for any non-standard program. It matters less than it reads: our own CPIs go to the System program, which *is* parsed, so the fee-payer policy still gates the instructions that spend our lamports |
+| PermanentDelegate not blocked | the warning is about payment tokens being seized after payment, and this relayer takes no token payment. Blocking it would only refuse to sponsor a user moving their own token out of a v1 vault |
+| free pricing | that is the product |
+| `system.allow_transfer` / `allow_create_account` can drain the fee payer | true, and unavoidable — see above. `require_one_of_programs`, the lamport cap and the usage limits are the bound |
+| no authentication configured | the secrets come from the environment, which the validator cannot see. **Confirm with `kora-check.cjs` after deploying**, not here |
+| usage limiting without `cache_url` | resolved from `KORA_REDIS_URL` at runtime, likewise invisible here |
+| usage-limit fallback disabled | deliberate: if the cache is down, refuse rather than sponsor blindly |
+
 ## Applying it on Railway
 
 The relayer runs as a Railway service (`kora.devnet.lazorkit.com` →
