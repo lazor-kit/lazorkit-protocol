@@ -76,8 +76,24 @@ const line = (state, label, detail) => {
   console.log(`${tag}  ${label.padEnd(20)} ${detail}`);
 };
 
+// The build we have read and reasoned about. Older ones are missing fixes we
+// depend on; newer ones we simply have not checked.
+const EXPECTED_VERSION = '2.2.0-beta.8';
+
 async function run(url, cluster, apiKey) {
   console.log(`${url}  (${cluster})\n`);
+
+  // 0. Which build is answering. `getVersion` needs no key on any build, and
+  //    the controls below only behave as documented on beta.8 or later.
+  const version = await rpc(url, 'getVersion', apiKey);
+  const running = version.json?.result?.version ?? null;
+  line(
+    running === EXPECTED_VERSION ? true : running ? 'warn' : null,
+    'version',
+    running
+      ? `${running}${running === EXPECTED_VERSION ? '' : ` — expected ${EXPECTED_VERSION}; older builds ignore the --api-key flag, key usage limits non-atomically, and leak the RPC URL's query string in error messages`}`
+      : `not reported (${version.status})`,
+  );
 
   // 1. Authentication. `liveness` is exempt from both auth layers by name, so
   //    it proves nothing; `getConfig` is the honest probe.

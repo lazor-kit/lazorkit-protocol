@@ -235,6 +235,45 @@ What bounds a stranger is therefore authentication, `max_allowed_lamports` set
 to what a real flow costs rather than a round number, and `usage_limit`. All
 three are currently off or loose.
 
+### Upgrade the relayer before relying on any of these controls
+
+`getVersion` on the live endpoint answers **`2.2.0-beta.7`** (released
+2026-03-27). Upstream's latest tag is **`v2.2.0-beta.8`** (2026-07-29), 164
+commits later, and `main` is 42 commits beyond that. The checkout in
+`~/Documents/LazorKit/kora` is older still — a year behind what is deployed, and
+its sample `kora.toml` describes a flatter `fee_payer_policy` than the running
+server reports, so read the upstream tag, not that checkout.
+
+The gap matters because beta.8 fixes the very controls we are about to lean on:
+
+| upstream fix | why it matters here |
+|---|---|
+| [#602](https://github.com/solana-foundation/kora/pull/602) — apply `--api-key`/`--hmac-secret`, previously parsed and **ignored** | on beta.7 an operator who sets the key on the command line gets an unauthenticated server and the key in the process table |
+| [#463](https://github.com/solana-foundation/kora/pull/463), [#571](https://github.com/solana-foundation/kora/pull/571) — atomic, all-or-nothing usage limits | the per-caller ceiling is the main bound on a public relayer; on beta.7 concurrent requests race past it |
+| [#620](https://github.com/solana-foundation/kora/pull/620) — transaction-validation and fee-payer accounting hardening | inner-CPI reconstruction so fee-payer policy gates actually run, rent counted in outflow, owner allowlists on Assign/CreateAccount |
+| [#552](https://github.com/solana-foundation/kora/pull/552) — redact the URL path and query in client-facing errors | our RPC endpoint carries its credential in the query string; on beta.7 a transport error hands it to whoever made the request, and that endpoint asks for no credentials |
+| [#542](https://github.com/solana-foundation/kora/pull/542), [#541](https://github.com/solana-foundation/kora/pull/541) — loader/deploy-authority drain guards | same attack surface as the fee-payer policy above |
+| RUSTSEC-2026-0185, -0204 dependency bumps | routine, but they are in the deployed build |
+
+beta.8 also adds an auth mechanism that actually fits a public dApp:
+**`[kora.auth].recaptcha_secret`** with `recaptcha_score_threshold` (env
+`KORA_RECAPTCHA_SECRET`, header `x-recaptcha-token`). An API key shipped in a
+browser bundle is not a secret; a per-visitor reCAPTCHA token is the thing a
+bundle reader cannot mint in bulk.
+
+Two things worth having are only on `main`, not yet in a tag: configurable CORS
+origins ([#658](https://github.com/solana-foundation/kora/pull/658)) and
+`max_priority_fee_lamports` ([#638](https://github.com/solana-foundation/kora/pull/638)).
+Upstream has also been fuzzing fee-payer drains specifically (#618, #640,
+#648–#651), which is a fair signal about where the risk is.
+
+- [ ] Upgrade the relayer to `ghcr.io/solana-foundation/kora:v2.2.0-beta.8`
+      (Railway image bump) **before** enabling auth and usage limits, so the
+      controls behave as documented.
+- [ ] Re-run `kora-check.cjs` afterwards: `version` should read `2.2.0-beta.8`.
+- [ ] Note the one breaking change: `usage_limit.enabled = true` with no rules
+      now **fails startup** instead of silently doing nothing.
+
 Check any relayer against all of this from the outside, with no key and no
 transaction:
 
