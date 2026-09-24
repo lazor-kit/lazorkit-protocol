@@ -560,6 +560,45 @@ Two defects only that run could have found, both fixed:
   paymaster section: the mainnet config must list the vanity program id and the
   Secp256r1 precompile, or every sponsored transaction fails this way.
 
+## Kit-SDK migration rehearsal
+
+Run on devnet on **2026-09-24** with
+[`scripts/rehearse/migrate-v1-kit.mjs`](../scripts/rehearse/migrate-v1-kit.mjs),
+against throwaway program `3AN3WnaAN6SteghykdM96qHSGUJiVAUHWFjiyz31myAA`.
+
+The legacy SDK's migration had already been proven on chain three times. The
+kit SDK's had not: `@lazorkit/sdk` 1.0.0-rc.2 shipped `migrateV1Wallet` with
+unit tests and a byte-parity check against the legacy builder — which proves the
+instruction is identical and nothing about the flow around it. An integrator on
+the kit SDK would have been the first to find out.
+
+One run, four steps: create a v1 wallet with `@lazorkit/sdk-legacy` 0.3.2 on the
+live v1 binary, fund it (0.03 SOL + 777,000 of a fresh mint), upgrade the
+program in place to v2, then migrate with the kit SDK from **the owner key
+alone** — no user seed, which is the case a returning user is actually in.
+
+| | |
+|---|---|
+| v1 wallet | `ExDysxenQEQPXhGRePWRXqXnVPMzaVjGLdwfX7Fz9hvE` |
+| upgrade | `7M7Tk81XW1WaJvuXwpMHoBzcDdkYKc4KRcMcjxjnS4hC7xVbzFjB4qS9rUB5mdL7UeJh2c9QFpyCYx3tDRXcsmj` |
+| setup | `62e7msSswXpaRehwF6ksh6TRQsA6Bhz3sUnCfBmFq6W9L9duhVzq3ph8jdj8HTxUgAC1q6MWcBpVR1Vm2xuDuqfB` |
+| migrate | `2W7yh1iDVfnQ5MTKg3k2kXS2gqVtPnTYbhZc4tKdyN6ZfXMiBjKM5tdkafNrnztZa6WqoBzELaNNJPur5iR9orn5` |
+
+**12/12 checks passed**: the scan finds the wallet with no seed and hands back
+the owner key it read off the chain; the plan derives the same vault, enumerates
+the token, and mints a destination seed; and after the two transactions the v1
+wallet and authority are closed, the v1 vault is empty, 0.030000 SOL and all
+777,000 tokens are in the v2 vault, and the emptied source token account is
+closed.
+
+One thing the run corrected in the rehearsal harness rather than the SDK: kit's
+`signTransactionMessageWithSigners` takes its signers from the message, not from
+an options bag, so a second signature the *instruction* requires — the Ed25519
+owner — is simply missing. `signTransaction([payerKeyPair, ownerKeyPair],
+compileTransaction(message))` is the shape that works, and it is worth saying in
+the docs before an integrator hits `Transaction is missing signatures for
+addresses: …` with no idea which key it means.
+
 ## Multisig rehearsal
 
 Run on devnet on 2026-09-11 with
