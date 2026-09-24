@@ -219,6 +219,33 @@ So the leaked key is not a gate that someone else can now walk through — there
 is no gate. Rotating it changes nothing by itself; **enabling auth is the
 change**, and the key rotation rides along with it.
 
+And the open door leads somewhere. `fee_payer_policy` on that relayer is
+permissive where it matters — `system.allow_transfer`, `spl_token.allow_transfer`,
+`allow_mint_to`, `allow_set_authority`, `allow_close_account` and their
+Token-2022 twins are all `true` — so a sponsored transaction may name the fee
+payer as the *source* of a transfer, up to `max_allowed_lamports` (0.1 SOL) per
+transaction, with `usage_limit` disabled and the price policy `free`. Nothing
+counts how many times a caller comes back. On devnet that is 89 SOL of faucet
+money; the same configuration on mainnet is the sponsor's balance.
+
+Our own flows need part of that open: the program funds PDAs and pays the
+protocol fee through System CPIs with the payer as source, so
+`system.allow_transfer` and `system.allow_create_account` cannot simply be shut.
+What bounds a stranger is therefore authentication, `max_allowed_lamports` set
+to what a real flow costs rather than a round number, and `usage_limit`. All
+three are currently off or loose.
+
+Check any relayer against all of this from the outside, with no key and no
+transaction:
+
+```bash
+node scripts/kora-check.cjs https://kora.devnet.lazorkit.com --cluster devnet
+```
+
+It exits non-zero on a FAIL, so it can gate a deploy. Today that endpoint
+returns three: no authentication, no Secp256r1 precompile in `allowed_programs`,
+and the fee-payer policy above on an unauthenticated host.
+
 ### The key that leaked
 
 `lazor-kit/examples/expo-react-native/app/_layout.tsx:13` carries a literal
@@ -505,7 +532,8 @@ of operations — step 4 ends the old key's control of the program for good:
       **None of the five is a keypair file on the deploy machine**, and no
       Ledger is attached (`solana-keygen pubkey usb://ledger` → `no device
       found`; a scan of every 64-byte keypair JSON under `~/.config/solana` and
-      the repo tree matched none of the members). They are wallets, not files —
+      the repo tree matched none of the members). They live in Phantom — wallets,
+      not files —
       which is the right place for them, and which decides how the day runs:
       **`scripts/rehearse/squads-upgrade.cjs` cannot propose, approve or execute
       anything here.** It signs with keypair files only. Its job is
