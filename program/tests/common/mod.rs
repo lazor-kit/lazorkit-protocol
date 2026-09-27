@@ -678,7 +678,11 @@ pub fn setup_test() -> TestContext {
 /// The devnet id compiled into the `devnet`-featured binary. The program now
 /// refuses to run anywhere else (M-2), so tests cannot load it at a random
 /// address the way they used to.
-pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS");
+/// The id the program under test was compiled for. It follows the cluster
+/// feature, so a devnet build and a sunset build each load at their own address
+/// — M-2 refuses to run anywhere else. Loading an artifact built for a
+/// different feature fails every instruction with 4017 WrongProgramAddress.
+pub const PROGRAM_ID: Pubkey = Pubkey::new_from_array(lazorkit_program::ID);
 
 fn load_program(svm: &mut LiteSVM) -> Pubkey {
     svm.add_program_from_file(PROGRAM_ID, sbf_artifact())

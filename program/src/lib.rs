@@ -17,6 +17,11 @@ security_txt! {
     auditors: "Accretion Labs (Solana Foundation, Feb 2026, A26SFR1) — SCOPE: program-v2 @ 79cfc6c3 only; the fee layer and the instructions added to this deployed artifact since are NOT covered by that report. https://github.com/lazor-kit/lazorkit-protocol/blob/main/audits/2026-accretion-solana-foundation-lazorkit-audit-A26SFR1.pdf"
 }
 
+/// The program id this binary was compiled for — one per cluster feature, see
+/// `assertions`. Re-exported so tests and tooling follow the build instead of
+/// hardcoding an address that differs between features.
+pub use assertions::ID;
+
 pub mod auth;
 pub mod compact;
 pub mod entrypoint;

@@ -71,8 +71,35 @@ jobs:
           echo "sha=$D" >> "$GITHUB_OUTPUT"
           echo "devnet SBF: $D"
 
+      - name: Build sunset binary (mainnet-v1)
+        working-directory: program
+        run: cargo build-sbf --features mainnet-v1
+
+      - name: Record sunset hash
+        id: sunset
+        run: |
+          S=$(shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}')
+          echo "sha=$S" >> "$GITHUB_OUTPUT"
+          echo "mainnet-v1 sunset SBF: $S ($(stat -c %s target/deploy/lazorkit_program.so) bytes)"
+
+      # rehearsal and rehearsal-v1 pin the same id (3AN3Wn…), so their binaries
+      # differ only by the sunset gate. Comparing mainnet with mainnet-v1 would
+      # prove nothing: different ids always hash differently.
+      - name: Build rehearsal pair (same id, full vs sunset)
+        working-directory: program
+        run: |
+          cargo build-sbf --features rehearsal
+          shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal.sha
+          cargo build-sbf --features rehearsal-v1
+          shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal-v1.sha
+
       - name: Verify binaries differ
         run: |
+          if [ "$(cat /tmp/rehearsal.sha)" = "$(cat /tmp/rehearsal-v1.sha)" ]; then
+            echo "ERROR: rehearsal and rehearsal-v1 build the same binary at the same id —"
+            echo "       the sunset gate is not being compiled in."
+            exit 1
+          fi
           if [ "${{ steps.mainnet.outputs.sha }}" = "${{ steps.devnet.outputs.sha }}" ]; then
             echo "ERROR: mainnet + devnet SBF binaries are identical."
             echo "       Pattern D's compile-time cluster switch has been"
@@ -101,7 +128,7 @@ jobs:
           fi
           if ! grep -q "pick exactly one cluster" /tmp/build.log; then
             echo "ERROR: build failed but not with the expected compile_error message."
-            echo "       Expected: 'pick exactly one cluster — --features mainnet OR --features devnet'"
+            echo "       Expected: 'pick exactly one cluster feature — mainnet | devnet | staging | ...'"
             exit 1
           fi
           echo "✓ no-feature build correctly rejected by compile_error!"

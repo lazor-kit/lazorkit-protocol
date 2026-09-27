@@ -55,7 +55,7 @@ use crate::{
     error::AuthError,
     legacy,
     state::authority::AuthorityAccountHeader,
-    utils::{SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID},
+    utils::{SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID, SYSTEM_PROGRAM_ID},
 };
 
 /// Token-account field offsets. SPL program ids come from `crate::utils`.
@@ -65,8 +65,12 @@ const TOKEN_AMOUNT_OFFSET: usize = 64;
 const TOKEN_ACCOUNT_MIN_SIZE: usize = 165;
 
 /// SPL instruction tags.
-const SPL_TRANSFER: u8 = 3;
 const SPL_CLOSE_ACCOUNT: u8 = 9;
+const SPL_TRANSFER_CHECKED: u8 = 12;
+/// Decimals in a mint, after `mint_authority` (COption, 36) and `supply` (8).
+/// The same offset in SPL Token and Token-2022.
+const MINT_DECIMALS_OFFSET: usize = 44;
+const MINT_MIN_SIZE: usize = 82;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let (num_tokens, auth_payload) = data
@@ -88,6 +92,15 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     if !payer.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // The SOL sweep CPIs into this account with the vault as signer. A passkey
+    // owner's assertion does not cover it, so a relayer could substitute a
+    // program that accepts the call and does nothing — ComputeBudget does — and
+    // the wallet would close with its SOL still in the vault, where nothing can
+    // ever sign for it again. Pinned, and the sweep is checked below.
+    if system_program.key() != &SYSTEM_PROGRAM_ID {
+        return Err(ProgramError::IncorrectProgramId);
     }
 
     // ── Ownership and shape of the v1 accounts ──────────────────────────
@@ -199,20 +212,27 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     ];
 
     // ── SPL tokens: move each fully, then close the emptied source ──────
-    // Each token is a (source, dest, token_program) triple, so a vault holding
-    // both SPL Token and Token-2022 migrates in one call.
+    // Each token is a (source, dest, mint, token_program) tuple, so a vault
+    // holding both SPL Token and Token-2022 migrates in one call. The mint is
+    // there for `TransferChecked`: Token-2022 refuses a plain `Transfer` from
+    // any account with a transfer-fee or transfer-hook extension, and on a
+    // sunset binary this is the only instruction that can ever move them.
     let mut rest = &accounts[9..];
     for _ in 0..num_tokens {
         let source_ata = rest.first().ok_or(ProgramError::NotEnoughAccountKeys)?;
         let dest_ata = rest.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let token_program = rest.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
-        rest = &rest[3..];
+        let mint = rest.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
+        let token_program = rest.get(3).ok_or(ProgramError::NotEnoughAccountKeys)?;
+        rest = &rest[4..];
 
         let token_owner = token_program.key().as_ref();
         if token_owner != &SPL_TOKEN_PROGRAM_ID && token_owner != &SPL_TOKEN_2022_PROGRAM_ID {
             return Err(ProgramError::IncorrectProgramId);
         }
-        if source_ata.owner().as_ref() != token_owner || dest_ata.owner().as_ref() != token_owner {
+        if source_ata.owner().as_ref() != token_owner
+            || dest_ata.owner().as_ref() != token_owner
+            || mint.owner().as_ref() != token_owner
+        {
             return Err(ProgramError::IllegalOwner);
         }
 
@@ -236,26 +256,40 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             {
                 return Err(ProgramError::InvalidAccountData);
             }
+            // The mint account is that mint. Binding the source ATA in the signed
+            // intent therefore binds the mint too; it needs no field of its own.
+            if &s[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32] != mint.key().as_ref() {
+                return Err(ProgramError::InvalidAccountData);
+            }
             u64::from_le_bytes(
                 s[TOKEN_AMOUNT_OFFSET..TOKEN_AMOUNT_OFFSET + 8]
                     .try_into()
                     .unwrap(),
             )
         };
+        let decimals = {
+            let m = unsafe { mint.borrow_data_unchecked() };
+            if m.len() < MINT_MIN_SIZE {
+                return Err(ProgramError::InvalidAccountData);
+            }
+            m[MINT_DECIMALS_OFFSET]
+        };
 
         if amount > 0 {
-            let mut transfer_data = [0u8; 9];
-            transfer_data[0] = SPL_TRANSFER;
+            let mut transfer_data = [0u8; 10];
+            transfer_data[0] = SPL_TRANSFER_CHECKED;
             transfer_data[1..9].copy_from_slice(&amount.to_le_bytes());
+            transfer_data[9] = decimals;
             invoke_signed_vault(
                 token_program.key(),
                 &[
                     meta_w(source_ata.key()),
+                    meta_ro(mint.key()),
                     meta_w(dest_ata.key()),
                     meta_signer(v1_vault.key()),
                 ],
                 &transfer_data,
-                &[source_ata, dest_ata, v1_vault],
+                &[source_ata, mint, dest_ata, v1_vault],
                 &vault_seeds,
             );
         }
@@ -282,12 +316,18 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         transfer_data[0..4].copy_from_slice(&2u32.to_le_bytes()); // System::Transfer
         transfer_data[4..12].copy_from_slice(&vault_lamports.to_le_bytes());
         invoke_signed_vault(
-            system_program.key(),
+            &SYSTEM_PROGRAM_ID,
             &[meta_signer_w(v1_vault.key()), meta_w(destination.key())],
             &transfer_data,
             &[v1_vault, destination],
             &vault_seeds,
         );
+    }
+    // The wallet and authority are about to close, and after that nothing can
+    // sign for this vault again. Refuse to close them over a vault that still
+    // holds anything, whatever the reason.
+    if v1_vault.lamports() != 0 {
+        return Err(ProgramError::InvalidAccountData);
     }
 
     // ── Close the v1 wallet and authority, rent to the refund destination ─
@@ -322,6 +362,13 @@ fn meta_w(key: &Pubkey) -> AccountMeta<'_> {
         pubkey: key,
         is_signer: false,
         is_writable: true,
+    }
+}
+fn meta_ro(key: &Pubkey) -> AccountMeta<'_> {
+    AccountMeta {
+        pubkey: key,
+        is_signer: false,
+        is_writable: false,
     }
 }
 fn meta_signer(key: &Pubkey) -> AccountMeta<'_> {
