@@ -702,6 +702,9 @@ export interface MigrateTokenPair {
   sourceAta: Address;
   /** A token account owned by `destination` for the same mint. */
   destAta: Address;
+  /** The mint of both accounts. The program moves tokens with `TransferChecked`,
+   *  which Token-2022 requires for any mint with a transfer fee. */
+  mint: Address;
   /** The token program that owns both accounts (SPL Token or Token-2022). Each
    *  token carries its own, so one call can migrate a mix of the two. */
   tokenProgram: Address;
@@ -752,7 +755,12 @@ export function createMigrateWalletIx(params: {
     meta(params.authSigner, params.authSignerIsSigner ? SIGNER_RO : RO),
   ];
   for (const t of tokens) {
-    accounts.push(meta(t.sourceAta, RW), meta(t.destAta, RW), meta(t.tokenProgram, RO));
+    accounts.push(
+      meta(t.sourceAta, RW),
+      meta(t.destAta, RW),
+      meta(t.mint, RO),
+      meta(t.tokenProgram, RO),
+    );
   }
 
   return {

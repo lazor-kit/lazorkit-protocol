@@ -71,8 +71,10 @@ the other.
 
 | Cluster | Program ID | Build feature | Constant |
 |---|---|---|---|
-| mainnet-beta (commercial + foundation, slot shared) | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` | `--features mainnet` | `PROGRAM_ID_MAINNET` |
-| devnet (commercial: this repo) | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` | `--features devnet` | `PROGRAM_ID_DEVNET` |
+| mainnet-beta v2 | the v2 mainnet id (V2_MAINNET_PENDING — until it lands, `PROGRAM_ID_MAINNET` still reads `LazorjRF…`) | `--features mainnet` | `PROGRAM_ID_MAINNET` |
+| mainnet-beta v1 (retiring) | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` | `--features mainnet-v1` (sunset) | `PROGRAM_ID_MAINNET_V1` |
+| devnet v2 (this repo) | `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv` | `--features devnet` | `PROGRAM_ID_DEVNET` |
+| devnet v1 (retiring) | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` | `--features devnet-v1` (sunset) | `PROGRAM_ID_DEVNET_V1` |
 | devnet (foundation: program-v2) | `FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao` | (built in `program-v2`) | `PROGRAM_ID_FOUNDATION_DEVNET` |
 
 The mainnet slot is shared between this repo's commercial build (with

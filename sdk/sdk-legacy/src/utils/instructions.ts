@@ -782,6 +782,9 @@ export interface MigrateTokenPair {
   sourceAta: PublicKey;
   /** A token account owned by `destination` for the same mint. */
   destAta: PublicKey;
+  /** The mint of both accounts. The program moves tokens with `TransferChecked`,
+   *  which Token-2022 requires for any mint with a transfer fee. */
+  mint: PublicKey;
   /** The token program that owns both accounts (SPL Token or Token-2022). Each
    *  token carries its own, so one call can migrate a mix of the two. */
   tokenProgram: PublicKey;
@@ -798,10 +801,10 @@ export interface MigrateTokenPair {
  *
  * The passkey's `authPayload` must be signed over the migration intent — build
  * it with the existing `finalizeSecp256r1` flow using `DISC_MIGRATE_WALLET` and a
- * `signedPayload` of `concat(destination, v1Wallet, [tokens.length], refundDestination)`
- * (32 + 32 + 1 + 32 bytes), and place the returned precompile instruction
- * immediately before this one. Binding wallet, token count, and refund keeps a
- * relayer from replaying the signature against another wallet, dropping tokens to
+ * `signedPayload` of `concat(destination, v1Wallet, [tokens.length], refundDestination,
+ * ...tokens.map(t => t.sourceAta))`, and place the returned precompile instruction
+ * immediately before this one. Binding wallet, token accounts, and refund keeps a
+ * relayer from replaying the signature against another wallet, swapping tokens to
  * strand them, or redirecting the reclaimed rent.
  */
 export function createMigrateWalletIx(params: {
@@ -832,6 +835,7 @@ export function createMigrateWalletIx(params: {
   for (const t of tokens) {
     keys.push({ pubkey: t.sourceAta, isSigner: false, isWritable: true });
     keys.push({ pubkey: t.destAta, isSigner: false, isWritable: true });
+    keys.push({ pubkey: t.mint, isSigner: false, isWritable: false });
     keys.push({ pubkey: t.tokenProgram, isSigner: false, isWritable: false });
   }
 

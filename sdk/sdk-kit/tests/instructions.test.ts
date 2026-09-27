@@ -634,8 +634,8 @@ describe('createInitializeTreasuryShard', () => {
 // SDKs must spend it on the same bytes.
 describe('createMigrateWallet', () => {
   const tokens = [
-    { sourceAta: SESSION, destAta: REFUND, tokenProgram: TOKEN_PROGRAM },
-    { sourceAta: ADMIN, destAta: TREASURY, tokenProgram: TOKEN_2022_PROGRAM },
+    { sourceAta: SESSION, destAta: REFUND, mint: WALLET, tokenProgram: TOKEN_PROGRAM },
+    { sourceAta: ADMIN, destAta: TREASURY, mint: VAULT, tokenProgram: TOKEN_2022_PROGRAM },
   ];
 
   it('byte-parity with a passkey payload and a mix of token programs', () => {
@@ -651,6 +651,7 @@ describe('createMigrateWallet', () => {
       tokens: tokens.map((t) => ({
         sourceAta: KIT(t.sourceAta),
         destAta: KIT(t.destAta),
+        mint: KIT(t.mint),
         tokenProgram: KIT(t.tokenProgram),
       })),
       authPayload,
@@ -668,6 +669,7 @@ describe('createMigrateWallet', () => {
       tokens: tokens.map((t) => ({
         sourceAta: PK(t.sourceAta),
         destAta: PK(t.destAta),
+        mint: PK(t.mint),
         tokenProgram: PK(t.tokenProgram),
       })),
       authPayload,

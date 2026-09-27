@@ -171,13 +171,46 @@ export interface V1VaultToken {
   amount: bigint;
   /** Which token program owns the account — the migration must pass this one. */
   tokenProgram: PublicKey;
+  /** A frozen account cannot be transferred from or closed. */
+  frozen: boolean;
+}
+
+/** Why a vault token account cannot be migrated. */
+export type UnmovableReason = 'frozen' | 'transfer-hook' | 'excluded';
+
+/** Token-account state byte: 0 uninitialized, 1 initialized, 2 frozen. */
+const TOKEN_STATE_OFFSET = 108;
+const TOKEN_STATE_FROZEN = 2;
+/** Token-2022 TLV: account-type byte at 165, then [type u16][len u16][value]. */
+const TLV_START = 166;
+const EXT_TRANSFER_HOOK = 14;
+
+/**
+ * The transfer-hook program a Token-2022 mint names, or `null` if it has none.
+ * MigrateWallet cannot move such a token: `TransferChecked` needs the hook's
+ * extra accounts, and the migration has no way to supply them.
+ */
+export function mintTransferHook(mintData: Uint8Array): PublicKey | null {
+  let off = TLV_START;
+  while (off + 4 <= mintData.length) {
+    const type = mintData[off] | (mintData[off + 1] << 8);
+    const len = mintData[off + 2] | (mintData[off + 3] << 8);
+    const value = mintData.subarray(off + 4, off + 4 + len);
+    if (type === EXT_TRANSFER_HOOK && value.length >= 64) {
+      const program = value.subarray(32, 64);
+      return program.some((b) => b !== 0) ? new PublicKey(program) : null;
+    }
+    if (type === 0 && len === 0) break; // uninitialized tail
+    off += 4 + len;
+  }
+  return null;
 }
 
 /**
- * Every token account the v1 vault owns, across SPL Token and Token-2022, with a
- * non-zero balance filtered out is NOT done here — an empty account still costs
- * rent and should be migrated+closed, so all are returned. The migration MUST
- * enumerate all of these; any it omits is stranded when the wallet closes.
+ * Every token account the v1 vault owns, across SPL Token and Token-2022. Empty
+ * ones are included — an empty account still costs rent and should be migrated
+ * and closed. Pass the result through {@link classifyV1VaultTokens}: some can
+ * never move, and any the migration omits is stranded when the wallet closes.
  */
 export async function enumerateV1VaultTokens(
   connection: Connection,
@@ -195,6 +228,7 @@ export async function enumerateV1VaultTokens(
         mint: new PublicKey(data.subarray(0, 32)),
         amount: data.readBigUInt64LE(64),
         tokenProgram,
+        frozen: data[TOKEN_STATE_OFFSET] === TOKEN_STATE_FROZEN,
       });
     }
   }
@@ -227,4 +261,42 @@ export async function readV1WalletState(
     ownerRole: authInfo.data[2],
     vaultLamports: vaultInfo?.lamports ?? 0,
   };
+}
+
+/**
+ * Split a vault's token accounts into those MigrateWallet can move and those it
+ * cannot, with the reason. Anything left out stays in the v1 vault when the
+ * wallet closes — permanently, once the v1 id runs the sunset binary — so the
+ * caller must show the user what is being left behind rather than hide it.
+ *
+ * Unmovable: frozen accounts, and Token-2022 mints with a transfer hook. Left
+ * in, either one would make the whole migration revert, and a stranger can
+ * plant such an account in anyone's vault for the price of its rent.
+ */
+export async function classifyV1VaultTokens(
+  connection: Connection,
+  tokens: V1VaultToken[],
+  exclude: ReadonlyArray<PublicKey> = [],
+): Promise<{ movable: V1VaultToken[]; skipped: { token: V1VaultToken; reason: UnmovableReason }[] }> {
+  const t22Mints = [
+    ...new Set(
+      tokens.filter((t) => t.tokenProgram.equals(TOKEN_2022_PROGRAM_ID)).map((t) => t.mint.toBase58()),
+    ),
+  ];
+  const hooked = new Set<string>();
+  if (t22Mints.length) {
+    const infos = await connection.getMultipleAccountsInfo(t22Mints.map((m) => new PublicKey(m)));
+    infos.forEach((info, i) => {
+      if (info && mintTransferHook(info.data)) hooked.add(t22Mints[i]);
+    });
+  }
+  const movable: V1VaultToken[] = [];
+  const skipped: { token: V1VaultToken; reason: UnmovableReason }[] = [];
+  for (const t of tokens) {
+    if (exclude.some((e) => e.equals(t.ata))) skipped.push({ token: t, reason: 'excluded' });
+    else if (t.frozen) skipped.push({ token: t, reason: 'frozen' });
+    else if (hooked.has(t.mint.toBase58())) skipped.push({ token: t, reason: 'transfer-hook' });
+    else movable.push(t);
+  }
+  return { movable, skipped };
 }
