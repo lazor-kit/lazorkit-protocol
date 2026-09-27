@@ -8,9 +8,38 @@ so the next upgrade is a checklist rather than a rediscovery.
 
 ---
 
+## First question: same address, or a new one?
+
+**A breaking major gets a new program id.** That is the rule from v2 on, and it
+is how Solana protocols ship breaking majors — Squads v3/v4, Jupiter v4/v6,
+Token/Token-2022 all run side by side. An in-place upgrade of a program that
+holds other people's money is a flag day: every wallet on the old layout stops
+working at once, including integrators who went live the week before. v2 was
+nearly shipped that way; Seedless launching on v1 while v2 was in preparation is
+what made the cost concrete.
+
+So a breaking major is two steps, and the second is optional in timing:
+
+1. **Deploy the new version fresh, at its own id.** Nobody on the old version
+   is affected. Integrators move new users by bumping the SDK.
+2. **Retire the old id** with a sunset binary (`--features <cluster>-v1` for
+   v1): only the instructions an old wallet needs to leave, everything else
+   refused. The owner migrates into the new version across program ids —
+   `MigrateWallet` delivers to any destination the owner signs for.
+
+`assertions` makes the old ids buildable only as sunset binaries, so a flag
+slip cannot put the new version at an old address.
+
+In-place upgrades remain the right tool for **non-breaking** changes to a
+deployed version — a fix, a new instruction, a layout revision that keeps
+reading the old one. The rest of this document is about doing those safely,
+and it still applies inside each id.
+
+---
+
 ## The constraint everything follows from
 
-**The program keeps its address across versions.** PDA addresses are therefore a
+**The program keeps its address across in-place upgrades.** PDA addresses are therefore a
 pure function of the seeds, and a new binary deployed to the same address
 inherits every account the old one created, at exactly the addresses the new one
 would want for itself.

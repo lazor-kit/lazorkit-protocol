@@ -37,17 +37,27 @@ cd tests-sdk && npm run test:local
 
 ### A. Build Program
 
-The program ID is chosen at build time via the `mainnet` / `devnet` cargo
-features (see `assertions/src/lib.rs`). Exactly one must be set; an
-unflagged build fails with a `compile_error!`.
+The program ID is chosen at build time by a cluster feature (see
+`assertions/src/lib.rs` for the full table). Exactly one must be set; an
+unflagged build fails with "pick exactly one cluster feature".
 
 ```bash
-# Devnet build — embeds 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
+# v2 on devnet — embeds 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv
 cargo build-sbf --features devnet
 
-# Mainnet build — embeds LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi
+# v2 on mainnet — embeds the v2 mainnet id (V2_MAINNET_PENDING: not yet ground)
 cargo build-sbf --features mainnet
+
+# The v1 ids build only as the sunset binary (MigrateWallet, ReclaimDeferred,
+# CloseExpiredSession; everything else 4018 RetiredDeployment):
+cargo build-sbf --features mainnet-v1   # LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi
+cargo build-sbf --features devnet-v1    # 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
 ```
+
+For anything you will deploy, add `--sbf-out-dir <dir>` and deploy from that
+directory. A `CARGO_TARGET_DIR` override (the maintainer's shell sets one) makes
+a bare build write somewhere other than `target/deploy`, which then still holds
+the previous binary.
 
 ### B. Run Rust Tests
 

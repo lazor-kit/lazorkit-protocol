@@ -3,11 +3,16 @@
 # the resulting keypair, regenerate IDL, rebuild the SDK.
 #
 # Usage:
-#   ./scripts/build-all.sh devnet     # builds with --features devnet (4h3X...)
-#   ./scripts/build-all.sh mainnet    # builds with --features mainnet (LazorjRF...)
+#   ./scripts/build-all.sh devnet     # v2 at 57bTNW... (--features devnet)
+#   ./scripts/build-all.sh mainnet    # v2 at the v2 mainnet id (V2_MAINNET_PENDING)
 #
-# After this script the .so + keypair live at target/deploy/. Deploy with:
-#   solana program deploy target/deploy/lazorkit_program.so -u <cluster>
+# Neither builds anything deployable at a v1 id (LazorjRF..., 4h3X...): those
+# take the sunset binary, `--features mainnet-v1` / `devnet-v1` — see
+# docs/mainnet-deploy-checklist.md §2.
+#
+# After this script the .so lives at target/deploy/ (forced with --sbf-out-dir,
+# whatever CARGO_TARGET_DIR says). This is a dev convenience: for a real deploy,
+# follow the checklist, which builds, hashes and deploys named artifacts.
 set -e
 
 CLUSTER=$1
@@ -26,7 +31,7 @@ echo "--- 🚀 LazorKit build (cluster: $CLUSTER) ---"
 # This embeds the right declare_id! at compile time via assertions/src/lib.rs.
 echo "[1/3] Building Rust Program (cargo build-sbf --features $CLUSTER)..."
 cd "$PROGRAM_DIR"
-cargo build-sbf --features "$CLUSTER"
+cargo build-sbf --features "$CLUSTER" --sbf-out-dir "$ROOT_DIR/target/deploy"
 
 # Step 2: Generate IDL using Shank, picking the program ID from the keypair
 # the build emitted at target/deploy/lazorkit_program-keypair.json.

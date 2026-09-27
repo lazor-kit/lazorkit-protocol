@@ -15,7 +15,10 @@ mkdir -p "$SCRATCH"
 OUT_DIR="$SCRATCH/rehearse"
 # The program id the binaries are compiled for (v2 M-2 pins this). Devnet by
 # default; pass the vanity id for a --features mainnet rehearsal.
-PROGRAM_ID="${PROGRAM_ID:-4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS}"
+# An in-place upgrade needs v1 and v2 at the same id, which only the rehearsal
+# slot offers: build v2 with `--features rehearsal`. The production clusters put
+# v2 at its own id and never do this.
+PROGRAM_ID="${PROGRAM_ID:-3AN3WnaAN6SteghykdM96qHSGUJiVAUHWFjiyz31myAA}"
 # The two binaries to swap between. Build v2 from HEAD and v1 from the commit
 # before the seed rename (see docs/migration-v1-to-v2.md), then point these at
 # them — or drop them in $SCRATCH as lazorkit_v{1,2}.so.

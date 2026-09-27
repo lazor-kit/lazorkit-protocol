@@ -22,7 +22,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROGRAM_ID="${LAZORKIT_PROGRAM_ID:-4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS}"
+# The v2 devnet id, which a `--features devnet` build is pinned to (M-2).
+PROGRAM_ID="${LAZORKIT_PROGRAM_ID:-57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv}"
 LEDGER="${VALIDATOR_LEDGER:-$HOME/test-ledger}"
 SHUTDOWN_TIMEOUT="${VALIDATOR_SHUTDOWN_TIMEOUT:-30}"
 

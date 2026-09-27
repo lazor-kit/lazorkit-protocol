@@ -6,6 +6,94 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — v2 ships at its own program id; v1 is retired, not overwritten
+
+Protocol v2 no longer replaces v1 in place. An in-place upgrade would have frozen
+every v1 wallet on one day — including Seedless, which went live on v1 while v2
+was being prepared. v2 now deploys fresh at its own id, the way Squads v3/v4,
+Jupiter v4/v6 and Token/Token-2022 shipped, and v1 keeps running untouched until
+it is retired.
+
+| cluster | v2 | v1 (retiring) |
+|---|---|---|
+| mainnet | ground `Lazor…` vanity — see the deploy checklist | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` |
+| devnet | `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv` (deployed) | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` |
+
+**Program**
+- Cluster features are now `mainnet`, `devnet`, `staging`, `rehearsal` (full v2)
+  and `mainnet-v1`, `devnet-v1`, `rehearsal-v1` (sunset). Exactly one, enforced
+  at compile time. The v1 ids can only be built as sunset binaries.
+- **Sunset binary.** Serves `ReclaimDeferred` (8), `MigrateWallet` (17) and
+  `CloseExpiredSession` (18); everything else fails with **4018
+  `RetiredDeployment`** before any processor runs. The compiler drops the
+  unreachable code: 45 KB against 150 KB for full v2.
+- `ReclaimDeferred` accepts a v1 DeferredExec account as well as a v2 one. Its
+  rent was recoverable only before the upgrade; now it is recoverable after,
+  still only by the payer that funded it.
+- `lazorkit_program::ID` is re-exported, and the test harness loads at it rather
+  than at a hardcoded address.
+- `PROTOCOL_INIT_AUTHORITY` moved into `assertions`, inside the same cluster
+  arms as the program id. It used to key off the program crate's features, so
+  `--features assertions/mainnet` built the mainnet id with the committed devnet
+  key as init authority — anyone could have initialised the protocol first.
+- Each v1 feature asserts at compile time that it builds a sunset binary, and
+  each v2 feature that it does not.
+
+### Fixed — found in review of the two-id change
+
+**Program**
+- **`MigrateWallet` pins the system program.** Account 6 was used as the CPI
+  target for the SOL sweep without a check, and the passkey challenge does not
+  cover it. A relayer holding a valid assertion could swap in a no-op program:
+  tokens moved, the wallet and authority closed, and the vault's SOL stranded
+  for good. Now `IncorrectProgramId`, and the instruction also refuses to
+  finish unless the v1 vault is empty after the sweep. Ed25519 owners were
+  never exposed (their signature covers every account).
+- **`MigrateWallet` moves tokens with `TransferChecked`.** Plain `Transfer` is
+  refused by Token-2022 for transfer-fee mints, which made those wallets
+  unmigratable. **Breaking for hand-built instructions:** each token is now
+  four accounts — source, destination, **mint**, token program.
+- **`ReclaimDeferred` pays only the stored payer.** The refund destination was
+  free, and on a sponsored authorization the payer is the relayer's fee payer,
+  which signs for anyone: a stranger could route the sponsor's rent to
+  themselves. Now `UnauthorizedReclaim` unless refund == payer, as
+  `ExecuteDeferred` already required.
+
+**SDKs** (both)
+- **`migrateV1Wallet` no longer delivers into a wallet someone else controls.**
+  It used to reuse the first v2 wallet listing the owner's key, at any rank —
+  and v2 `AddAuthority` never asks the key being added, so an attacker could
+  list a victim's passkey on a wallet they control and receive the migration.
+  The `userSeed` path had the same hole (v1 seeds are public). A wallet is now
+  reused only if `vetMigrationDestination` passes — exactly one authority, this
+  key at Owner rank, no live session, no unexpired deferred execution;
+  otherwise a fresh wallet is created, or, for a `userSeed` wallet, the call
+  throws. **Published `sdk-legacy` 1.1.x and `@lazorkit/sdk` 1.0.0-rc.2 have
+  the hole** — no exposure yet, since v2 is not on mainnet, but do not use
+  their `migrateV1Wallet` against it.
+- **Unmovable tokens are left out and reported.** Frozen accounts and
+  Token-2022 transfer-hook mints would revert the whole migration, and anyone
+  can plant one in a vault. They come back as `skippedTokens`
+  (`'frozen' | 'transfer-hook' | 'excluded'`); `excludeTokenAccounts` lets the
+  user drop spam. New helpers: `classifyV1VaultTokens`, `mintTransferHook`.
+- `createMigrateWalletIx` / `MigrateTokenPair` take the `mint`.
+- `migrateV1Wallet` throws when the client is built at a retired v1 id, where
+  the destination would be derived under a program that can never sign for it.
+
+**SDKs** (`@lazorkit/sdk-legacy` 1.2.0, `@lazorkit/sdk` 1.0.0-rc.3)
+- **Breaking:** `PROGRAM_ID_MAINNET` / `PROGRAM_ID_DEVNET` are the v2 ids.
+- New: `PROGRAM_ID_MAINNET_V1`, `PROGRAM_ID_DEVNET_V1`, and
+  `legacyProgramIdFor(programId)`.
+- `migrateV1Wallet` and `findV1WalletsByOwner` take the v1 program id
+  (defaulting to the paired v1 deployment). The migration instruction — and the
+  passkey challenge, which binds the verifying program — go to the v1 id; the
+  destination wallet and vault are derived at the client's v2 id.
+
+**Operations**
+- The v2 relayer does not sponsor the v1 id until it runs the sunset binary:
+  full v1's Execute forwards every outer signer (H-3), so sponsoring it lets any
+  v1 transaction conscript the fee payer.
+
 ### Added — `CloseExpiredSession` (instruction 18)
 
 A session ends two ways now. Before expiry, as before: `RevokeSession`, signed
