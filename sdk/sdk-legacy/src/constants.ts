@@ -26,14 +26,30 @@ import { PublicKey } from '@solana/web3.js';
  */
 
 /**
- * Mainnet program address (vanity). Slot is shared between the commercial
- * and foundation binaries — see file-level docs.
+ * Protocol v2 program address on mainnet.
+ *
+ * v2 lives at its own program id, as every breaking Solana major does (Squads
+ * v3/v4, Jupiter v4/v6, Token/Token-2022). The v1 deployment keeps its address
+ * — see {@link PROGRAM_ADDRESS_MAINNET_V1} — and runs a sunset binary once v1
+ * is retired, serving only the way out.
  */
 export const PROGRAM_ADDRESS_MAINNET =
+  'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi'; // V2_MAINNET_PENDING
+
+/** Protocol v2 program address on devnet. */
+export const PROGRAM_ADDRESS_DEVNET =
+  '57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv';
+
+/**
+ * The original (v1) mainnet deployment. Wallets created before v2 live here,
+ * and migrate out with `migrateV1Wallet`, which executes against this id and
+ * delivers to a v2 vault at {@link PROGRAM_ADDRESS_MAINNET}.
+ */
+export const PROGRAM_ADDRESS_MAINNET_V1 =
   'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi';
 
-/** Commercial-binary devnet program address (lazorkit-protocol). */
-export const PROGRAM_ADDRESS_DEVNET =
+/** The original (v1) devnet deployment. */
+export const PROGRAM_ADDRESS_DEVNET_V1 =
   '4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS';
 
 /**
@@ -45,11 +61,32 @@ export const PROGRAM_ADDRESS_DEVNET =
 export const PROGRAM_ADDRESS_FOUNDATION_DEVNET =
   'FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao';
 
-/** Mainnet program ID. */
+/** Protocol v2 program ID on mainnet. */
 export const PROGRAM_ID_MAINNET = new PublicKey(PROGRAM_ADDRESS_MAINNET);
 
-/** Commercial-binary devnet program ID (default for devnet RPC URLs). */
+/** Protocol v2 program ID on devnet (default for devnet RPC URLs). */
 export const PROGRAM_ID_DEVNET = new PublicKey(PROGRAM_ADDRESS_DEVNET);
+
+/** The v1 mainnet deployment — where pre-v2 wallets live. */
+export const PROGRAM_ID_MAINNET_V1 = new PublicKey(PROGRAM_ADDRESS_MAINNET_V1);
+
+/** The v1 devnet deployment. */
+export const PROGRAM_ID_DEVNET_V1 = new PublicKey(PROGRAM_ADDRESS_DEVNET_V1);
+
+/**
+ * The v1 deployment that pairs with a v2 program id: where that cluster's
+ * pre-v2 wallets live, and where their migration executes.
+ *
+ * Any other id — staging, a rehearsal slot, a local validator — maps to
+ * itself, which is the in-place layout those environments use.
+ */
+export function legacyProgramIdFor(programId: PublicKey): PublicKey {
+  if (programId.equals(PROGRAM_ID_MAINNET) && !PROGRAM_ID_MAINNET.equals(PROGRAM_ID_MAINNET_V1)) {
+    return PROGRAM_ID_MAINNET_V1;
+  }
+  if (programId.equals(PROGRAM_ID_DEVNET)) return PROGRAM_ID_DEVNET_V1;
+  return programId;
+}
 
 /** Foundation-binary devnet program ID (program-v2 devnet). */
 export const PROGRAM_ID_FOUNDATION_DEVNET = new PublicKey(

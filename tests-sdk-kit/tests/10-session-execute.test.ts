@@ -124,8 +124,15 @@ describe('Session Execute', () => {
     });
     await sendTx(ctx, createIxs, [ownerSigner]);
 
-    // Wait for session to expire (~4s at ~2.5 slots/sec).
-    await new Promise((r) => setTimeout(r, 5000));
+    // Wait for the slot to pass expiry, rather than for a fixed time: a loaded
+    // validator produces slots more slowly than the ~2.5/s the old 5 s sleep
+    // assumed, and then the session is still live and the test fails for a
+    // reason that has nothing to do with expiry.
+    const deadline = Date.now() + 60_000;
+    while ((await getSlot(ctx)) <= expiresAt) {
+      if (Date.now() > deadline) throw new Error(`slot never passed ${expiresAt}`);
+      await new Promise((r) => setTimeout(r, 400));
+    }
 
     const recipient = (await generateKeyPairSigner()).address;
     const { instructions } = await client.execute({

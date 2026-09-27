@@ -26,14 +26,23 @@ import { address, type Address } from '@solana/kit';
  */
 
 /**
- * Mainnet program address (vanity). Slot is shared between the commercial
- * and foundation binaries — see file-level docs.
+ * Protocol v2 program address on mainnet. v2 lives at its own program id; the
+ * v1 deployment keeps {@link PROGRAM_ADDRESS_MAINNET_V1} and, once retired,
+ * runs a sunset binary that serves only the way out.
  */
 export const PROGRAM_ADDRESS_MAINNET =
+  'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi'; // V2_MAINNET_PENDING
+
+/** Protocol v2 program address on devnet. */
+export const PROGRAM_ADDRESS_DEVNET =
+  '57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv';
+
+/** The original (v1) mainnet deployment — where pre-v2 wallets live. */
+export const PROGRAM_ADDRESS_MAINNET_V1 =
   'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi';
 
-/** Commercial-binary devnet program address (lazorkit-protocol). */
-export const PROGRAM_ADDRESS_DEVNET =
+/** The original (v1) devnet deployment. */
+export const PROGRAM_ADDRESS_DEVNET_V1 =
   '4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS';
 
 /**
@@ -44,11 +53,31 @@ export const PROGRAM_ADDRESS_DEVNET =
 export const PROGRAM_ADDRESS_FOUNDATION_DEVNET =
   'FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao';
 
-/** Mainnet program address as an Address. */
+/** Protocol v2 program id on mainnet. */
 export const PROGRAM_ID_MAINNET: Address = address(PROGRAM_ADDRESS_MAINNET);
 
-/** Commercial-binary devnet program address as an Address. */
+/** Protocol v2 program id on devnet. */
 export const PROGRAM_ID_DEVNET: Address = address(PROGRAM_ADDRESS_DEVNET);
+
+/** The v1 mainnet deployment. */
+export const PROGRAM_ID_MAINNET_V1: Address = address(PROGRAM_ADDRESS_MAINNET_V1);
+
+/** The v1 devnet deployment. */
+export const PROGRAM_ID_DEVNET_V1: Address = address(PROGRAM_ADDRESS_DEVNET_V1);
+
+/**
+ * The v1 deployment that pairs with a v2 program id: where that cluster's
+ * pre-v2 wallets live and where their migration executes. Any other id —
+ * staging, a rehearsal slot, a local validator — maps to itself, the in-place
+ * layout those environments use.
+ */
+export function legacyProgramIdFor(programId: Address): Address {
+  if (programId === PROGRAM_ID_MAINNET && PROGRAM_ID_MAINNET !== PROGRAM_ID_MAINNET_V1) {
+    return PROGRAM_ID_MAINNET_V1;
+  }
+  if (programId === PROGRAM_ID_DEVNET) return PROGRAM_ID_DEVNET_V1;
+  return programId;
+}
 
 /** Foundation-binary devnet program address as an Address. */
 export const PROGRAM_ID_FOUNDATION_DEVNET: Address = address(

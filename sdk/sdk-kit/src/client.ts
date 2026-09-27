@@ -33,7 +33,13 @@ import { ACCOUNT_DISCRIMINATOR } from './constants.js';
 import bs58 from 'bs58';
 
 const bs58Encode = (b: Uint8Array): string => bs58.encode(b);
-import { PROGRAM_ID_DEVNET, PROGRAM_ID_MAINNET } from './constants.js';
+import {
+  PROGRAM_ID_DEVNET,
+  PROGRAM_ID_DEVNET_V1,
+  PROGRAM_ID_MAINNET,
+  PROGRAM_ID_MAINNET_V1,
+  legacyProgramIdFor,
+} from './constants.js';
 import { serializeActions, type SessionAction } from './codecs/actions.js';
 import {
   AUTH_TYPE_ED25519,
@@ -81,12 +87,14 @@ import {
   getAssociatedTokenAddress,
 } from './spl.js';
 import {
+  classifyV1VaultTokens,
   deriveV1Accounts,
   enumerateV1VaultTokens,
   findV1AuthorityPda,
   findV1VaultPda,
   findV1WalletsByOwner,
   readV1WalletState,
+  type UnmovableReason,
   type V1Accounts,
   type V1VaultToken,
   type V1WalletRecord,
@@ -607,6 +615,8 @@ export class LazorKit {
     counter: number;
     payer: Address;
     publicKeyBytes: Uint8Array;
+    /** The program that will verify the signature. Defaults to this client's. */
+    programId?: Address;
   }): PreparedSecp256r1 {
     return prepareSecp256r1({
       discriminator: new Uint8Array([args.discriminator]),
@@ -615,7 +625,7 @@ export class LazorKit {
       slot: args.slot,
       counter: args.counter,
       payer: args.payer,
-      programId: this.programId,
+      programId: args.programId ?? this.programId,
       publicKeyBytes: args.publicKeyBytes,
     });
   }
@@ -696,6 +706,70 @@ export class LazorKit {
       });
     }
     return out;
+  }
+
+  /**
+   * Whether `wallet` belongs to `credential` alone — safe to receive a v1
+   * migration. `null` means yes; otherwise the reason it is not.
+   *
+   * Being *an* authority on a wallet proves nothing: anyone can add your key
+   * to a wallet they control, then hand themselves the vault through another
+   * authority, a session, or a pending deferred execution — none of which the
+   * migration's signature covers. So the bar is: exactly one authority, which
+   * is this key at Owner rank, no live session, no unexpired deferred.
+   */
+  async vetMigrationDestination(
+    wallet: Address,
+    credential: Uint8Array,
+    authType: number,
+  ): Promise<string | null> {
+    const scan = (disc: number, walletOffset: bigint) =>
+      this.rpc
+        .getProgramAccounts(this.programId, {
+          encoding: 'base64',
+          filters: [
+            {
+              memcmp: {
+                offset: 0n,
+                bytes: bs58Encode(new Uint8Array([disc])) as Base58EncodedBytes,
+                encoding: 'base58',
+              },
+            },
+            {
+              memcmp: {
+                offset: walletOffset,
+                bytes: wallet as string as Base58EncodedBytes,
+                encoding: 'base58',
+              },
+            },
+          ],
+        })
+        .send();
+    const [authorities, sessions, deferred, slot] = await Promise.all([
+      scan(ACCOUNT_DISCRIMINATOR.AUTHORITY, 16n),
+      scan(ACCOUNT_DISCRIMINATOR.SESSION, 8n),
+      scan(ACCOUNT_DISCRIMINATOR.DEFERRED_EXEC, 72n),
+      this.rpc.getSlot().send().then((v) => BigInt(v)),
+    ]);
+    const bytesOf = (a: (typeof authorities)[number]) =>
+      new Uint8Array(base64Encoder.encode(a.account.data[0]));
+    const expiresAt = (data: Uint8Array, offset: number) =>
+      new DataView(data.buffer, data.byteOffset).getBigUint64(offset, true);
+
+    if (authorities.length !== 1) {
+      return `wallet ${wallet} has ${authorities.length} authorities; a migration destination must have only its owner`;
+    }
+    const a = bytesOf(authorities[0]!);
+    if (a[1] !== authType || a[2] !== ROLE_OWNER || !bytesEqual(a.subarray(48, 80), credential)) {
+      return `wallet ${wallet} is not owned by this key alone`;
+    }
+    if (sessions.some((x) => expiresAt(bytesOf(x), 72) > slot)) {
+      return `wallet ${wallet} has a live session`;
+    }
+    if (deferred.some((x) => expiresAt(bytesOf(x), 168) > slot)) {
+      return `wallet ${wallet} has a pending deferred execution`;
+    }
+    return null;
   }
 
   // ─── CreateWallet ────────────────────────────────────────────────
@@ -1766,8 +1840,10 @@ export class LazorKit {
   async findV1WalletsByOwner(
     credential: Uint8Array,
     authorityType: 'ed25519' | 'secp256r1' = 'secp256r1',
+    /** Where the v1 wallets live. Defaults to the v1 deployment paired with this client's program. */
+    v1ProgramId: Address = legacyProgramIdFor(this.programId),
   ): Promise<V1WalletRecord[]> {
-    return findV1WalletsByOwner(this.rpc, credential, this.programId, authorityType);
+    return findV1WalletsByOwner(this.rpc, credential, v1ProgramId, authorityType);
   }
 
   /**
@@ -1796,13 +1872,28 @@ export class LazorKit {
     v1Wallet?: Address;
     /** Seed for the v2 wallet, when one has to be created. Defaults to random. */
     destinationUserSeed?: Uint8Array;
+    /**
+     * The program that owns the v1 wallet. The migration executes there — it
+     * is the only program that can sign for the v1 vault — and delivers to a v2
+     * wallet at this client's program id. Defaults to the paired v1 deployment.
+     */
+    v1ProgramId?: Address;
+    /** Vault token accounts to leave behind, e.g. ones the user marked as spam. */
+    excludeTokenAccounts?: Address[];
   }): Promise<{
     v1: V1Accounts;
     destinationWallet: Address;
     /** Set only when this call had to mint a fresh seed — persist it. */
     destinationUserSeed?: Uint8Array;
     v2Vault: Address;
+    /** The token accounts this migration moves. */
     tokens: V1VaultToken[];
+    /**
+     * Token accounts it cannot move, and why. They stay in the v1 vault and
+     * become unreachable once the v1 id runs the sunset binary — show them to
+     * the user before they sign.
+     */
+    skippedTokens: { token: V1VaultToken; reason: UnmovableReason }[];
     setupInstructions: Instruction[];
     migrate:
       | { type: 'ed25519'; instruction: Instruction }
@@ -1813,18 +1904,26 @@ export class LazorKit {
         };
   }> {
     const { authType, credentialOrPubkey } = resolveOwnerFields(params.owner);
+    // v1 side — PDAs, instruction, passkey challenge — belongs to the v1
+    // program; the v2 side to this client's. Equal ids = the in-place layout.
+    const v1ProgramId = params.v1ProgramId ?? legacyProgramIdFor(this.programId);
+    const retired = [PROGRAM_ID_MAINNET_V1, PROGRAM_ID_DEVNET_V1].filter(
+      (id) => id !== PROGRAM_ID_MAINNET && id !== PROGRAM_ID_DEVNET,
+    );
+    if (retired.includes(this.programId)) {
+      throw new Error(
+        `this client is built at ${this.programId}, a retired v1 deployment. ` +
+          'Build it at the v2 program id: the migration runs at the v1 id but must deliver to v2.',
+      );
+    }
 
     let v1: V1Accounts;
     if (params.v1Wallet) {
-      const [vault] = await findV1VaultPda(params.v1Wallet, this.programId);
-      const [authority] = await findV1AuthorityPda(
-        params.v1Wallet,
-        credentialOrPubkey,
-        this.programId,
-      );
+      const [vault] = await findV1VaultPda(params.v1Wallet, v1ProgramId);
+      const [authority] = await findV1AuthorityPda(params.v1Wallet, credentialOrPubkey, v1ProgramId);
       v1 = { wallet: params.v1Wallet, vault, authority };
     } else if (params.userSeed) {
-      v1 = await deriveV1Accounts(params.userSeed, credentialOrPubkey, this.programId);
+      v1 = await deriveV1Accounts(params.userSeed, credentialOrPubkey, v1ProgramId);
     } else {
       throw new Error(
         'migrateV1Wallet needs either userSeed or v1Wallet. A wallet created by ' +
@@ -1849,25 +1948,43 @@ export class LazorKit {
     // Where the funds land. With a seed, the destination is that seed's wallet.
     // Without one, reuse whatever v2 wallet this owner already has, and only
     // mint a seed when there is nothing to reuse.
-    let v2Wallet: Address;
+    // Anything reused is vetted first: see vetMigrationDestination.
+    let v2Wallet: Address | undefined;
     let destinationUserSeed: Uint8Array | undefined;
     if (params.userSeed) {
       [v2Wallet] = await this.findWallet(params.userSeed);
+      const exists = await this.rpc.getAccountInfo(v2Wallet, { encoding: 'base64' }).send();
+      if (exists.value) {
+        const problem = await this.vetMigrationDestination(v2Wallet, credentialOrPubkey, authType);
+        if (problem) throw new Error(`refusing to migrate into the userSeed's v2 wallet: ${problem}`);
+      }
     } else {
       const existing = await this.findWalletsByAuthority(
         credentialOrPubkey,
         authType === AUTH_TYPE_ED25519 ? 'ed25519' : 'secp256r1',
       );
-      if (existing.length > 0) {
-        v2Wallet = existing[0]!.walletPda;
-      } else {
+      for (const record of existing) {
+        if (record.role !== ROLE_OWNER) continue;
+        if (!(await this.vetMigrationDestination(record.walletPda, credentialOrPubkey, authType))) {
+          v2Wallet = record.walletPda;
+          break;
+        }
+      }
+      if (!v2Wallet) {
         destinationUserSeed = params.destinationUserSeed ?? randomBytes(32);
         [v2Wallet] = await this.findWallet(destinationUserSeed);
       }
     }
     const [v2Vault] = await this.findVault(v2Wallet);
 
-    const tokens = await enumerateV1VaultTokens(this.rpc, v1.vault);
+    const { movable: tokens, skipped: skippedTokens } = await classifyV1VaultTokens(
+      this.rpc,
+      await enumerateV1VaultTokens(this.rpc, v1.vault),
+      params.excludeTokenAccounts,
+    );
+    if (tokens.length > 255) {
+      throw new Error(`the v1 vault holds ${tokens.length} token accounts; one migration moves at most 255`);
+    }
 
     const setupInstructions: Instruction[] = [];
     const v2WalletInfo = await this.rpc
@@ -1897,7 +2014,7 @@ export class LazorKit {
           tokenProgram: t.tokenProgram,
         }),
       );
-      migrateTokens.push({ sourceAta: t.ata, destAta, tokenProgram: t.tokenProgram });
+      migrateTokens.push({ sourceAta: t.ata, destAta, mint: t.mint, tokenProgram: t.tokenProgram });
     }
 
     // signed_payload = destination || v1_wallet || num_tokens || refund_dest
@@ -1925,7 +2042,7 @@ export class LazorKit {
         authSigner: (params.owner as { publicKey: Address }).publicKey,
         authSignerIsSigner: true,
         tokens: migrateTokens,
-        programId: this.programId,
+        programId: v1ProgramId,
       });
       return {
         v1,
@@ -1933,6 +2050,7 @@ export class LazorKit {
         destinationUserSeed,
         v2Vault,
         tokens,
+        skippedTokens,
         setupInstructions,
         migrate: { type: 'ed25519', instruction },
       };
@@ -1957,6 +2075,8 @@ export class LazorKit {
       counter,
       payer: params.payer,
       publicKeyBytes: owner.compressedPubkey,
+      // The challenge binds the program that verifies it: the v1 program.
+      programId: v1ProgramId,
     });
     const finalize = (response: WebAuthnResponse): Instruction[] => {
       const { authPayload, precompileIx } = finalizeSecp256r1(prepared, response);
@@ -1971,7 +2091,7 @@ export class LazorKit {
         authSignerIsSigner: false,
         tokens: migrateTokens,
         authPayload,
-        programId: this.programId,
+        programId: v1ProgramId,
       });
       return [precompileIx, migrateIx];
     };
@@ -1981,10 +2101,15 @@ export class LazorKit {
       destinationUserSeed,
       v2Vault,
       tokens,
+      skippedTokens,
       setupInstructions,
       migrate: { type: 'secp256r1', challenge: prepared.challenge, finalize },
     };
   }
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 // ─── Helper: decode Address from raw bytes (for findWalletsByAuthority) ──

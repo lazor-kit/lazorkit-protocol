@@ -14,15 +14,22 @@ import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import {
   LazorKitClient,
   PROGRAM_ID_DEVNET,
+  PROGRAM_ID_DEVNET_V1,
   findV1WalletsByOwner,
   findV1AuthorityPda,
   findV1VaultPda,
   findV1WalletPda,
   V1_DISC_WALLET,
   V1_DISC_AUTHORITY,
+  ACCOUNT_DISCRIMINATOR,
+  TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddress,
 } from '../../sdk/sdk-legacy/src';
 
+// v2 and v1 at different program ids, as on the real clusters: the migration
+// executes against the v1 program and delivers to a v2 vault at the v2 program.
 const PROGRAM_ID = PROGRAM_ID_DEVNET;
+const V1_PROGRAM_ID = PROGRAM_ID_DEVNET_V1;
 const OWNER_PUBKEY = Keypair.generate().publicKey;
 const CREDENTIAL = OWNER_PUBKEY.toBytes(); // Ed25519 owner: id seed is the pubkey
 
@@ -88,9 +95,9 @@ describe('findV1WalletsByOwner', () => {
 });
 
 describe('migrateV1Wallet by address', () => {
-  const [v1Wallet] = findV1WalletPda(new Uint8Array(32).fill(0x5a), PROGRAM_ID);
-  const [v1Authority] = findV1AuthorityPda(v1Wallet, CREDENTIAL, PROGRAM_ID);
-  const [v1Vault] = findV1VaultPda(v1Wallet, PROGRAM_ID);
+  const [v1Wallet] = findV1WalletPda(new Uint8Array(32).fill(0x5a), V1_PROGRAM_ID);
+  const [v1Authority] = findV1AuthorityPda(v1Wallet, CREDENTIAL, V1_PROGRAM_ID);
+  const [v1Vault] = findV1VaultPda(v1Wallet, V1_PROGRAM_ID);
 
   function stubConnection(): Connection {
     return {
@@ -138,26 +145,55 @@ describe('migrateV1Wallet by address', () => {
     expect(keys).toContain(v1Authority.toBase58());
     expect(keys).toContain(v1Vault.toBase58());
     expect(keys).toContain(result.v2Vault.toBase58());
+    // Sent to the v1 program — the only one that can sign for a v1 vault.
+    expect(
+      result.migrate.type === 'ed25519' ? result.migrate.instruction.programId.toBase58() : '',
+    ).toBe(V1_PROGRAM_ID.toBase58());
   });
+
+  /**
+   * A connection where `existing` is a v2 wallet listing this owner — cleanly,
+   * or with one of the ways an attacker keeps a hand on it.
+   */
+  function withV2Wallet(
+    existing: PublicKey,
+    hostile?: 'second-authority' | 'spender-rank' | 'session' | 'deferred',
+  ): Connection {
+    const live = Buffer.alloc(176);
+    live.writeBigUInt64LE(5_000n, 72);
+    live.writeBigUInt64LE(5_000n, 168);
+    const owner = { pubkey: Keypair.generate().publicKey, account: { data: v1AuthorityData(existing) } };
+    return {
+      ...stubConnection(),
+      getProgramAccounts: async (_id: PublicKey, config: { filters: Array<{ memcmp: { bytes: string } }> }) => {
+        const head = Buffer.from(config.filters[0].memcmp.bytes, 'base64');
+        if (head.equals(Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY, 0]))) return [owner];
+        if (head.equals(Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY]))) {
+          if (hostile === 'spender-rank') {
+            return [{ ...owner, account: { data: v1AuthorityData(existing, 2) } }];
+          }
+          return hostile === 'second-authority' ? [owner, owner] : [owner];
+        }
+        if (head.equals(Buffer.from([ACCOUNT_DISCRIMINATOR.SESSION]))) {
+          return hostile === 'session' ? [{ pubkey: owner.pubkey, account: { data: live } }] : [];
+        }
+        if (head.equals(Buffer.from([ACCOUNT_DISCRIMINATOR.DEFERRED_EXEC]))) {
+          return hostile === 'deferred' ? [{ pubkey: owner.pubkey, account: { data: live } }] : [];
+        }
+        return [];
+      },
+      // The v2 wallet exists, so no creation instructions.
+      getAccountInfo: async (key: PublicKey) =>
+        key.equals(existing) ? { data: Buffer.alloc(8), lamports: 1 } : null,
+    } as unknown as Connection;
+  }
 
   it('reuses the v2 wallet this owner already has instead of minting a seed', async () => {
     const [existingWallet] = new LazorKitClient(stubConnection(), PROGRAM_ID).findWallet(
       new Uint8Array(32).fill(0x11),
     );
-    const connection = {
-      ...stubConnection(),
-      getProgramAccounts: async () => [
-        {
-          pubkey: Keypair.generate().publicKey,
-          account: { data: v1AuthorityData(existingWallet) },
-        },
-      ],
-      // The v2 wallet exists, so no creation instructions.
-      getAccountInfo: async (key: PublicKey) =>
-        key.equals(existingWallet) ? { data: Buffer.alloc(8), lamports: 1 } : null,
-    } as unknown as Connection;
 
-    const result = await new LazorKitClient(connection, PROGRAM_ID).migrateV1Wallet({
+    const result = await new LazorKitClient(withV2Wallet(existingWallet), PROGRAM_ID).migrateV1Wallet({
       payer: Keypair.generate().publicKey,
       owner: { type: 'ed25519', publicKey: OWNER_PUBKEY },
       v1Wallet,
@@ -166,6 +202,93 @@ describe('migrateV1Wallet by address', () => {
     expect(result.destinationWallet.toBase58()).toBe(existingWallet.toBase58());
     expect(result.destinationUserSeed).toBeUndefined();
     expect(result.setupInstructions).toHaveLength(0);
+  });
+
+  // Being listed on a wallet is not owning it. Each of these leaves someone
+  // else able to spend what lands in the vault, so the SDK must not reuse it.
+  for (const hostile of ['second-authority', 'spender-rank', 'session', 'deferred'] as const) {
+    it(`does not deliver into a wallet with a ${hostile} — it mints a fresh one`, async () => {
+      const [planted] = new LazorKitClient(stubConnection(), PROGRAM_ID).findWallet(
+        new Uint8Array(32).fill(0x66),
+      );
+      const client = new LazorKitClient(withV2Wallet(planted, hostile), PROGRAM_ID);
+
+      const result = await client.migrateV1Wallet({
+        payer: Keypair.generate().publicKey,
+        owner: { type: 'ed25519', publicKey: OWNER_PUBKEY },
+        v1Wallet,
+      });
+
+      expect(result.destinationWallet.toBase58()).not.toBe(planted.toBase58());
+      expect(result.destinationWallet.toBase58()).toBe(
+        client.findWallet(result.destinationUserSeed!)[0].toBase58(),
+      );
+    });
+  }
+
+  it("refuses the userSeed's own v2 wallet when someone else can spend from it", async () => {
+    const seed = new Uint8Array(32).fill(0x5a);
+    const [seedWallet] = new LazorKitClient(stubConnection(), PROGRAM_ID).findWallet(seed);
+
+    await expect(
+      new LazorKitClient(withV2Wallet(seedWallet, 'deferred'), PROGRAM_ID).migrateV1Wallet({
+        payer: Keypair.generate().publicKey,
+        owner: { type: 'ed25519', publicKey: OWNER_PUBKEY },
+        userSeed: seed,
+      }),
+    ).rejects.toThrow('pending deferred execution');
+  });
+
+  it('refuses to run from a client built at the retired v1 id', async () => {
+    await expect(
+      new LazorKitClient(stubConnection(), V1_PROGRAM_ID).migrateV1Wallet({
+        payer: Keypair.generate().publicKey,
+        owner: { type: 'ed25519', publicKey: OWNER_PUBKEY },
+        v1Wallet,
+      }),
+    ).rejects.toThrow('retired v1 deployment');
+  });
+
+  it('passes source, destination, mint, token program per token and skips a frozen one', async () => {
+    const mint = Keypair.generate().publicKey;
+    const good = Keypair.generate().publicKey;
+    const frozen = Keypair.generate().publicKey;
+    const tokenData = (isFrozen: boolean) => {
+      const data = Buffer.alloc(165);
+      mint.toBuffer().copy(data, 0);
+      v1Vault.toBuffer().copy(data, 32);
+      data.writeBigUInt64LE(42n, 64);
+      data[108] = isFrozen ? 2 : 1;
+      return data;
+    };
+    const connection = {
+      ...stubConnection(),
+      getTokenAccountsByOwner: async (_owner: PublicKey, filter: { programId: PublicKey }) => ({
+        value: filter.programId.equals(TOKEN_PROGRAM_ID)
+          ? [
+              { pubkey: good, account: { data: tokenData(false) } },
+              { pubkey: frozen, account: { data: tokenData(true) } },
+            ]
+          : [],
+      }),
+    } as unknown as Connection;
+
+    const result = await new LazorKitClient(connection, PROGRAM_ID).migrateV1Wallet({
+      payer: Keypair.generate().publicKey,
+      owner: { type: 'ed25519', publicKey: OWNER_PUBKEY },
+      v1Wallet,
+    });
+
+    expect(result.tokens.map((t) => t.ata.toBase58())).toEqual([good.toBase58()]);
+    expect(result.skippedTokens.map((s) => [s.token.ata.toBase58(), s.reason])).toEqual([
+      [frozen.toBase58(), 'frozen'],
+    ]);
+    const ix = result.migrate.type === 'ed25519' ? result.migrate.instruction : null;
+    const destAta = getAssociatedTokenAddress(mint, result.v2Vault, TOKEN_PROGRAM_ID);
+    expect(ix!.keys.slice(-4).map((k) => k.pubkey.toBase58())).toEqual(
+      [good, destAta, mint, TOKEN_PROGRAM_ID].map((k) => k.toBase58()),
+    );
+    expect(Array.from(ix!.data)).toEqual([17, 1]);
   });
 
   it('says what to do when neither a seed nor an address is given', async () => {

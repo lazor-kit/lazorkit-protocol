@@ -220,6 +220,39 @@ export interface V1VaultToken {
   amount: bigint;
   /** Which token program owns the account — the migration must pass this one. */
   tokenProgram: Address;
+  /** A frozen account cannot be transferred from or closed. */
+  frozen: boolean;
+}
+
+/** Why a vault token account cannot be migrated. */
+export type UnmovableReason = 'frozen' | 'transfer-hook' | 'excluded';
+
+/** Token-account state byte: 0 uninitialized, 1 initialized, 2 frozen. */
+const TOKEN_STATE_OFFSET = 108;
+const TOKEN_STATE_FROZEN = 2;
+/** Token-2022 TLV: account-type byte at 165, then [type u16][len u16][value]. */
+const TLV_START = 166;
+const EXT_TRANSFER_HOOK = 14;
+
+/**
+ * The transfer-hook program a Token-2022 mint names, or `null` if it has none.
+ * MigrateWallet cannot move such a token: `TransferChecked` needs the hook's
+ * extra accounts, and the migration has no way to supply them.
+ */
+export function mintTransferHook(mintData: Uint8Array): string | null {
+  let off = TLV_START;
+  while (off + 4 <= mintData.length) {
+    const type = mintData[off]! | (mintData[off + 1]! << 8);
+    const len = mintData[off + 2]! | (mintData[off + 3]! << 8);
+    const value = mintData.subarray(off + 4, off + 4 + len);
+    if (type === EXT_TRANSFER_HOOK && value.length >= 64) {
+      const program = value.subarray(32, 64);
+      return program.some((b) => b !== 0) ? addressDecoder.decode(program) : null;
+    }
+    if (type === 0 && len === 0) break; // uninitialized tail
+    off += 4 + len;
+  }
+  return null;
 }
 
 /**
@@ -246,6 +279,7 @@ export async function enumerateV1VaultTokens(
         mint: tokenAccountMint(data),
         amount: tokenAccountAmount(data),
         tokenProgram,
+        frozen: data[TOKEN_STATE_OFFSET] === TOKEN_STATE_FROZEN,
       });
     }
   }
@@ -254,4 +288,40 @@ export async function enumerateV1VaultTokens(
 
 function decodeBase64(encoded: string): Uint8Array {
   return new Uint8Array(base64Encoder.encode(encoded));
+}
+
+/**
+ * Split a vault's token accounts into those MigrateWallet can move and those it
+ * cannot, with the reason. Anything left out stays in the v1 vault when the
+ * wallet closes — permanently, once the v1 id runs the sunset binary — so the
+ * caller must show the user what is being left behind rather than hide it.
+ *
+ * Unmovable: frozen accounts, and Token-2022 mints with a transfer hook. Left
+ * in, either one would make the whole migration revert, and a stranger can
+ * plant such an account in anyone's vault for the price of its rent.
+ */
+export async function classifyV1VaultTokens(
+  rpc: V1Rpc,
+  tokens: V1VaultToken[],
+  exclude: ReadonlyArray<Address> = [],
+): Promise<{ movable: V1VaultToken[]; skipped: { token: V1VaultToken; reason: UnmovableReason }[] }> {
+  const t22Mints = [
+    ...new Set(tokens.filter((t) => t.tokenProgram === TOKEN_2022_PROGRAM_ADDRESS).map((t) => t.mint)),
+  ];
+  const hooked = new Set<string>();
+  if (t22Mints.length) {
+    const { value } = await rpc.getMultipleAccounts(t22Mints, { encoding: 'base64' }).send();
+    value.forEach((info, i) => {
+      if (info && mintTransferHook(decodeBase64(info.data[0]))) hooked.add(t22Mints[i]!);
+    });
+  }
+  const movable: V1VaultToken[] = [];
+  const skipped: { token: V1VaultToken; reason: UnmovableReason }[] = [];
+  for (const t of tokens) {
+    if (exclude.includes(t.ata)) skipped.push({ token: t, reason: 'excluded' });
+    else if (t.frozen) skipped.push({ token: t, reason: 'frozen' });
+    else if (hooked.has(t.mint)) skipped.push({ token: t, reason: 'transfer-hook' });
+    else movable.push(t);
+  }
+  return { movable, skipped };
 }
