@@ -19,17 +19,21 @@ npm install @lazorkit/sdk-legacy          # 0.3.x — protocol v1, what mainnet 
 npm install @lazorkit/sdk-legacy@next     # 1.x — protocol v2, this repo
 ```
 
-This README documents protocol v2. Mainnet still runs v1 until the upgrade
-lands, and the two are not wire-compatible.
+This README documents protocol v2. v2 and v1 are not wire-compatible, so v2
+ships at its **own program ids** and v1 keeps its addresses — the way Squads
+v3/v4, Jupiter v4/v6 and Token/Token-2022 run side by side. Nothing that uses v1
+today stops working when v2 launches.
 
-Program IDs (chosen at compile time via `--features mainnet` / `--features devnet`):
+| Cluster | v2 program id | v1 program id (retiring) | build |
+|---|---|---|---|
+| mainnet | not yet deployed <!-- V2_MAINNET_PENDING --> | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` | `--features mainnet` / `mainnet-v1` |
+| devnet | `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv` | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` | `--features devnet` / `devnet-v1` |
 
-| Cluster | Program ID |
-|---|---|
-| mainnet | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` |
-| devnet | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` |
-
-The mainnet slot is shared with the [program-v2](https://github.com/lazor-kit/program-v2) foundation build (no fees). `@lazorkit/sdk-legacy` works against either binary at the shared slot — see the [SDK README](sdk/sdk-legacy/README.md#cluster--program-ids) for details.
+A v1 id is only ever rebuilt as a **sunset binary**: it serves the three
+instructions a v1 wallet needs to leave (`MigrateWallet`, `ReclaimDeferred`,
+`CloseExpiredSession`) and refuses everything else with `RetiredDeployment`
+(4018). `migrateV1Wallet` executes against the v1 id and delivers to a v2 vault
+at the v2 id.
 
 ## Quick start
 

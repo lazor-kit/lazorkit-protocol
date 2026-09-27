@@ -17,7 +17,13 @@ const TOKEN_2022 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 const ATA = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
 const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
 const SECP256R1 = 'Secp256r1SigVerify1111111111111111111111111';
+// v2 ids. The v1 ids are listed separately: a relayer sponsoring migrations
+// has to allow them too, because MigrateWallet executes against the v1 program.
 const LAZORKIT = {
+  mainnet: 'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi', // V2_MAINNET_PENDING
+  devnet: '57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv',
+};
+const LAZORKIT_V1 = {
   mainnet: 'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi',
   devnet: '4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS',
 };
@@ -40,6 +46,14 @@ function required(cluster) {
 const optional = [
   [TOKEN_2022, 'Token-2022 mints; a wallet holding one cannot migrate without it'],
 ];
+
+// The v1 program belongs on this relayer only once it runs the sunset binary
+// (MigrateWallet executes there). Before that it is full v1, whose Execute
+// forwards every outer signer into its CPIs — sponsoring it would let any v1
+// wallet conscript this relayer's fee payer (H-3).
+function migrationPrograms(cluster) {
+  return [[LAZORKIT_V1[cluster], 'the v1 program']];
+}
 
 async function rpc(url, method, apiKey) {
   const res = await fetch(url, {
@@ -127,9 +141,17 @@ async function run(url, cluster, apiKey) {
   for (const [id, why] of optional) {
     line(programs.includes(id) ? true : 'warn', 'program', `${id.slice(0, 12)}…  ${why}`);
   }
-  const extra = programs.filter(
-    (p) => !required(cluster).some(([id]) => id === p) && !optional.some(([id]) => id === p),
-  );
+  for (const [id, why] of migrationPrograms(cluster)) {
+    line(
+      programs.includes(id) ? 'warn' : null,
+      'v1 program',
+      programs.includes(id)
+        ? `${id.slice(0, 12)}… allowed — safe only if it already runs the sunset binary; full v1 lets a wallet conscript this fee payer (H-3)`
+        : `${id.slice(0, 12)}… not allowed — add it once the sunset binary is live, for sponsored migrations`,
+    );
+  }
+  const known = [...required(cluster), ...optional, ...migrationPrograms(cluster)];
+  const extra = programs.filter((p) => !known.some(([id]) => id === p));
   if (extra.length) {
     line('warn', 'extra programs', `${extra.length} beyond what v2 needs: ${extra.join(', ')}`);
   }

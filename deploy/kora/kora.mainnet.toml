@@ -94,7 +94,13 @@ cross_cluster_check = false
 # no exemption, and instructions that only appear in simulation are checked too.
 # A missing entry is a refusal at the relayer, before anything reaches the chain.
 allowed_programs = [
-    "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",   # LazorKit
+    "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",   # LazorKit v2  <!-- V2_MAINNET_PENDING -->
+    # The v1 program (LazorjRF…) — uncomment ONLY after it runs the sunset
+    # binary. Until then it is full v1, whose Execute forwards every outer signer
+    # into its CPIs (H-3): sponsoring it from this relayer would let any v1 wallet
+    # conscript this fee payer. v1 traffic before the sunset belongs on its own
+    # relayer with its own thin-funded signer.
+    # "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",
     "Secp256r1SigVerify1111111111111111111111111",   # passkey precompile — every v2 user action carries one
     "11111111111111111111111111111111",              # System
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # SPL Token
@@ -110,6 +116,7 @@ allowed_programs = [
 # transfer.
 require_one_of_programs = [
     "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",
+    # "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",  # the v1 program — with the sunset binary only, see above
 ]
 
 # Only meaningful for token-denominated payment, which this deployment does not

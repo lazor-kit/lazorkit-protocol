@@ -1,13 +1,19 @@
 # Mainnet deploy checklist — protocol v2
 
 The mainnet program at `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` holds real
-user funds and is live on v1. This upgrade is in-place and cannot be undone
-except by another upgrade. Work top to bottom; do not skip a gate.
+user funds and is live on v1 — Seedless runs on it. **v2 does not replace it in
+place.** v2 launches at its own program id (phase A) and nobody on v1 notices;
+v1 is retired later by upgrading its id to a sunset binary that serves only the
+way out (phase B). That is how Squads v3/v4, Jupiter v4/v6 and Token/Token-2022
+shipped their breaking majors, and it turns the riskiest hour of the rollout
+into one that touches no live user. Work top to bottom; do not skip a gate.
 
-The mechanics below were rehearsed end to end on a local validator with the
-**`--features mainnet`** binaries at the real vanity id
-(`scripts/rehearse/run.sh`, see [Rehearsal](#rehearsal)). What is *not* rehearsed
-is the human process: keys, comms, and the decisions in section 2.
+The mechanics below are rehearsed end to end on a local validator with the
+live v1 binary, the sunset binary and v2 at separate ids, both owner types
+migrating across them (`scripts/rehearse/two-id-rehearsal.mjs`, see
+[Two-id rehearsal](#two-id-rehearsal)); §3 repeats that with the exact release
+artifacts. What is *not* rehearsed is the human process: keys, comms, and the
+decisions in section 1.
 
 ---
 
@@ -41,11 +47,21 @@ is the human process: keys, comms, and the decisions in section 2.
 - [x] **Custody confirmed**: the upgrade authority (`4fZM6RPR…`) and the
       ProtocolConfig admin (`24fx48GA…`) are both keys the maintainer can sign
       with. Neither is in cold storage or a multisig today. The upgrade
-      authority has a path out — the Squads vault, below — and the admin does
-      not until v2's two-step propose/accept exists on chain, which is one more
-      reason not to leave it long after the upgrade.
-- [x] **When the upgrade authority moves to the Squads vault: after the v2
-      upgrade** (decided 2026-09-23). A rollback inside the upgrade window then
+      authority has a path out — the Squads vault, below. The **v1** admin has
+      none: v1's ProtocolConfig has no propose/accept and never gets it, because
+      the v1 id never runs v2. It stays a hot key until phase B retires the fee
+      layer it controls (see C-1 under the rollout decision).
+- [x] **When the upgrade authority moves to the Squads vault** (decided
+      2026-09-23, restated for two ids on 2026-09-27). There are now **two
+      programs to hand over**, on two schedules:
+      - the **v2 id**, once phase A has settled — every new user's funds sit
+        there, so it must not stay on a single key for long;
+      - the **v1 id**, after phase B has landed. Keeping it on the key until
+        then makes the sunset deploy a plain `solana program deploy`; if it is
+        handed over earlier, phase B becomes a vault upgrade instead (buffer,
+        `set-buffer-authority` to the vault, propose/approve in the app — see
+        step 6 of the Squads section).
+      A rollback inside either window then
       needs one key rather than a quorum, and the multisig's first real duty is
       not also the riskiest hour of the year. Quorum is reachable — the
       maintainer holds four of the five member keys, against a threshold of
@@ -60,15 +76,36 @@ is the human process: keys, comms, and the decisions in section 2.
       all, and the runtime refuses the upgradeable loader via CPI for anything
       but `Upgrade` and `SetAuthority`, so any payer sends it top-level first. The `PROTOCOL_INIT_AUTHORITY` key is still needed until
       `InitializeProtocol` has run, whoever holds the upgrade authority.
-- [x] **Rollout: immediate in-place upgrade** (decided). One upgrade at the
-      vanity id. Un-migrated v1 wallets can only call `MigrateWallet` until they
-      migrate — a freeze window for normal use; funds stay safe. Two hard
-      preconditions this rollout adds:
-      - [ ] **The migration UI is live and tested** before the upgrade (built on
-            `LazorKitClient.migrateV1Wallet`; see `docs/migration-ui-flow.md`), so
-            a frozen user can migrate immediately.
-      - [ ] **Users/integrator announced** ahead of the window — a v1 wallet needs
-            one signed migration before transacting again.
+- [x] **Rollout: v2 at a new program id, v1 retired later** (decided
+      2026-09-27, replacing the earlier in-place decision). The in-place upgrade
+      would have frozen every v1 wallet on one flag day — including Seedless,
+      which went live on v1 while v2 was being prepared. Instead:
+      - **Phase A** deploys v2 fresh at its own id. No v1 wallet is touched.
+        Integrators run both SDKs side by side — 0.3.x (an npm alias) for users
+        whose wallet lives on v1, 1.x for new users — and route each user by
+        where their wallet is. Bumping the SDK outright would strand existing
+        users: 1.x has no v1 Execute, and until phase B the v1 id has no
+        `MigrateWallet` either.
+      - **Phase B**, when the v1 tail is small, upgrades the v1 id to the
+        **sunset binary** (`--features mainnet-v1`): `MigrateWallet`,
+        `ReclaimDeferred` and `CloseExpiredSession` only, everything else
+        refused with `RetiredDeployment` (4018). `MigrateWallet` delivers to any
+        destination the owner signs for, so it moves a v1 wallet straight into
+        a v2 vault at the v2 id.
+      Staying on v1 meanwhile does not expose passkey Owner wallets to a known
+      theft finding — H-1 needs an Ed25519 authority, H-2 a Spender, H-4 a
+      session — but H-3 lets any v1 transaction conscript the fee payer, which
+      is why the v2 relayer does not sponsor the v1 id until phase B.
+
+      **C-1 stays live for the whole A-to-B window, and that window has no end
+      date.** On the v1 binary an admin write of `enabled = 0` reverts every
+      CreateWallet, Execute and ExecuteDeferred — every Seedless user frozen —
+      and v1 has no way to rotate that admin. Accepted for now, with three
+      conditions: the v1 admin key `24fx48GA…` is held offline for the duration
+      and never touches a relayer or a CI secret; the `mainnet-v1` sunset
+      artifact from §2 stays built, hashed and rehearsed, so phase B is ready as
+      an emergency path rather than an improvisation; and the migration UI ships
+      with phase A, switched off, not with phase B.
 - [ ] **User / integrator comms drafted.** Migration is **user-signed** — one
       `MigrateWallet` transaction per wallet, Owner-rank key required. Dormant
       wallets that never return keep their funds in v1 vaults (reachable only via
@@ -77,85 +114,215 @@ is the human process: keys, comms, and the decisions in section 2.
 
 ## 2. Build and record
 
-- [ ] Build both binaries with `--features mainnet` from pinned commits (v2 from
-      the release commit; v1 from the last pre-`lk2:` commit for the rehearsal):
+Three artifacts, built once, hashed once, and deployed from exactly those
+files. Nothing below deploys a path that a later build could overwrite.
+
+- [ ] Build from the pinned release commit, **each into its own directory**:
       ```bash
-      ( cd program && cargo build-sbf --features mainnet )
-      shasum -a 256 target/deploy/lazorkit_program.so
+      ( cd program && cargo build-sbf --features mainnet    --tools-version v1.53 --sbf-out-dir ../target/artifacts/v2 )
+      ( cd program && cargo build-sbf --features mainnet-v1 --tools-version v1.53 --sbf-out-dir ../target/artifacts/sunset )
+      solana program dump LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi target/artifacts/v1-live.so --url <mainnet-rpc>
+      shasum -a 256 target/artifacts/v2/lazorkit_program.so target/artifacts/sunset/lazorkit_program.so target/artifacts/v1-live.so
       ```
-- [ ] Record the toolchain and both SHA-256 hashes in the deploy log. Builds are
-      only trustworthy if reproducible — a second machine must produce the same
-      hash.
+      ⚠️ **Always pass `--sbf-out-dir`.** On the deploy machine a `cargo` wrapper
+      in `~/.zshrc` points `CARGO_TARGET_DIR` at `.git/shared-target`, so a bare
+      `cargo build-sbf` writes there and leaves `target/deploy/lazorkit_program.so`
+      holding whatever was last copied in. On 2026-09-27 that file was a full-v2
+      build (150 KB) while the sunset build (45 KB) sat in the shared dir.
+      Deployed to `LazorjRF…`, it would have refused every instruction with 4017
+      — `MigrateWallet` included — until someone noticed.
+- [ ] **Sanity-check sizes before anything else.** Sunset ≈ 45 KB, full v2
+      ≈ 150 KB, the v1 dump 137904 bytes (`8ad5abf5…` on 2026-09-27). A "sunset"
+      artifact over 100 KB is the wrong file; stop.
+- [ ] Record the toolchain and all three SHA-256 hashes in the deploy log.
+      Builds are only trustworthy if reproducible — a second machine must
+      produce the same hashes.
       ⚠️ **The toolchain moved after the 2026-09-11 rehearsal.** That run used
       solana-cli 4.0.3 with platform-tools v1.53; the machine now has
-      `cargo-build-sbf` 4.1.0, which pulls platform-tools v1.54. A rebuild will
-      not reproduce the `e22f176d…` hash in the rehearsal table below, and that
-      is expected rather than alarming. Record the new hash, and rehearse again
-      with the binary you are actually going to deploy.
-- [ ] Confirm the v2 binary's compiled id is the vanity id (M-2 pins it; a wrong
-      id refuses to run).
+      `cargo-build-sbf` 4.2.2. Pin `--tools-version v1.53` as above, record what
+      you get, and rehearse (§3) with the files you are actually going to deploy.
+- [ ] **SBPF version.** These builds are SBPFv0. Mainnet deploys v0 today —
+      SIMD-0500 ("disable deployment of SBPF v0, v1 and v2 programs",
+      feature `B8JJXCy5…`) was not even proposed on mainnet or devnet on
+      2026-09-27 — but Agave 4.2's test validator activates it at genesis. If it
+      is scheduled before either phase, rebuild with `--arch v3`, re-hash, and
+      rehearse that artifact: a v0 binary will fail to deploy with *Detected
+      sbpf_version required by the executable which are not enabled*. (It keeps
+      running; only new deploys and upgrades are refused. That includes a
+      rollback to the v1 dump, which is v0.)
 
-## 3. Rehearse (again, with the release binaries)
+## 3. Rehearse (again, with the release artifacts)
 
-- [ ] Run `scripts/rehearse/run.sh` with the release `--features mainnet`
-      binaries at the vanity id (see the recorded command below). It must end
-      `REHEARSAL PASSED`.
-- [ ] Rehearse the **rollback**: keep the current v1 `.so` and its hash; confirm
-      `solana program deploy` with the v1 `.so` can restore it (an upgrade back to
-      v1 — note this does NOT un-migrate any wallet already moved).
+- [ ] Run the two-id rehearsal against the §2 artifacts on a local validator,
+      at the real ids. `--deactivate-feature` mirrors mainnet, where SIMD-0500 is
+      not active; the payer is any local keypair, and is the upgrade authority
+      only on this validator.
+      ```bash
+      solana-test-validator --reset --ledger /tmp/two-id-ledger \
+        --deactivate-feature B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g \
+        --upgradeable-program <v2-id> target/artifacts/v2/lazorkit_program.so <payer-pubkey> \
+        --upgradeable-program LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi target/artifacts/v1-live.so <payer-pubkey>
+      solana airdrop 100 <payer-pubkey> -u localhost
 
-## 4. Pre-flight, immediately before the upgrade
+      PAYER=<payer.json> RPC_URL=http://127.0.0.1:8899 WS_URL=ws://127.0.0.1:8900 \
+      V2_PROGRAM_ID=<v2-id> V1_PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+      V1_PRELOADED=1 SUNSET_SO=target/artifacts/sunset/lazorkit_program.so \
+        node scripts/rehearse/two-id-rehearsal.mjs
+      ```
+      It must end `14/14 checks passed`. At the real ids this is the whole
+      rollout with the files that will ship: the v1 wallets are made by the
+      live v1 binary; the sunset upgrade refuses CreateWallet with 4018; an
+      Ed25519 wallet leaves through the kit SDK; a passkey wallet leaves through
+      sdk-legacy with the **default pairing** (no program id passed — the path
+      every integrator will take); a relayer that swaps the system program in a
+      passkey migration is refused; the keeper closes an expired v1 session.
+      A binary at the wrong id fails the first check with 4017.
+- [ ] Rehearse the **rollbacks**. Phase A's is closing or ignoring a program no
+      one uses yet. Phase B's is an upgrade of `LazorjRF…` back to
+      `v1-live.so` — rehearse it on the same validator, and note it does not
+      un-migrate any wallet already moved.
 
-- [ ] `solana program show LazorjRF…` — record current Data Length + Last Deployed
-      Slot (the v1 baseline).
-- [ ] Confirm the upgrade-authority keypair is loaded and is the on-chain upgrade
-      authority (`solana program show` reports it).
-- [ ] Announce the maintenance window to users/integrator.
-- [ ] **Publish the v2 SDKs under the `next` dist-tag before the window**, so
-      integrators can build and test against staging first:
-      `npm publish --tag next` in `sdk/sdk-legacy` (1.0.0) and `sdk/sdk-kit`
-      (1.0.0-rc.1). Leave `latest` on 0.3.2 — it is what mainnet speaks until
-      the upgrade lands.
+## 4. Phase A — v2 at its own program id
 
-## 5. The upgrade
+Nothing here touches a v1 account. The same flow has been rehearsed end to
+end — see [Two-id rehearsal](#two-id-rehearsal).
 
-- [ ] ```bash
-      solana program deploy target/deploy/lazorkit_program.so \
-        --program-id LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
-        --upgrade-authority <mainnet-upgrade-authority.json> \
+- [ ] The v2 program keypair is the ground `Lazor…` vanity, kept at
+      `~/.config/solana/lazorkit-v2-program/` (mode 600, never in a repo). It
+      only signs the first deploy; after that the upgrade authority rules.
+- [ ] Re-hash `target/artifacts/v2/lazorkit_program.so` and compare with the
+      deploy log. Any difference: stop. (`mainnet` is pinned to the v2 id; at
+      any other id it refuses everything with 4017.)
+- [ ] Deploy fresh (a new program, not an upgrade):
+      ```bash
+      solana program deploy target/artifacts/v2/lazorkit_program.so \
+        --program-id ~/.config/solana/lazorkit-v2-program/<v2-id>.json \
+        --upgrade-authority <upgrade-authority.json> \
         --url <mainnet-rpc>
       ```
-      The deploy extends the program data first. v1 is 137904 bytes and v2
-      149296: an 11392-byte growth, above the loader's 10240-byte minimum, so
-      the automatic extend succeeds. A later build that grows by less fails with
-      `ExtendProgram requires a minimum of 10240 additional bytes` — run
-      `solana program extend <id> 10240` first (hit on staging, 2026-09-11).
-- [ ] `solana program show LazorjRF…` — confirm Data Length changed to the v2
-      size and the slot advanced. Record the upgrade signature.
-- [ ] C-1 is now dead. Verify: a `CreateWallet`/`Execute` no longer reverts when
-      fees are unconfigured.
-- [ ] Until `InitializeProtocol` runs, an SDK older than `@lazorkit/sdk-legacy`
-      1.0.0 omits the fee suffix and fails every `CreateWallet`/`Execute` with
-      4008. Ship the integrator 1.x (`npm i @lazorkit/sdk-legacy@next`) before
-      the window, or run `InitializeProtocol` (plus a treasury shard if fees
-      will be on) inside it.
+- [ ] `InitializeProtocol` and a treasury shard on the v2 id, in the same
+      window — its ProtocolConfig is a fresh `lk2:` PDA, unrelated to v1's.
+- [ ] Relayer: **a new service at a new URL**, running
+      `deploy/kora/kora.mainnet.toml` (v2 id only), with its own thin-funded
+      signer. Pass `scripts/kora-check.cjs <new-url> --cluster mainnet` with no
+      FAIL. **Do not edit the relayer v1 apps use today.** Its config is not in
+      any repo and Seedless sponsors through it; narrowing its allowlist to the
+      v2 id refuses every v1 transaction from that moment — the flag day phase A
+      exists to avoid. Before anything else, record its current `getConfig` and
+      which apps call it, in the deploy log.
+- [ ] Publish the SDKs whose `PROGRAM_ID_MAINNET` is the v2 id, then move
+      `latest` to them. Pinned `^0.3` users — Seedless — are not moved by that.
+      Any wrapper that switches to sdk-legacy 1.x (`@lazorkit/wallet`) ships it
+      as a **new major**, so `^2` installs do not silently move apps to v2 ids.
+- [ ] Integrators run the two SDKs side by side, and route by where the user's
+      wallet lives:
+      ```bash
+      npm i @lazorkit/sdk-legacy@^1.2 sdk-v1@npm:@lazorkit/sdk-legacy@0.3.2
+      ```
+      A returning user with a v1 wallet (`findV1WalletsByOwner` finds it) keeps
+      using `sdk-v1`; a new user gets a v2 wallet. **Do not bump outright**: 1.x
+      cannot Execute on v1, and the v1 id has no `MigrateWallet` until phase B,
+      so a bumped app loses every existing user until then.
+
+## 5. Phase B — retire v1
+
+Only once the v1 tail is small and the integrators that own it agree. This is
+still a breaking change for whoever is left on v1, so announce it.
+
+- [ ] Recover what only the v1 binary can reach, or will need later: the
+      sponsor's expired DeferredExec rent (`scripts/rehearse/reclaim-deferred.cjs`
+      — it also works after phase B, since `ReclaimDeferred` now accepts v1
+      accounts) and the treasury shards' fees (`WithdrawTreasury`, admin).
+- [ ] Re-hash `target/artifacts/sunset/lazorkit_program.so` (≈ 45 KB) and
+      compare with the deploy log and the artifact §3 rehearsed. Any
+      difference: stop.
+- [ ] Upgrade the v1 id to it. While the v1 id is still on the single key:
+      ```bash
+      solana program deploy target/artifacts/sunset/lazorkit_program.so \
+        --program-id LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+        --upgrade-authority <v1-upgrade-authority.json> \
+        --url <mainnet-rpc>
+      ```
+      If the v1 id has already gone to the Squads vault, this command fails with
+      *Incorrect upgrade authority*. Instead: `solana program write-buffer` the
+      artifact, `set-buffer-authority` to the vault, and propose the upgrade in
+      the app (step 6 of the Squads section). The sunset binary is smaller than
+      v1, so no extend is needed.
+- [ ] Verify it refuses: a `CreateWallet` or `Execute` against the v1 id fails
+      with 4018.
+- [ ] Only now add the v1 id to the relayer's `allowed_programs` and
+      `require_one_of_programs` (commented in `deploy/kora/kora.mainnet.toml`),
+      so migrations can be sponsored. Before this it is full v1, and H-3 lets
+      any v1 transaction conscript the fee payer. (Reclaiming the sponsor's
+      expired v1 authorizations through the relayer is safe from here: the
+      sunset binary pays `ReclaimDeferred`'s rent only to the stored payer.)
+- [ ] Turn on the migration banner in each integrator app (`migrateV1Wallet`
+      with the default pairing: executes at the v1 id, delivers to the v2 id).
+- [ ] Run the session keeper after the upgrade
+      (`scripts/rehearse/close-expired-sessions.cjs`); the rent goes to whoever
+      runs it first.
 
 ## 6. Post-deploy
 
-- [ ] Move the npm dist-tag now that mainnet speaks v2:
-      `npm dist-tag add @lazorkit/sdk-legacy@1.0.0 latest`. Until this runs, a
-      plain `npm install` still hands integrators the v1 line.
-- [ ] Publish the migration flow (SDK `createMigrateWalletIx`) / UI.
-- [ ] Migrate the high-value active wallets first — value is concentrated, so a
-      handful covers most of it.
-- [ ] Monitor: no unexpected reverts; migrations land; balances move to v2
-      vaults.
-- [ ] Later: reclaim rent from fully-migrated wallets; decide a policy for
-      long-dormant v1 vaults.
+- [ ] Monitor both ids: no unexpected reverts on v2; migrations landing on v1.
+- [ ] Dormant v1 wallets keep their funds indefinitely, reachable only through
+      `MigrateWallet`. That is inherent to non-custodial and is how it should be
+      communicated.
 
 ---
 
-## Rehearsal
+## Two-id rehearsal
+
+The rollout this checklist describes, run end to end by
+`scripts/rehearse/two-id-rehearsal.mjs`.
+
+**2026-09-27, local validator (Agave 4.2.2, SIMD-0500 deactivated to match
+mainnet), at the devnet ids**, with the review fixes in:
+
+| artifact | id | size | SHA-256 |
+|---|---|---|---|
+| v1 — the live mainnet program, `solana program dump` | `4h3XoNRe…` (devnet v1) | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
+| sunset — `--features devnet-v1`, platform-tools v1.53 | `4h3XoNRe…` | 45760 | `6a816c4af90d7f7a237de8e66aeb117a583dea592ae305589c7adf5de6a9401f` |
+| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 150656 | `8c3952a5a2464a19ced58854342a2868e7094863522ad5f423babf851135a01a` |
+
+```
+ok    the sunset binary refuses CreateWallet with 4018 RetiredDeployment
+ok    the v1 wallet is found at the v1 id from the owner key alone
+ok    the migrate instruction goes to the v1 program
+ok    the v1 wallet and authority are closed
+ok    the SOL is in the v2 vault   0.030000 SOL
+ok    the token is in the v2 vault   777000
+ok    the destination wallet belongs to the v2 program
+passkey migration (default pairing)
+ok    the passkey wallet is found from its credential alone
+ok    the passkey migrate goes to the v1 program
+ok    a relayer swapping the system program is refused
+ok    the passkey wallet and authority are closed, the vault empty
+ok    its SOL is in its own v2 vault   0.020000 SOL
+ok    its token is in its own v2 vault   555000
+ok    the v1 session is closed
+14/14 checks passed
+```
+
+Devnet's v2 (`57bTNW…`) was upgraded to this same v2 artifact afterwards
+(`24qPWFCY…`, slot 504832702), so devnet matches the SDKs in this release.
+
+The devnet ids pair by default (`legacyProgramIdFor(57bTNW…) = 4h3XoNRe…`), so
+the passkey leg is exactly what an integrator's app will do. On devnet itself,
+the same script ran earlier the same day against the rehearsal slot
+(`3AN3Wn…`) and proved the 4018 refusal on chain before a flaky public RPC cut
+it short; the local run replaces it as the record. §3 repeats it with the
+mainnet artifacts at the mainnet ids.
+
+Two things the first local attempts surfaced, both now handled in the script
+and in §2/§3: a program upgraded in slot N only runs from N+1, and Agave 4.2's
+validator refuses to *deploy* SBPFv0 unless SIMD-0500 is deactivated.
+
+## Rehearsal (in-place, historical)
+
+Superseded by the [two-id rehearsal](#two-id-rehearsal): production no longer
+upgrades the v1 id to v2. Kept because the v1 dump it identified is still the
+v1 artifact and the phase B rollback.
 
 Proven on a local validator with the `--features mainnet` binaries at the real
 vanity id — v1 deployed upgradeable, upgraded in place to v2, then `MigrateWallet`
@@ -781,8 +948,9 @@ a leak costs is what decides where each one lives.
 
 | key | what it can do | today | target |
 |---|---|---|---|
-| upgrade authority `4fZM6RPR…` | replace the program binary — every vault | plaintext file on one laptop | the Squads vault, after v2 |
-| ProtocolConfig admin `24fx48GA…` | withdraw treasury, rewrite fee config | plaintext file on the same laptop | the same Squads vault |
+| upgrade authority `4fZM6RPR…` — **both** the v1 id `LazorjRF…` and the v2 id | replace either program binary — every vault on it | plaintext file on one laptop | the Squads vault: v2 id after phase A, v1 id after phase B |
+| ProtocolConfig admin `24fx48GA…` (v1) | withdraw treasury, rewrite fee config, freeze v1 (C-1) | plaintext file on the same laptop | offline until phase B retires it; v1 cannot rotate it |
+| ProtocolConfig admin (v2) | the same, on v2 | set at v2's `InitializeProtocol` | the same Squads vault, via propose/accept |
 | Kora sponsor `7Pkkhm8…` | spend the paymaster's balance | the relayer's environment | unchanged — but split per cluster and kept thin |
 | devnet throwaway `9AmBA2C7…` | nothing that matters | committed in the repo | unchanged |
 
@@ -799,8 +967,11 @@ fails instead of orphaning the protocol.
 one-shot: once `InitializeProtocol` has run, that key can do nothing else. It
 does not need long-term custody, only the deploy window.
 
-- [ ] After v2: move the upgrade authority to the vault (below), then rotate the
-      ProtocolConfig admin to the same vault with propose/accept.
+- [ ] After phase A settles: move the **v2 id's** upgrade authority to the
+      vault (below), then rotate the v2 ProtocolConfig admin to the same vault
+      with propose/accept.
+- [ ] After phase B lands: move the **v1 id's** upgrade authority to the vault
+      too. From then on no single key can replace either binary.
 - [ ] Until then, the two keys are hot files. At minimum `chmod 600` the keypair
       at `~/.config/solana/`, and delete the commented-out copy of the deployer
       secret from `lazorkit-admin/.env` — being commented out does not protect
@@ -842,8 +1013,9 @@ chain, and re-checkable at any time with `preflight` below:
 ```bash
 DEPS=$(mktemp -d) && npm i --prefix "$DEPS" @sqds/multisig@2.1.4 @solana/web3.js@1.98.4
 
+# once per program: the v2 id after phase A, LazorjRF… after phase B
 RPC_URL=https://api.mainnet-beta.solana.com \
-PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+PROGRAM_ID=<v2-id | LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi> \
 MULTISIG=Gb65EbMEZocGgotuTzJEfogfT3GPr8t8fARWYfMCHaw9 \
 NODE_PATH="$DEPS/node_modules" node scripts/rehearse/squads-upgrade.cjs preflight
 ```
@@ -857,8 +1029,10 @@ and appears nowhere in that member list, so the handover is a one-way door for
 that key: afterwards nothing it can sign touches the program. Whoever holds
 three of the five member keys holds the program.
 
-This happens **after** the v2 upgrade has landed and settled (section 1). Order
-of operations — step 4 ends the old key's control of the program for good:
+There are two programs to hand over (section 1): the **v2 id once phase A has
+settled**, and **`LazorjRF…` once phase B has landed**. Run the steps below for
+each — steps 1–3 only once. Step 4 ends the old key's control of that program
+for good:
 
 - [x] **1. Reach three signers.** The maintainer holds four of the five member
       keys, against a threshold of three, so quorum does not depend on anyone
@@ -879,7 +1053,7 @@ of operations — step 4 ends the old key's control of the program for good:
       transaction index is 0: these five keys have never approved anything
       together, and the first time they do should not be the hour a live
       program depends on it. In the app: **Programs → Add Program** with
-      `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` is itself a Squad
+      the v2 id is itself a Squad
       transaction, so it doubles as the rehearsal — propose it, collect three
       approvals, execute. Then `preflight` again: `proven` flips to PASS.
 
@@ -902,7 +1076,7 @@ of operations — step 4 ends the old key's control of the program for good:
         program. Use this one.
       - The CLI fallback, if SAT is unavailable:
         ```bash
-        solana program set-upgrade-authority LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+        solana program set-upgrade-authority <v2-id | LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi> \
           --new-upgrade-authority E11nkm79w4rEnB2ZNmTKhWKF4BH5z34LUkTw2L4LBjKa \
           --skip-new-upgrade-authority-signer-check \
           --upgrade-authority <current-authority-keypair> \
@@ -949,16 +1123,21 @@ of operations — step 4 ends the old key's control of the program for good:
 
 `InitializeProtocol` is unaffected: it is authorized by the compiled-in
 `PROTOCOL_INIT_AUTHORITY`, not by the upgrade authority, so the order of the
-handover against the v2 deploy window is free.
+handover against the v2 deploy window is free. (The sunset binary refuses
+`InitializeProtocol` outright, so the v1 id's handover has no such question.)
 
 ## Deploy log template
 
 ```
 date/operator:
-release commit (v2):            <sha>
-toolchain (rustc / solana):     <versions>
-v1 .so sha256:                  <hash>
-v2 .so sha256:                  <hash>
+release commit:                 <sha>
+toolchain (rustc / solana):     <versions>   platform-tools: v1.53
+v2 id:                          <vanity id>
+v2 .so sha256 / size:           <hash> / <bytes>      (target/artifacts/v2)
+sunset .so sha256 / size:       <hash> / <bytes>      (target/artifacts/sunset, ≈ 45 KB)
+v1 live dump sha256:            <hash>                (target/artifacts/v1-live.so)
+§3 two-id rehearsal:            14/14 at <date>
+old relayer getConfig + users:  <recorded before phase A>
 survey run (private) at slot:   <slot>   funded vaults: <n>   total: <sol>
 upgrade authority:              4fZM6RPR…   (confirmed held: y/n)
 upgrade authority after:        <key or vault>   multisig threshold: <m of n>

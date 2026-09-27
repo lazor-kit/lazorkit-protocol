@@ -41,6 +41,7 @@ const OUT = process.env.OUT_DIR;
     tokens: [{
       sourceAta: new PublicKey(m.sourceAta),
       destAta: new PublicKey(m.destAta),
+      mint: new PublicKey(m.mint),
       tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
     }],
     programId,

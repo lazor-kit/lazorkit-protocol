@@ -8,9 +8,13 @@ same `findV1WalletsByOwner` / `readV1WalletState` / `enumerateV1VaultTokens` /
 helpers. All of it is client-side and user-authorized — no operator ever
 moves a user's funds.
 
-After the v2 upgrade lands, a v1 wallet's normal operations revert (v2 rejects
-the old account discriminators). The user's funds are safe in the v1 vault, but
-they must migrate once before transacting again. This flow makes that one action.
+v2 runs at its own program id; v1 keeps running until its id is upgraded to
+the sunset binary (phase B of the
+[deploy checklist](mainnet-deploy-checklist.md)). From then on a v1 wallet can
+do exactly one useful thing — migrate. The user's funds are safe in the v1
+vault, but they must migrate once before transacting again. This flow makes
+that one action. Ship it with phase A, switched off, and turn it on with
+phase B: until then the v1 id has no `MigrateWallet`.
 
 A working reference implementation of everything below is in
 [`examples/react-migration/`](../examples/react-migration/) — a `useV1Migration`
@@ -54,15 +58,24 @@ v1 user). Otherwise it carries the owner's auth type, rank, and the vault's SOL.
 ## 2. Show what will move
 
 ```ts
-import { enumerateV1VaultTokens } from '@lazorkit/sdk-legacy';
+import { classifyV1VaultTokens, enumerateV1VaultTokens } from '@lazorkit/sdk-legacy';
 
-const tokens = await enumerateV1VaultTokens(connection, v1.vault);
-// Render: state.vaultLamports (SOL) + each token's mint + amount.
+const { movable, skipped } = await classifyV1VaultTokens(
+  connection,
+  await enumerateV1VaultTokens(connection, v1.vault),
+);
+// Render: state.vaultLamports (SOL), each movable token's mint + amount,
+// and — separately, plainly — what cannot come along.
 ```
 
 Enumerating here is not cosmetic — every vault-owned token account the migration
-omits is stranded when the wallet closes, so the migration must move all of them.
-`enumerateV1VaultTokens` returns both SPL Token and Token-2022 accounts.
+omits is stranded when the wallet closes, and after the sunset nothing else can
+reach it. Two kinds can never move: **frozen** accounts, and Token-2022 mints
+with a **transfer hook**. `skipped` lists them with the reason
+(`'frozen' | 'transfer-hook' | 'excluded'`); `migrateV1Wallet` leaves them out
+the same way and returns them as `plan.skippedTokens`. Anyone can create a
+token account for anyone's vault, so expect spam here too — let the user drop
+it with `excludeTokenAccounts` rather than pay to carry it across.
 
 ## 3. Build and send
 
@@ -74,7 +87,17 @@ const plan = await client.migrateV1Wallet({ payer, owner, v1Wallet: owned[0].wal
 
 // `plan.destinationUserSeed` is set when this call had to mint a v2 wallet.
 // Persist it if you want to keep deriving that wallet without a scan.
+// `plan.skippedTokens` is what stays behind — show it before the user signs.
 ```
+
+Where the funds land is decided here, and it is the one thing the program cannot
+check for you. `migrateV1Wallet` only reuses a v2 wallet that this key holds
+**alone** — one authority, Owner rank, no live session, no pending deferred
+execution — and otherwise creates a fresh one. Anyone can make a wallet that
+lists the user's passkey while keeping their own way into its vault, so "a
+wallet with my key on it" is not the bar. If you pick the destination yourself
+(`userSeed`, or a hand-built instruction), check it with
+`client.vetMigrationDestination(wallet, credential, authType)` first.
 
 `plan.setupInstructions` creates the v2 wallet and the destination ATAs — send
 these first (payer signs):
@@ -144,7 +167,9 @@ Two consequences for the app:
   rent. In a sponsored/relayer model the app's payer covers this.
 - **Transaction size:** the setup step scales with the token count; for a vault
   with many token accounts, split `setupInstructions` across transactions. The
-  migrate itself is one instruction regardless.
+  migrate itself is one instruction, but each token adds four accounts: past
+  about ten tokens on the Ed25519 path, or five on the passkey path, send it as
+  a v0 transaction with an address lookup table, or exclude the dust.
 - **Prioritise the active, high-value wallets** — value is concentrated, so
   reaching a handful of users covers most of it. Dormant wallets migrate whenever
   their owner returns; their funds wait safely in v1 until then.
