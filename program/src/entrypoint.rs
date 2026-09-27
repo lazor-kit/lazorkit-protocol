@@ -41,6 +41,13 @@ pub fn process_instruction(
 
     let (discriminator, data) = instruction_data.split_first().unwrap();
 
+    // A retired v1 deployment serves only the way out. Checked before anything
+    // else runs — the fee layer included — so a sunset binary has no code path
+    // that creates, executes or charges.
+    if assertions::SUNSET && !is_sunset_instruction(*discriminator) {
+        return Err(ProtocolError::RetiredDeployment.into());
+    }
+
     // For fee-eligible instructions, try to detect and collect protocol fees
     let processor_accounts = match discriminator {
         0 | 4 | 7 => try_collect_fee(program_id, *discriminator, accounts)?,
@@ -71,6 +78,22 @@ pub fn process_instruction(
         18 => session::close_expired::process(program_id, processor_accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
+}
+
+/// The instructions a sunset binary still serves, and why each survives:
+///
+/// - `8`  ReclaimDeferred — the original payer recovers the rent of an expired
+///   authorization. Gated on that payer's signature, as it always was.
+/// - `17` MigrateWallet — the owner moves everything to a wallet they approve,
+///   which in practice is their v2 vault at the v2 program id.
+/// - `18` CloseExpiredSession — anyone closes a session past its expiry and
+///   keeps the rent. The session authorises nothing by then.
+///
+/// Every one of them only ever takes value *out* of a v1 account, to a
+/// destination its rightful owner signed for or to nobody's loss.
+#[inline]
+pub(crate) const fn is_sunset_instruction(discriminator: u8) -> bool {
+    matches!(discriminator, 8 | 17 | 18)
 }
 
 /// Strict fee collection for fee-eligible instructions on the commercial
@@ -331,4 +354,17 @@ fn try_collect_fee<'a>(
     }
 
     Ok(&accounts[..n - 4])
+}
+
+#[cfg(test)]
+mod sunset_tests {
+    use super::is_sunset_instruction;
+
+    #[test]
+    fn sunset_serves_exactly_the_three_ways_out() {
+        let allowed: Vec<u8> = (0..=u8::MAX)
+            .filter(|d| is_sunset_instruction(*d))
+            .collect();
+        assert_eq!(allowed, vec![8, 17, 18]);
+    }
 }

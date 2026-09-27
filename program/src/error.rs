@@ -122,6 +122,12 @@ pub enum ProtocolError {
     /// touch real accounts, but it can mint look-alike ones at addresses a
     /// client that trusts the wrong id would resolve.
     WrongProgramAddress = 4017,
+    /// This is a retired v1 deployment running its sunset binary, and the
+    /// instruction is not one of the three a v1 wallet needs to leave. v2 lives
+    /// at its own program id; point the client there. The only instructions
+    /// still served here are `ReclaimDeferred` (8), `MigrateWallet` (17) and
+    /// `CloseExpiredSession` (18).
+    RetiredDeployment = 4018,
 }
 
 impl From<ProtocolError> for ProgramError {

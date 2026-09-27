@@ -218,6 +218,7 @@ fn migrates_vault_sol_and_an_spl_token() {
     let mut accounts = migrate_prefix(&context, &v1, destination, refund_dest);
     accounts.push(AccountMeta::new(source_ata, false));
     accounts.push(AccountMeta::new(dest_ata, false));
+    accounts.push(AccountMeta::new_readonly(mint, false));
     accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
 
     let ix = Instruction {
@@ -603,6 +604,7 @@ fn passkey_migrates_vault_sol_and_token() {
     let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
     accounts.push(AccountMeta::new(source_ata, false));
     accounts.push(AccountMeta::new(dest_ata, false));
+    accounts.push(AccountMeta::new_readonly(mint, false));
     accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
 
     let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 1);
@@ -702,6 +704,7 @@ fn passkey_migrate_relayer_cannot_drop_tokens() {
     let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
     accounts.push(AccountMeta::new(source_ata, false));
     accounts.push(AccountMeta::new(dest_ata, false));
+    accounts.push(AccountMeta::new_readonly(mint, false));
     accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
     let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 1);
 
@@ -771,6 +774,7 @@ fn passkey_migrate_relayer_cannot_swap_token_set() {
     let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
     accounts.push(AccountMeta::new(source_a, false));
     accounts.push(AccountMeta::new(dest_a, false));
+    accounts.push(AccountMeta::new_readonly(mint_a, false));
     accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
     let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 1);
 
@@ -780,6 +784,7 @@ fn passkey_migrate_relayer_cannot_swap_token_set() {
     let mut tampered = ixs[1].clone();
     tampered.accounts[9] = AccountMeta::new(source_b, false);
     tampered.accounts[10] = AccountMeta::new(dest_b, false);
+    tampered.accounts[11] = AccountMeta::new_readonly(mint_b, false);
 
     let payer = context.payer.insecure_clone();
     assert_custom_error(
@@ -985,12 +990,14 @@ fn migrates_mixed_spl_and_token_2022_in_one_call() {
     set_token(&mut context, dst_b, mint_b, destination, 0, token_2022);
 
     let mut accounts = migrate_prefix(&context, &v1, destination, refund_dest);
-    // triple A (classic), triple B (token-2022)
+    // tuple A (classic), tuple B (token-2022): source, dest, mint, program
     accounts.push(AccountMeta::new(src_a, false));
     accounts.push(AccountMeta::new(dst_a, false));
+    accounts.push(AccountMeta::new_readonly(mint_a, false));
     accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
     accounts.push(AccountMeta::new(src_b, false));
     accounts.push(AccountMeta::new(dst_b, false));
+    accounts.push(AccountMeta::new_readonly(mint_b, false));
     accounts.push(AccountMeta::new_readonly(token_2022, false));
 
     let ix = solana_sdk::instruction::Instruction {
@@ -1014,4 +1021,147 @@ fn migrates_mixed_spl_and_token_2022_in_one_call() {
         "SOL swept"
     );
     assert_eq!(lamports_of(&context, &v1.authority), 0, "authority closed");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Found in review, 2026-09-27
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A passkey assertion does not cover account 6, and the SOL sweep CPIs into
+/// it with the vault as signer. Before the pin, a relayer could put a program
+/// there that accepts the call and does nothing — ComputeBudget — and the
+/// wallet would close with its SOL still in the vault, where nothing could ever
+/// sign for it again. On a sunset binary that is permanent.
+#[test]
+fn passkey_migrate_relayer_cannot_swap_the_system_program() {
+    let mut context = setup_test();
+    let pk = fabricate_v1_passkey_wallet(&mut context, 2_000_000_000);
+    let destination = Pubkey::new_unique();
+    let refund_dest = Pubkey::new_unique();
+
+    let accounts = passkey_prefix(&context, &pk, destination, refund_dest);
+    let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 0);
+
+    let precompile = ixs[0].clone();
+    let mut tampered = ixs[1].clone();
+    let compute_budget = Pubkey::try_from("ComputeBudget111111111111111111111111111111").unwrap();
+    tampered.accounts[6] = AccountMeta::new_readonly(compute_budget, false);
+
+    let payer = context.payer.insecure_clone();
+    let result = try_send(&mut context.svm, &payer, &[precompile, tampered], &[&payer]);
+    let err = result.expect_err("a substituted system program must be refused");
+    assert!(
+        format!("{:?}", err.err).contains("IncorrectProgramId"),
+        "expected IncorrectProgramId, got {:?}",
+        err.err
+    );
+    assert_eq!(
+        lamports_of(&context, &pk.vault),
+        2_000_000_000,
+        "SOL untouched"
+    );
+    assert!(
+        lamports_of(&context, &pk.wallet) > 0,
+        "the v1 wallet is still open"
+    );
+}
+
+/// Token-2022 refuses a plain `Transfer` from an account whose mint carries a
+/// transfer fee. MigrateWallet used to send exactly that, so such a token could
+/// never leave a v1 vault — and because the SDK migrates every vault-owned
+/// token account, a stranger could plant one worth a single unit and block the
+/// whole migration. It now sends `TransferChecked` with the mint.
+#[test]
+fn migrates_a_token_2022_transfer_fee_token() {
+    use solana_sdk::account::Account;
+    let token_2022 = Pubkey::try_from("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
+
+    // TLV: AccountType byte at 165, then [type u16][len u16][value].
+    const MINT: u8 = 1;
+    const ACCOUNT: u8 = 2;
+    const TRANSFER_FEE_CONFIG: u16 = 1;
+    const TRANSFER_FEE_AMOUNT: u16 = 2;
+
+    let with_tlv = |mut base: Vec<u8>, account_type: u8, ext: u16, value: &[u8]| {
+        base.resize(165, 0);
+        base.push(account_type);
+        base.extend_from_slice(&ext.to_le_bytes());
+        base.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        base.extend_from_slice(value);
+        base
+    };
+    let put = |context: &mut TestContext, key: Pubkey, data: Vec<u8>| {
+        context
+            .svm
+            .set_account(
+                key,
+                Account {
+                    lamports: 10_000_000,
+                    data,
+                    owner: token_2022,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+    };
+
+    let mut context = setup_test();
+    let v1 = fabricate_v1_ed25519_wallet(&mut context, 1_000_000_000);
+    let destination = Pubkey::new_unique();
+    let refund_dest = Pubkey::new_unique();
+
+    // Mint: 6 decimals, 1% fee capped far above anything moved here.
+    let mint = Pubkey::new_unique();
+    let mut base_mint = vec![0u8; 82];
+    base_mint[36..44].copy_from_slice(&1_000_000_000u64.to_le_bytes()); // supply
+    base_mint[44] = 6; // decimals
+    base_mint[45] = 1; // initialized
+    let mut fee = vec![0u8; 108];
+    for epoch_fee in [72usize, 90] {
+        fee[epoch_fee + 8..epoch_fee + 16].copy_from_slice(&u64::MAX.to_le_bytes()); // maximum_fee
+        fee[epoch_fee + 16..epoch_fee + 18].copy_from_slice(&100u16.to_le_bytes());
+        // 1%
+    }
+    put(
+        &mut context,
+        mint,
+        with_tlv(base_mint, MINT, TRANSFER_FEE_CONFIG, &fee),
+    );
+
+    let token = |mint: Pubkey, owner: Pubkey, amount: u64| {
+        let mut d = vec![0u8; 165];
+        d[0..32].copy_from_slice(mint.as_ref());
+        d[32..64].copy_from_slice(owner.as_ref());
+        d[64..72].copy_from_slice(&amount.to_le_bytes());
+        d[108] = 1; // initialized
+        with_tlv(d, ACCOUNT, TRANSFER_FEE_AMOUNT, &0u64.to_le_bytes())
+    };
+    let source = Pubkey::new_unique();
+    let dest = Pubkey::new_unique();
+    put(&mut context, source, token(mint, v1.vault, 1_000_000));
+    put(&mut context, dest, token(mint, destination, 0));
+
+    let mut accounts = migrate_prefix(&context, &v1, destination, refund_dest);
+    accounts.push(AccountMeta::new(source, false));
+    accounts.push(AccountMeta::new(dest, false));
+    accounts.push(AccountMeta::new_readonly(mint, false));
+    accounts.push(AccountMeta::new_readonly(token_2022, false));
+    let ix = Instruction {
+        program_id: context.program_id,
+        accounts,
+        data: vec![DISC_MIGRATE, 1],
+    };
+    let payer = context.payer.insecure_clone();
+    try_send(&mut context.svm, &payer, &[ix], &[&payer, &v1.owner])
+        .expect("a transfer-fee token migrates with TransferChecked");
+
+    // 1% withheld on the destination, the rest arrives; the source is closed.
+    assert_eq!(token_amount(&context, dest), 990_000);
+    assert_eq!(
+        lamports_of(&context, &source),
+        0,
+        "the emptied source is closed"
+    );
+    assert_eq!(lamports_of(&context, &v1.vault), 0, "SOL swept");
 }

@@ -38,6 +38,7 @@ fn close_ix(program_id: Pubkey, session: Pubkey, caller: Pubkey, refund: Pubkey)
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn send(
     context: &mut TestContext,
     ix: Instruction,
