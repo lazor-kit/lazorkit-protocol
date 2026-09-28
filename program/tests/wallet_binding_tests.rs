@@ -7,17 +7,31 @@
 //!
 //! The Secp256r1 challenge used to be
 //! `SHA256(disc || auth_payload[..14] || signed_payload || payer || counter || program_id)`,
-//! and for several instructions none of that tells A from B. CreateSession's
-//! and AddAuthority's signed payloads carry only the new key material; the
-//! payer is a relayer's paymaster, the same for every wallet it serves. So an
-//! assertion the owner made for A verified on B whenever B's counter matched,
-//! for as long as the slot was fresh — a session key or an Admin approved for
-//! A could be installed on B by whoever saw the transaction. (Execute was
-//! already bound, through the accounts hash in its signed payload.)
+//! and for several instructions none of that tells A from B. The signed
+//! payloads of CreateSession, AddAuthority and TransferOwnership carry only key
+//! material and the payer, and the payer is a relayer's paymaster, the same for
+//! every wallet it serves. So an assertion the owner made for A verified on B
+//! whenever B's counter matched, for as long as the slot was fresh — a session
+//! key or an Admin approved for A could be installed on B by whoever saw the
+//! transaction. (Execute and Authorize were bound only when an inner
+//! instruction names the vault or another wallet-derived account, through the
+//! accounts hash. RevokeSession, RemoveAuthority and MigrateWallet sign an
+//! account the program then checks belongs to the wallet.)
 //!
 //! The challenge now folds in the authenticating authority's own `wallet`
 //! field, after the payer. Every caller has checked that field against the
 //! wallet account, so it is the wallet the instruction acts on.
+//!
+//! Both replays below used to land, and these tests cannot show it. `sign`
+//! hashes the new layout, so against a pre-binding build they fail on the
+//! legitimate send to A, before any replay; only
+//! `a_challenge_without_the_wallet_is_refused` fails there for the reason it
+//! names. What was checked instead, against the devnet build of 59befed (the
+//! commit before the binding, `f0eea8dd…` with platform-tools v1.53): a
+//! CreateSession assertion over the old layout, made for A, created the session
+//! on A and then, resubmitted unchanged with B's accounts, on B; an old-layout
+//! AddAuthority assertion for A added the Admin to A and then to B. Against
+//! this build every one of those sends fails with 3005.
 //!
 //! Run:  cargo test --features devnet -p lazorkit-program --test wallet_binding_tests
 

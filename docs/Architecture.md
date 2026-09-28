@@ -117,7 +117,7 @@ SHA256(
 )
 ```
 
-7 elements, one `sol_sha256` syscall. `wallet` is the authority header's own `wallet` field (bytes 16..48), not an extra account: every caller has already checked it against the wallet the instruction acts on (for `MigrateWallet`, the v1 wallet). Without it, the signed payloads of `CreateSession`, `AddAuthority`, `TransferOwnership`, `Authorize`, `RevokeSession` and `RemoveAuthority` name no wallet, and the payer is typically a relayer shared across wallets. Only the 14-byte prefix of `auth_payload` (`[slot(8)][counter(4)][sysvarIxIdx(1)][reserved(1)]`) is hashed — the rest contains `clientDataJSON`, which is produced by the authenticator **after** signing the challenge, so it can't be in the hash input.
+7 elements, one `sol_sha256` syscall. `wallet` is the authority header's own `wallet` field (bytes 16..48), not an extra account: every caller has already checked it against the wallet the instruction acts on (for `MigrateWallet`, the v1 wallet). Without it, the signed payloads of `CreateSession`, `AddAuthority` and `TransferOwnership` name no wallet — nor do `Execute`'s and `Authorize`'s when no inner instruction touches an account derived from the wallet — and the payer is typically a relayer shared across wallets. `RevokeSession`, `RemoveAuthority` and `MigrateWallet` sign an account the program then checks belongs to the wallet, so they were bound already; now they are bound directly too. Only the 14-byte prefix of `auth_payload` (`[slot(8)][counter(4)][sysvarIxIdx(1)][reserved(1)]`) is hashed — the rest contains `clientDataJSON`, which is produced by the authenticator **after** signing the challenge, so it can't be in the hash input.
 
 ### WebAuthn flow
 

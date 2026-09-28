@@ -11,23 +11,30 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 **Program**
 - **A passkey assertion no longer verifies on another wallet.** The Secp256r1
   challenge was `SHA256(discriminator ‖ auth_payload[..14] ‖ signed_payload ‖
-  payer ‖ counter_le4 ‖ program_id)`. For `CreateSession`, `AddAuthority`,
-  `TransferOwnership`, `Authorize`, `RevokeSession` and `RemoveAuthority`
-  nothing in it named the wallet, so an assertion made for wallet A verified on
+  payer ‖ counter_le4 ‖ program_id)`. For `CreateSession`, `AddAuthority` and
+  `TransferOwnership` nothing in it named the wallet — nor for `Execute` and
+  `Authorize` when no inner instruction touches an account derived from the
+  wallet, such as its vault — so an assertion made for wallet A verified on
   any wallet B whose authority held the same passkey (credential hash and key)
   at the same counter, within the slot window, through the same fee payer — and
-  a relayer's fee payer is shared by every wallet it serves. It is now
+  a relayer's fee payer is shared by every wallet it serves. `RevokeSession`,
+  `RemoveAuthority` and `MigrateWallet` were already bound: each signs an
+  account the program then checks belongs to the wallet. It is now
   `SHA256(discriminator ‖ auth_payload[..14] ‖ signed_payload ‖ payer ‖ wallet ‖
   counter_le4 ‖ program_id)`, where `wallet` is the authenticating authority's
   own header field (bytes 16..48): no new account, no instruction layout change.
   It applies to every Secp256r1 authentication, `MigrateWallet` in the sunset
   build included (a v1 authority's header carries its wallet at the same
-  offset). `Execute` was already bound through its accounts hash. This closes
-  what "A signature count can be forged by replay" below left open.
-  `program/tests/wallet_binding_tests.rs` replays a CreateSession and an
-  AddAuthority from one wallet onto another with the same passkey and counter
-  (both now 3005; both landed before), and the sunset suite migrates a v1
-  passkey wallet with the new challenge and refuses the old one.
+  offset), so the instructions that were bound through their accounts are now
+  bound directly as well. This closes what "A signature count can be forged by
+  replay" below left open. `program/tests/wallet_binding_tests.rs` replays a
+  CreateSession and an AddAuthority from one wallet onto another with the same
+  passkey and counter (both now 3005), and the sunset suite migrates a v1
+  passkey wallet with the new challenge and refuses the old one. Both replays
+  landed before: an old-layout assertion for A, resubmitted with B's accounts,
+  created the session and the Admin on B against the devnet build of 59befed,
+  the commit before the binding — recorded in the test's module doc, since the
+  committed tests sign the new layout and fail earlier on that build.
 - **Breaking for every passkey client:** one that builds the old challenge
   fails with `InvalidMessageHash` (3005). Ship SDK and program together; on
   devnet, where v2 is already deployed, redeploying it breaks passkey signing

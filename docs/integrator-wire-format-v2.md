@@ -122,11 +122,12 @@ challenge = SHA256(
 instruction acts on, and for `MigrateWallet` the v1 wallet. It is not an extra
 account: the program reads it from the authority's own header. It is what ties
 an assertion to one wallet. Several signed payloads below name no wallet
-(CreateSession and AddAuthority carry only new key material), the payer is
-usually a relayer shared by every wallet it serves, and one passkey can be an
-authority on several wallets; without `wallet`, an assertion for one of them
-would verify on another whose authority for the same passkey is at the same
-counter.
+(CreateSession, AddAuthority and TransferOwnership carry key material and the
+payer; Execute and Authorize name one only through an inner account derived
+from it, such as the vault), the payer is usually a relayer shared by every
+wallet it serves, and one passkey can be an authority on several wallets;
+without `wallet`, an assertion for one of them would verify on another whose
+authority for the same passkey is at the same counter.
 
 Put `base64url(challenge)` (no padding) into `clientDataJSON.challenge`, with
 `"type":"webauthn.get"`. Submit a real Secp256r1 precompile instruction
@@ -136,7 +137,10 @@ verifies your assertion against it.
 `counter` is a program-controlled odometer on the authority account — read
 `authority.counter` and submit `counter + 1`; it replaces the WebAuthn hardware
 counter. `sysvar_ix_index` is where the Instructions sysvar sits in your account
-list. `flags` is 0.
+list. `flags` is reserved and hashed as-is: any value verifies as long as the
+challenge and the `auth_payload` you submit carry the same byte. Both SDKs, and
+the fixed vector they and the program's `wallet_binding_tests` pin, write
+`0x80`.
 
 **`signed_payload` per instruction** (the identity the signature commits to):
 
