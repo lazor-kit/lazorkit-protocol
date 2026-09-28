@@ -27,6 +27,7 @@ import {
   TOKEN_2022_PROGRAM_ID,
   getAssociatedTokenAddress,
   mintBlocker,
+  buildSecp256r1Challenge,
 } from '../../sdk/sdk-legacy/src';
 import { contextual, STUB_CONTEXT_SLOT, type AccountsRead } from './contextReads';
 
@@ -386,11 +387,12 @@ describe('migrateV1Wallet by address', () => {
     return data;
   }
 
-  // The program's passkey challenge does not name the wallet for
-  // CreateSession, AddAuthority, TransferOwnership or Authorize: a signature
-  // this passkey made on one authority can be submitted again on another at
-  // the same counter, through the same fee payer. With two signed on, either
-  // wallet's count may be the copy — including one copied from an Admin seat.
+  // Until the program named the wallet in the passkey challenge, a signature
+  // this passkey made on one authority for CreateSession, AddAuthority,
+  // TransferOwnership or Authorize could be submitted again on another at the
+  // same counter, through the same fee payer, and counts from then are still
+  // on chain. With two signed on, either wallet's count may be the copy —
+  // including one copied from an Admin seat.
   for (const [label, role] of [
     ['as an Owner of another wallet', 0],
     ['at Admin rank on another wallet', 1],
@@ -863,6 +865,59 @@ describe('migrateV1Wallet by address', () => {
         v1Wallet,
       }),
     ).rejects.toThrow('relying party');
+  });
+
+  // The v1 authority signs, so the wallet the challenge names is the one in
+  // its header — the v1 wallet — and the program verifying it is the v1 id.
+  // Naming the v2 destination instead would fail on chain with 3005.
+  it("binds a passkey migration's challenge to the v1 wallet, not the v2 destination", async () => {
+    const connection = contextual({
+      ...stubConnection(),
+      getAccountInfo: async (key: PublicKey) =>
+        key.equals(v1Authority) ? { data: v1AuthorityData(v1Wallet, 0, 1), lamports: 1 } : null,
+    });
+    const payer = Keypair.generate().publicKey;
+    const plan = await new LazorKitClient(connection, PROGRAM_ID).migrateV1Wallet({
+      payer,
+      owner: {
+        type: 'secp256r1',
+        credentialIdHash: CREDENTIAL,
+        compressedPubkey: new Uint8Array(33).fill(0x7c),
+        rpId: 'portal.lazor.sh',
+      },
+      v1Wallet,
+    });
+    if (plan.migrate.type !== 'secp256r1') throw new Error('secp256r1 expected');
+    expect(plan.tokens).toEqual([]);
+
+    // The 14-byte prefix the program hashes rides in the migrate instruction,
+    // after [discriminator, token count].
+    const instructions = plan.migrate.finalize({
+      signature: new Uint8Array(64),
+      authenticatorData: new Uint8Array(37),
+      clientDataJsonHash: new Uint8Array(32),
+      clientDataJson: new TextEncoder().encode('{}'),
+    });
+    const prefix = new Uint8Array(instructions[instructions.length - 1].data.subarray(2, 16));
+    const challengeFor = (wallet: PublicKey) =>
+      buildSecp256r1Challenge({
+        discriminator: new Uint8Array([17]),
+        authPayload: prefix,
+        // destination || v1_wallet || num_tokens || refund_dest (no tokens here).
+        signedPayload: new Uint8Array(
+          Buffer.concat([plan.v2Vault.toBuffer(), v1Wallet.toBuffer(), Buffer.from([0]), payer.toBuffer()]),
+        ),
+        slot: 0n, // unused: the slot is inside the prefix
+        payer,
+        wallet,
+        counter: Buffer.from(prefix).readUInt32LE(8),
+        programId: V1_PROGRAM_ID,
+      });
+
+    expect(Buffer.from(plan.migrate.challenge).toString('hex')).toBe(
+      Buffer.from(challengeFor(v1Wallet)).toString('hex'),
+    );
+    expect(Buffer.from(plan.migrate.challenge).equals(Buffer.from(challengeFor(plan.destinationWallet)))).toBe(false);
   });
 
   it('refuses to run from a client built at the retired v1 id', async () => {

@@ -194,8 +194,15 @@ export function buildAuthPayloadPrefix(params: {
  *
  * Hash = SHA256(
  *   discriminator || auth_payload_prefix || signed_payload ||
- *   payer || counter_le(4) || program_id
+ *   payer || wallet || counter_le(4) || program_id
  * )
+ *
+ * `wallet` is the wallet the authenticating authority belongs to — the `wallet`
+ * field of its account header: the wallet PDA for every v2 instruction, the v1
+ * wallet for `MigrateWallet`. Without it a signature for `CreateSession`,
+ * `AddAuthority`, `TransferOwnership`, `Authorize`, `RevokeSession` or
+ * `RemoveAuthority` names no wallet, and could be submitted again on another
+ * wallet holding the same passkey at the same counter, through the same payer.
  *
  * Must exactly match the on-chain `sol_sha256` call in
  * program/src/auth/secp256r1/mod.rs.
@@ -205,6 +212,7 @@ export function buildSecp256r1Challenge(params: {
   authPayload: Uint8Array;
   signedPayload: Uint8Array;
   payer: Address;
+  wallet: Address;
   counter: number;
   programId: Address;
 }): Uint8Array {
@@ -216,6 +224,7 @@ export function buildSecp256r1Challenge(params: {
   hash.update(params.authPayload);
   hash.update(params.signedPayload);
   hash.update(addressEncoder.encode(params.payer) as Uint8Array);
+  hash.update(addressEncoder.encode(params.wallet) as Uint8Array);
   hash.update(counterBuf);
   hash.update(addressEncoder.encode(params.programId) as Uint8Array);
   return hash.digest();

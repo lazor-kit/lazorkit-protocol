@@ -6,6 +6,49 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — the passkey challenge names the wallet
+
+**Program**
+- **A passkey assertion no longer verifies on another wallet.** The Secp256r1
+  challenge was `SHA256(discriminator ‖ auth_payload[..14] ‖ signed_payload ‖
+  payer ‖ counter_le4 ‖ program_id)`. For `CreateSession`, `AddAuthority`,
+  `TransferOwnership`, `Authorize`, `RevokeSession` and `RemoveAuthority`
+  nothing in it named the wallet, so an assertion made for wallet A verified on
+  any wallet B whose authority held the same passkey (credential hash and key)
+  at the same counter, within the slot window, through the same fee payer — and
+  a relayer's fee payer is shared by every wallet it serves. It is now
+  `SHA256(discriminator ‖ auth_payload[..14] ‖ signed_payload ‖ payer ‖ wallet ‖
+  counter_le4 ‖ program_id)`, where `wallet` is the authenticating authority's
+  own header field (bytes 16..48): no new account, no instruction layout change.
+  It applies to every Secp256r1 authentication, `MigrateWallet` in the sunset
+  build included (a v1 authority's header carries its wallet at the same
+  offset). `Execute` was already bound through its accounts hash. This closes
+  what "A signature count can be forged by replay" below left open.
+  `program/tests/wallet_binding_tests.rs` replays a CreateSession and an
+  AddAuthority from one wallet onto another with the same passkey and counter
+  (both now 3005; both landed before), and the sunset suite migrates a v1
+  passkey wallet with the new challenge and refuses the old one.
+- **Breaking for every passkey client:** one that builds the old challenge
+  fails with `InvalidMessageHash` (3005). Ship SDK and program together; on
+  devnet, where v2 is already deployed, redeploying it breaks passkey signing
+  in any client not yet updated.
+
+**SDKs** (both)
+- `buildSecp256r1Challenge`, `prepareSecp256r1` and `signWithSecp256r1` take a
+  required `wallet` (`PublicKey` / `Address`), hashed after `payer`: the wallet
+  PDA for every v2 instruction, the **v1** wallet for `MigrateWallet` (the v1
+  authority signs, not the v2 destination). Every `prepare*` method, the
+  one-shot methods and `migrateV1Wallet` pass it; hand-built flows must add it.
+- A fixed vector pins the byte order (payer, then wallet, then counter) in both
+  packages' tests and in the program's `wallet_binding_tests`, whose signing
+  helper every passkey test in `program/tests` uses; unit tests pin the wallet
+  `prepare*` and `migrateV1Wallet` hash.
+- The ownership rule is unchanged: `pickOwnWallet` and `migrateV1Wallet` still
+  treat two signed-for wallets as ambiguous, because counts raised before this
+  change — on every v1 authority, and on devnet v2 — may hold replayed copies.
+  The validator tests that demonstrated the replay now assert it is refused
+  (3005) and that the one wallet signed for is adopted.
+
 ### Changed — v2 ships at its own program id; v1 is retired, not overwritten
 
 Protocol v2 no longer replaces v1 in place. An in-place upgrade would have frozen

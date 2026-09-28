@@ -38,7 +38,7 @@ LazorKit V2 underwent an audit by **Accretion** plus internal pre-mainnet review
 - Odometer counter replay protection (monotonic u32 per authority; checked increment never wraps; works with synced passkeys).
 - Clock-based slot freshness (150-slot window via `Clock::get()`).
 - CPI `stack_height` anti-reentrancy check on every authenticated path.
-- Challenge hash binds signature to payer, accounts, counter, and program ID.
+- Challenge hash binds signature to payer, the signing authority's wallet, accounts, counter, and program ID.
 - Authority creation rejects all-zero Ed25519 public keys and all-zero Secp256r1 credential/public-key material.
 - Account ownership + discriminator checks on every PDA read.
 - Fee-eligible instructions require canonical protocol fee suffix accounts and canonical per-payer `FeeRecord` accounting.

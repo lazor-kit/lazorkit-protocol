@@ -141,6 +141,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 1,
         payer: ctx.payer.publicKey,
+        wallet: walletPda,
         programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
@@ -274,6 +275,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 2,
         payer: ctx.payer.publicKey,
+        wallet: walletPda,
         programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
@@ -506,6 +508,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 1,
         payer: ctx.payer.publicKey,
+        wallet: walletPda,
         programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
@@ -641,6 +644,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 2,
         payer: ctx.payer.publicKey,
+        wallet: walletPda,
         programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
@@ -758,6 +762,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 3,
         payer: ctx.payer.publicKey,
+        wallet: walletPda,
         programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });
@@ -869,6 +874,7 @@ describe('Deferred Execution', () => {
         slot,
         counter: 4,
         payer: ctx.payer.publicKey,
+        wallet: walletPda,
         programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });

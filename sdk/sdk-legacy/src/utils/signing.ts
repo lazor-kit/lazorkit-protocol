@@ -58,6 +58,8 @@ export function prepareSecp256r1(params: {
   slot: bigint;
   counter: number;
   payer: PublicKey;
+  /** The wallet the signing authority belongs to: the wallet PDA, or the v1 wallet for MigrateWallet. */
+  wallet: PublicKey;
   programId: PublicKey;
   publicKeyBytes: Uint8Array;
 }): PreparedSecp256r1 {
@@ -73,6 +75,7 @@ export function prepareSecp256r1(params: {
     signedPayload: params.signedPayload,
     slot: params.slot,
     payer: params.payer,
+    wallet: params.wallet,
     counter: params.counter,
     programId: params.programId,
   });
@@ -140,6 +143,8 @@ export async function signWithSecp256r1(params: {
   slot: bigint;
   counter: number;
   payer: PublicKey;
+  /** The wallet the signing authority belongs to: the wallet PDA, or the v1 wallet for MigrateWallet. */
+  wallet: PublicKey;
   programId: PublicKey;
 }): Promise<{
   authPayload: Uint8Array;
@@ -152,6 +157,7 @@ export async function signWithSecp256r1(params: {
     slot: params.slot,
     counter: params.counter,
     payer: params.payer,
+    wallet: params.wallet,
     programId: params.programId,
     publicKeyBytes: params.signer.publicKeyBytes,
   });

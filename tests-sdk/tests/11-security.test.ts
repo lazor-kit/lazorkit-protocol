@@ -487,6 +487,7 @@ describe('Security', () => {
         slot,
         counter,
         payer: ctx.payer.publicKey,
+        wallet: result.walletPda,
         programId: PROGRAM_ID_DEVNET,
         publicKeyBytes: ownerKey.publicKeyBytes,
       });

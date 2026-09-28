@@ -128,12 +128,13 @@ its wallet. Being listed on a wallet is not owning it — `CreateWallet`,
   is a passkey that has **signed for it before** (`signatureCount > 0`, the
   replay counter on its authority, which only a signature by the key it
   stores advances) and on **no other authority** of the program, at any rank,
-  **and** the wallet passes `vetMigrationDestination`. The program's passkey
-  challenge does not name the wallet for `CreateSession`, `AddAuthority`,
-  `TransferOwnership` or `Authorize`, so a signature the passkey made on one
-  wallet can be replayed onto a wallet planted for it, through the same fee
-  payer, raising its counter too; with two signed on, either may be the copy,
-  and a fresh wallet is created instead. An Ed25519 owner's wallets are never
+  **and** the wallet passes `vetMigrationDestination`. Until the program named
+  the wallet in the passkey challenge, a signature the passkey made on one
+  wallet for `CreateSession`, `AddAuthority`, `TransferOwnership` or
+  `Authorize` could be replayed onto a wallet planted for it, through the same
+  fee payer, raising its counter too, and those counts are still on chain;
+  with two signed on, either may be the copy, and a fresh wallet is created
+  instead. An Ed25519 owner's wallets are never
   reused this way — Ed25519 signing records nothing on the authority — so name
   one with `destinationUserSeed`.
 - **Otherwise** the destination is the wallet at `userSeed`,

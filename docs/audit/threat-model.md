@@ -25,7 +25,9 @@ sign for me."
   into the accounts hash (M-4); the fee payer is never forwarded as a signer into
   an inner CPI (H-3); MigrateWallet's signature binds the destination, the wallet,
   and the token count so a relayer cannot redirect, replay cross-wallet, or drop
-  tokens.
+  tokens; and every passkey challenge names the signing authority's own wallet,
+  so an assertion made for one wallet does not verify on another where the same
+  passkey sits at the same counter behind the same fee payer.
 
 - **Rank vs policy.** `role` says what an authority may *manage*; its policy says
   what it may *spend*. These are independent. The historical bug (H-2) was that

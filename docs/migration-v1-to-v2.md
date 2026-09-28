@@ -90,13 +90,14 @@ for a mint nobody named: it no longer lists as the vault's, and nothing on
 chain leads back to it. The canonical accounts of wSOL, USDC, USDT, devnet
 USDC and every mint in `watchMints` are checked; for the rest, only a wallet
 the passkey has already signed for — one its user chose — is reused unasked.
-Even that count can be forged by replay: the program's passkey challenge does
-not name the wallet for `CreateSession`, `AddAuthority`, `TransferOwnership`
-or `Authorize`, so the signature from a user's first such transaction on one
-wallet can be submitted again, within about 150 slots and through the same fee
-payer, on a wallet planted for their passkey. So a wallet is reused only when
-it is the one authority the passkey has signed on; with two, either may be the
-copy, and a fresh wallet is created.
+A count raised before the program named the wallet in the passkey challenge
+may be forged by replay: until then the challenge did not name the wallet for
+`CreateSession`, `AddAuthority`, `TransferOwnership` or `Authorize`, so the
+signature from a user's first such transaction on one wallet could be submitted
+again, within about 150 slots and through the same fee payer, on a wallet
+planted for their passkey. So a wallet is reused only when it is the one
+authority the passkey has signed on; with two, either may be the copy, and a
+fresh wallet is created.
 
 The v1 `user_seed` is public (it is in the v1 `CreateWallet` instruction data),
 so a `userSeed` wallet can be squatted, and so can any seed once it shows in a
@@ -185,8 +186,10 @@ The kit SDK (`@lazorkit/sdk`) has the same method with the same behaviour.
 For a hand-built instruction, `createMigrateWalletIx` takes the v1 accounts, the
 destination, and one **`{ sourceAta, destAta, mint, tokenProgram }`** per token
 account; sign the payload above with `DISC_MIGRATE_WALLET` through
-`prepareSecp256r1` / `finalizeSecp256r1` against the **v1** program id, and put
-the precompile instruction immediately before the migrate. **Only an Owner-rank
+`prepareSecp256r1` / `finalizeSecp256r1` against the **v1** program id, with
+`wallet` set to the **v1** wallet (the challenge names the wallet in the signing
+authority's header — the v1 one, not the v2 destination), and put the
+precompile instruction immediately before the migrate. **Only an Owner-rank
 authority may migrate.**
 
 ## What was rejected, and why

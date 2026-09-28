@@ -99,7 +99,7 @@ Three things worth committing to memory before reading further:
 - **Secp256r1 odometer counter (primary)** — program-controlled u32 per authority. Client submits `stored + 1`. The WebAuthn hardware counter is intentionally ignored because synced passkeys (iCloud, Google) return unreliable values. Counter is committed only after successful signature verification, and checked arithmetic rejects the terminal `u32::MAX -> 0` wrap case with `ArithmeticOverflow`.
 - **Clock-based slot freshness (secondary)** — slot from `auth_payload` must be within 150 slots of `Clock::get()`. No SlotHashes sysvar needed.
 - **Anti-CPI check** — `get_stack_height() > 1` rejects authentication via CPI.
-- **Signature binding** — challenge hash includes discriminator, payer, counter, and program_id. The accounts_hash binds the set of inner accounts, preventing recipient-reordering attacks.
+- **Signature binding** — challenge hash includes discriminator, payer, the authority's wallet, counter, and program_id. The wallet stops an assertion made for one wallet verifying on another where the same passkey sits at the same counter. The accounts_hash binds the set of inner accounts, preventing recipient-reordering attacks.
 - **Ed25519** — standard Solana runtime signer check. No counter (Ed25519 signatures can't replay because they sign over the tx recent blockhash).
 - **Sessions** — absolute slot-based expiry, max ~30 days.
 
@@ -111,12 +111,13 @@ SHA256(
   || auth_payload_prefix[14]
   || signed_payload
   || payer
+  || wallet
   || counter_le(4)
   || program_id
 )
 ```
 
-6 elements, one `sol_sha256` syscall. Only the 14-byte prefix of `auth_payload` (`[slot(8)][counter(4)][sysvarIxIdx(1)][reserved(1)]`) is hashed — the rest contains `clientDataJSON`, which is produced by the authenticator **after** signing the challenge, so it can't be in the hash input.
+7 elements, one `sol_sha256` syscall. `wallet` is the authority header's own `wallet` field (bytes 16..48), not an extra account: every caller has already checked it against the wallet the instruction acts on (for `MigrateWallet`, the v1 wallet). Without it, the signed payloads of `CreateSession`, `AddAuthority`, `TransferOwnership`, `Authorize`, `RevokeSession` and `RemoveAuthority` name no wallet, and the payer is typically a relayer shared across wallets. Only the 14-byte prefix of `auth_payload` (`[slot(8)][counter(4)][sysvarIxIdx(1)][reserved(1)]`) is hashed — the rest contains `clientDataJSON`, which is produced by the authenticator **after** signing the challenge, so it can't be in the hash input.
 
 ### WebAuthn flow
 

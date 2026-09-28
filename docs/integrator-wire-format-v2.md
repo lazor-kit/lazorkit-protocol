@@ -112,10 +112,21 @@ challenge = SHA256(
   ‖ auth_payload[..14]      // slot(8 LE) ‖ counter(4 LE) ‖ sysvar_ix_index(1) ‖ flags(1)
   ‖ signed_payload          // per-instruction, see below
   ‖ payer(32)               // accounts[0]
+  ‖ wallet(32)              // the signing authority's wallet (its header, bytes 16..48)
   ‖ counter(4 LE)           // the authority odometer value being consumed (stored+1)
   ‖ program_id(32)
 )
 ```
+
+`wallet` is the wallet the authority account belongs to — the wallet PDA the
+instruction acts on, and for `MigrateWallet` the v1 wallet. It is not an extra
+account: the program reads it from the authority's own header. It is what ties
+an assertion to one wallet. Several signed payloads below name no wallet
+(CreateSession and AddAuthority carry only new key material), the payer is
+usually a relayer shared by every wallet it serves, and one passkey can be an
+authority on several wallets; without `wallet`, an assertion for one of them
+would verify on another whose authority for the same passkey is at the same
+counter.
 
 Put `base64url(challenge)` (no padding) into `clientDataJSON.challenge`, with
 `"type":"webauthn.get"`. Submit a real Secp256r1 precompile instruction
@@ -134,6 +145,7 @@ list. `flags` is 0.
 | 4 Execute | `compact_instruction_bytes ‖ accounts_hash` |
 | 6 Authorize | `instructions_hash ‖ accounts_hash ‖ expiry_offset(2)` |
 | 1 AddAuthority | `new_type(1) ‖ new_role(1) ‖ key_material ‖ policy ‖ payer(32)` |
+| 2 RemoveAuthority | `target_authority(32) ‖ refund_dest(32)` |
 | 3 TransferOwnership | `new_key_material ‖ payer(32) ‖ refund_dest(32)` |
 | 5 CreateSession | `session_key(32) ‖ expires_at(8) ‖ actions ‖ payer(32)` |
 | 9 RevokeSession | `session_pubkey(32) ‖ refund_dest(32)` |
@@ -164,16 +176,19 @@ CreateSession / Execute / RevokeSession / MigrateWallet.
 
 ## 7. Migrating an existing v1 wallet
 
-`MigrateWallet` (disc 17) runs at the same program id, so it can sign for the v1
-vault's old-seed PDAs. It sweeps the vault's SOL and every token account to a
-`destination` the wallet's own key approves, and closes the v1 wallet + authority
-(rent to `refund_dest`). It is **Owner-rank only** and takes no fee suffix.
+`MigrateWallet` (disc 17) runs at the v1 program id (the sunset binary), so it
+can sign for the v1 vault's old-seed PDAs. It sweeps the vault's SOL and every
+token account to a `destination` the wallet's own key approves, and closes the v1
+wallet + authority (rent to `refund_dest`). It is **Owner-rank only** and takes
+no fee suffix.
 
 Account order: `payer, v1_wallet, v1_authority, v1_vault, destination,
 refund_dest, system_program, instructions_sysvar, auth_signer, then (source_ata,
-dest_ata, token_program) triples`. Note the passkey `signed_payload` (§5) binds
-the destination, the wallet, the token count **and each source ATA** — so a
-relayer cannot redirect the sweep or swap the token set. Enumerate **all** of the
+dest_ata, mint, token_program) quadruples`. Note the passkey `signed_payload`
+(§5) binds the destination, the wallet, the token count **and each source ATA**
+— so a relayer cannot redirect the sweep or swap the token set. The challenge
+around it is built as in §5 with `wallet` = the v1 wallet (the v1 authority's
+header) and `program_id` = the v1 id. Enumerate **all** of the
 vault's token accounts (SPL Token and Token-2022); any you omit is stranded when
 the wallet closes.
 

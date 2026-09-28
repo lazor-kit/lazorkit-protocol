@@ -722,7 +722,8 @@ export interface MigrateTokenPair {
  *
  * The passkey's `authPayload` must be signed over the migration intent — build
  * it with the usual `prepareSecp256r1`/`finalizeSecp256r1` flow using
- * `DISC_MIGRATE_WALLET` and a `signedPayload` of
+ * `DISC_MIGRATE_WALLET`, `wallet: v1Wallet`, the v1 program id, and a
+ * `signedPayload` of
  * `concat(destination, v1Wallet, [tokens.length], refundDestination, ...sourceAtas)`,
  * and place the returned precompile instruction immediately before this one.
  * Binding wallet, token count, refund destination and each source account keeps

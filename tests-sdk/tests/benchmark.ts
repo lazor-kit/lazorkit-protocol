@@ -321,6 +321,7 @@ async function benchExecuteSecp256r1(connection: Connection, payer: Keypair): Pr
     slot,
     counter: 1,
     payer: payer.publicKey,
+    wallet: walletPda,
     programId: PROGRAM_ID_DEVNET,
     publicKeyBytes: key.publicKeyBytes,
   });
@@ -567,6 +568,7 @@ async function benchDeferredExecution(
     slot,
     counter: 1,
     payer: payer.publicKey,
+    wallet: walletPda,
     programId: PROGRAM_ID_DEVNET,
     publicKeyBytes: key.publicKeyBytes,
   });
@@ -703,6 +705,7 @@ async function benchDeferredMultiInstruction(
     slot,
     counter: 1,
     payer: payer.publicKey,
+    wallet: walletPda,
     programId: PROGRAM_ID_DEVNET,
     publicKeyBytes: key.publicKeyBytes,
   });

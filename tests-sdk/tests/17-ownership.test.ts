@@ -7,8 +7,9 @@
  * if a fresh assertion verifies against the key stored on it, and it is adopted
  * without asking only if nothing untrusted can spend from it and it is the one
  * wallet the passkey has signed for (a wallet handed to it can hide what its
- * earlier holder did to the vault, and the passkey challenge does not name the
- * wallet, so a signature replays from one wallet onto another).
+ * earlier holder did to the vault, and a count raised before the passkey
+ * challenge named the wallet may be a signature replayed from another wallet).
+ * Against the validator: that replay is now refused.
  *
  * The first half runs without a validator (pure functions and a stubbed
  * Connection); the second half runs against the one at RPC_URL.
@@ -51,7 +52,7 @@ import {
   type PasskeyWalletCandidate,
   type WalletFacts,
 } from '../../sdk/sdk-legacy/src';
-import { setupTest, sendTx, getSlot, type TestContext } from './common';
+import { setupTest, sendTx, sendTxExpectError, getSlot, type TestContext } from './common';
 import { contextual } from './contextReads';
 import {
   generateMockSecp256r1Key,
@@ -294,10 +295,11 @@ describe('pickOwnWallet', () => {
     expect(pick.needsConfirmation).toEqual([planted, mineUnused]);
   });
 
-  // The program's passkey challenge does not name the wallet for
-  // CreateSession, AddAuthority, TransferOwnership or Authorize: the
-  // passkey's signature on its own wallet can be submitted again on a planted
-  // one, and that wallet's counter rises too.
+  // Until the program named the wallet in the passkey challenge, the
+  // passkey's signature for CreateSession, AddAuthority, TransferOwnership or
+  // Authorize on its own wallet could be submitted again on a planted one,
+  // raising that wallet's counter too. Counts from then (v1, devnet v2) are
+  // still on chain.
   it('adopts nothing when two wallets have been signed for — either count may be a replayed copy', () => {
     const mine = facts({ signatureCount: 3, lamports: 1_000_000 });
     const copied = facts({ signatureCount: 1, lamports: 1_000_001 });
@@ -2143,13 +2145,13 @@ describe('passkey wallet ownership (validator)', () => {
     expect((await ctx.connection.getTokenAccountBalance(theirs)).value.amount).toBe('1000');
   });
 
-  // The program's passkey challenge binds the payer, the counter and the
-  // instruction's own arguments, but not the wallet, for CreateSession (and
-  // AddAuthority, TransferOwnership, Authorize). So the signature from the
-  // victim's first transaction on their own wallet also works on a wallet
-  // planted for their passkey — through the same fee payer, which a relayer
-  // lends to anyone — and raises its counter too.
-  it("a planted wallet's signature count can be raised by replaying the victim's own first signature, so two signed-for wallets are never adopted", async () => {
+  // CreateSession's signed payload names only the session key, and the payer
+  // is a relayer that signs for anyone. Before the program folded the
+  // authority's wallet into the passkey challenge, the signature from the
+  // victim's first transaction on their own wallet also verified on a wallet
+  // planted for their passkey, at the same counter, and raised its count too —
+  // so two wallets signed for could not be told apart. Now it is refused.
+  it("the victim's own first signature does not replay onto a planted wallet, so the one wallet signed for is adopted", async () => {
     const victim = await generateMockSecp256r1Key(RP_ID);
     const real = await createPasskeyWallet(victim);
     await sendTx(ctx, [
@@ -2187,7 +2189,11 @@ describe('passkey wallet ownership (validator)', () => {
           keys: ix.keys.map((k) => ({ ...k, pubkey: swap.get(k.pubkey.toBase58()) ?? k.pubkey })),
         }),
     );
-    await sendTx(ctx, replayed);
+    // Same counter (1 on both authorities), same payer, fresh slot: only the
+    // wallet differs, and the challenge the program recomputes names it.
+    await sendTxExpectError(ctx, replayed, [], 3005); // InvalidMessageHash
+    expect(await client.readCounter(baitAuthority)).toBe(0);
+    expect(await ctx.connection.getAccountInfo(baitSession)).toBeNull();
     // A lamport more than the victim's own vault, to rank first by balance.
     await sendTx(ctx, [
       SystemProgram.transfer({
@@ -2197,22 +2203,18 @@ describe('passkey wallet ownership (validator)', () => {
       }),
     ]);
 
-    // With the app's session key trusted, both wallets are clean and both
-    // signed for once: the counts cannot tell the user's wallet from the copy.
+    // With the app's session key trusted, the user's wallet is the one signed
+    // for; the richer planted one never was, and does not outrank it.
     const own = await client.findOwnPasskeyWallet({
       credentialIdHash: victim.credentialIdHash,
       rpId: RP_ID,
       proof: await proofFrom(victim),
       trustedKeys: [appSessionKey],
     });
-    expect(own.adopt).toBeNull();
-    expect(own.needsConfirmation.map((f) => f.walletPda.toBase58())).toEqual(
-      [bait.walletPda, real.walletPda].map((w) => w.toBase58()),
-    );
-    for (const f of own.needsConfirmation) {
-      expect(f).toMatchObject({ controlledAlone: true, signatureCount: 1, otherAuthorities: [], tokenGrants: [] });
-      expect(f.liveSessions.map((s) => s.sessionKey.toBase58())).toEqual([appSessionKey.toBase58()]);
-    }
+    expect(own.adopt?.walletPda.equals(real.walletPda)).toBe(true);
+    expect(own.adopt).toMatchObject({ controlledAlone: true, signatureCount: 1, otherAuthorities: [], tokenGrants: [] });
+    expect(own.adopt!.liveSessions.map((s) => s.sessionKey.toBase58())).toEqual([appSessionKey.toBase58()]);
+    expect(own.needsConfirmation).toEqual([]);
   });
 
   it('a wallet address holding only lamports is no wallet yet: vetting says so, and CreateWallet still takes it', async () => {
