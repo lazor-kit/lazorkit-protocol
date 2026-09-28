@@ -11,6 +11,7 @@ import {
   generateKeyPairSigner,
   type Address,
   type KeyPairSigner,
+  type Signature,
 } from '@solana/kit';
 import { LazorKit, ed25519, decodeAuthorityAccount } from '@lazorkit/sdk';
 import {
@@ -199,6 +200,46 @@ describe('Execute', () => {
       const payerDelta = (await getBalance(ctx, ctx.payer.address)) - payerBefore;
       expect(payerDelta > 0n).toBe(true);
       expect(payerDelta <= 1_000_000n).toBe(true);
+    });
+
+    // The sponsor that pays the fee is not the Execute payer, and it is the one
+    // repaid. It sits among the inner accounts, declared writable by the
+    // transfer, and the runtime reports it a writable signer: prepareExecute
+    // has to be told who pays the fee (3005 otherwise).
+    it('executes an inner transfer to a fee payer that is not the Execute payer', async () => {
+      const feePayer = await generateKeyPairSigner();
+      await airdrop(ctx, feePayer.address, LAMPORTS_PER_SOL);
+      const prepared = await client.prepareExecute({
+        payer: ctx.payer.address,
+        walletPda,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
+        instructions: [systemTransferFromPda(vaultPda, feePayer.address, 1_000_000n)],
+        feePayer: feePayer.address,
+      });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeExecute(prepared, response);
+
+      const vaultBefore = await getBalance(ctx, vaultPda);
+      const feePayerBefore = await getBalance(ctx, feePayer.address);
+      const signature = await sendTx(ctx, instructions, [], feePayer);
+
+      expect(vaultBefore - (await getBalance(ctx, vaultPda))).toBe(1_000_000n);
+      // Repaid in full, less the transaction fee it paid; the execution fee
+      // was the Execute payer's.
+      const sent = await ctx.rpc
+        .getTransaction(signature as Signature, {
+          commitment: 'confirmed',
+          encoding: 'json',
+          maxSupportedTransactionVersion: 0,
+        })
+        .send();
+      expect((await getBalance(ctx, feePayer.address)) - feePayerBefore).toBe(
+        1_000_000n - sent!.meta!.fee,
+      );
     });
   });
 });

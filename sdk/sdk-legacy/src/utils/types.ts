@@ -64,6 +64,11 @@ export interface DeferredPayload {
   deferredExecPda: PublicKey;
   compactInstructions: { programIdIndex: number; accountIndexes: number[]; data: Uint8Array }[];
   remainingAccounts: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[];
+  /** Who the accounts hash expects to send TX2 (`prepareAuthorize`'s
+   *  `executor`). Absent on payloads written before it was recorded. */
+  executor?: PublicKey;
+  /** The Authorize payer: the refund destination the program requires. */
+  refundDestination?: PublicKey;
 }
 
 /** Wire-serializable form of a `DeferredPayload` (all fields are plain JSON types). */
@@ -94,6 +99,8 @@ export interface DeferredPayloadJson {
     isSigner: boolean;
     isWritable: boolean;
   }[];
+  executor?: string;          // base58
+  refundDestination?: string; // base58
 }
 
 /**
@@ -116,6 +123,8 @@ export function serializeDeferredPayload(payload: DeferredPayload): string {
       isSigner: a.isSigner,
       isWritable: a.isWritable,
     })),
+    executor: payload.executor?.toBase58(),
+    refundDestination: payload.refundDestination?.toBase58(),
   };
   return JSON.stringify(json);
 }
@@ -132,7 +141,9 @@ export function deserializeDeferredPayload(serialized: string): DeferredPayload 
     typeof json.walletPda !== 'string' ||
     typeof json.deferredExecPda !== 'string' ||
     !Array.isArray(json.compactInstructions) ||
-    !Array.isArray(json.remainingAccounts)
+    !Array.isArray(json.remainingAccounts) ||
+    (json.executor !== undefined && typeof json.executor !== 'string') ||
+    (json.refundDestination !== undefined && typeof json.refundDestination !== 'string')
   ) {
     throw new Error('Invalid DeferredPayload JSON shape');
   }
@@ -156,6 +167,9 @@ export function deserializeDeferredPayload(serialized: string): DeferredPayload 
       isSigner: a.isSigner,
       isWritable: a.isWritable,
     })),
+    executor: json.executor !== undefined ? new PublicKey(json.executor) : undefined,
+    refundDestination:
+      json.refundDestination !== undefined ? new PublicKey(json.refundDestination) : undefined,
   };
 }
 

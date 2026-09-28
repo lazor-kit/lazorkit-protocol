@@ -138,6 +138,7 @@ import {
   buildCompactLayout,
   computeAccountsHash,
   computeInstructionsHash,
+  decodeAccountIndex,
   packCompactInstructions,
   type CompactInstruction,
 } from './transactions/index.js';
@@ -274,6 +275,7 @@ export interface PreparedAuthorize extends PreparedBase {
   _internal: {
     signing: PreparedSecp256r1;
     payer: Address;
+    executor: Address;
     walletPda: Address;
     authorityPda: Address;
     deferredExecPda: Address;
@@ -704,20 +706,47 @@ export type LazorKitRpc = Rpc<
  * The runtime reports an account's privileges per key, not per position: a key
  * listed twice in a message is a signer, and writable, at every position if it
  * is so at any one. The accounts hash is over those runtime flags, so a layout
- * that repeats a key has to hash the union. Authorize's does — the payer is
- * index 0 (signer) and again the refund destination at index 4 (writable only),
- * and `buildCompactLayout` maps an inner reference to the payer onto index 4,
- * where the program reads signer + writable.
+ * that repeats a key has to hash the union. Authorize's can — tx2's payer is
+ * index 0 (signer) and the Authorize payer is the refund destination at index
+ * 4 (writable only), and `buildCompactLayout` maps an inner reference to the
+ * Authorize payer onto index 4, where the program reads signer + writable when
+ * the two are one key.
  *
- * That models this instruction's own list. The rest of the transaction can
- * only add privileges; the fee payer, always a writable signer, is why the
- * Execute payer is declared writable.
+ * What this models is this instruction's own list plus the transaction's fee
+ * payer, a writable signer wherever it appears: the payer at index 0, declared
+ * so for that reason, or `feePayer` when another key pays. The rest of the
+ * transaction is the caller's to account for. Another top-level instruction
+ * that lists a key with more privilege raises it; the protocol-fee accounts
+ * appended after the remaining accounts are writable; and the runtime demotes a
+ * reserved account or an invoked program id to read-only whatever any list
+ * says. A wrong guess fails closed: the program refuses the transaction (3005,
+ * or 3015 for ExecuteDeferred) and nothing runs.
  */
-function withRuntimeRoles(metas: AccountMeta[]): AccountMeta[] {
+function withRuntimeRoles(metas: AccountMeta[], feePayer?: Address): AccountMeta[] {
   // AccountRole is a bit set: bit 0 writable, bit 1 signer.
   const union = new Map<Address, number>();
   for (const m of metas) union.set(m.address, (union.get(m.address) ?? 0) | (m.role as number));
+  if (feePayer) {
+    union.set(feePayer, (union.get(feePayer) ?? 0) | (AccountRole.WRITABLE_SIGNER as number));
+  }
   return metas.map((m) => ({ address: m.address, role: union.get(m.address)! as AccountRole }));
+}
+
+/**
+ * Whether a deferred payload's inner instructions name tx2's payer (index 0)
+ * or its refund destination (index 4) — the two fixed accounts whose hashed
+ * flags depend on who sends tx2.
+ */
+function namesDeferredPayerSlot(
+  compactInstructions: DeferredPayload['compactInstructions'],
+): boolean {
+  const payerSlot = (byte: number) => {
+    const { index } = decodeAccountIndex(byte);
+    return index === 0 || index === 4;
+  };
+  return compactInstructions.some(
+    (ix) => payerSlot(ix.programIdIndex) || ix.accountIndexes.some(payerSlot),
+  );
 }
 
 /**
@@ -948,6 +977,7 @@ export class LazorKit {
     // layout lists the payer twice, and the whole point of the payer exclusion
     // is that a duplicate entry must not launder it.
     payer: Address,
+    feePayer?: Address,
   ): {
     compactInstructions: CompactInstruction[];
     remainingAccounts: AccountMeta[];
@@ -962,7 +992,7 @@ export class LazorKit {
     );
     // The program hashes the flags the runtime reports, so read the metas the
     // way the runtime does (see withRuntimeRoles).
-    const allAccountMetas = withRuntimeRoles([...fixedAccounts, ...remainingAccounts]);
+    const allAccountMetas = withRuntimeRoles([...fixedAccounts, ...remainingAccounts], feePayer);
     const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
     return { compactInstructions, remainingAccounts, allAccountMetas, accountsHash };
   }
@@ -2354,6 +2384,8 @@ export class LazorKit {
     walletPda: Address;
     signer: ExecuteSigner;
     instructions: Instruction[];
+    /** Passkey signers: the fee payer, when it is not `payer` (see `prepareExecute`). */
+    feePayer?: Address;
   }): Promise<{ instructions: Instruction[] }> {
     const [vaultPda] = await this.findVault(params.walletPda);
     const s = params.signer;
@@ -2397,6 +2429,7 @@ export class LazorKit {
           walletPda: params.walletPda,
           secp256r1: this.extractSecp256r1Params(s),
           instructions: params.instructions,
+          feePayer: params.feePayer,
         });
         const response = await s.signer.sign(prepared.challenge);
         return this.finalizeExecute(prepared, response);
@@ -2441,6 +2474,10 @@ export class LazorKit {
     walletPda: Address;
     secp256r1: Secp256r1Params;
     instructions: Instruction[];
+    /** The transaction's fee payer, when it is not `payer`. The runtime
+     *  reports it a writable signer wherever it appears, so an inner
+     *  instruction that names it (repaying a sponsor) is hashed that way. */
+    feePayer?: Address;
   }): Promise<PreparedExecute> {
     const [vaultPda] = await this.findVault(params.walletPda);
     const [resolved, fee] = await Promise.all([
@@ -2465,7 +2502,12 @@ export class LazorKit {
       { address: SYSVAR_INSTRUCTIONS_ADDRESS, role: AccountRole.READONLY },
     ];
     const { compactInstructions, remainingAccounts, accountsHash } =
-      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions, params.payer);
+      this.buildCompactLayoutAndHash(
+        fixedAccounts,
+        params.instructions,
+        params.payer,
+        params.feePayer,
+      );
     const packed = packCompactInstructions(compactInstructions);
     const signedPayload = concatBytes([packed, accountsHash]);
 
@@ -2523,6 +2565,10 @@ export class LazorKit {
     signer: Secp256r1SignerConfig;
     instructions: Instruction[];
     expiryOffset?: number;
+    /** Who will send TX2, when not `payer` (see `prepareAuthorize`). */
+    executor?: Address;
+    /** TX2's fee payer, when not the executor (see `prepareAuthorize`). */
+    feePayer?: Address;
   }): Promise<{
     instructions: Instruction[];
     deferredExecPda: Address;
@@ -2536,6 +2582,8 @@ export class LazorKit {
       secp256r1: this.extractSecp256r1Params(s),
       instructions: params.instructions,
       expiryOffset: params.expiryOffset,
+      executor: params.executor,
+      feePayer: params.feePayer,
     });
     const response = await s.signer.sign(prepared.challenge);
     return this.finalizeAuthorize(prepared, response);
@@ -2545,12 +2593,17 @@ export class LazorKit {
    * Tx1 of the deferred flow: the passkey approves `instructions` for a later
    * `ExecuteDeferred`, and `finalizeAuthorize` returns what tx2 needs.
    *
-   * The accounts hash it signs assumes `payer` also sends tx2, as
-   * `executeDeferredFromPayload` does by default: it is then a signer of tx2 as
-   * well as its refund destination, and the program reads it that way. If
-   * another key pays for tx2 and an inner instruction names this payer (to
-   * repay it, say), the program reads it as writable only and `ExecuteDeferred`
-   * fails with `DeferredHashMismatch` (3015).
+   * The accounts hash it signs is over tx2's accounts with the flags the
+   * program will read there, and two of them depend on who sends tx2: its
+   * payer (index 0) and its refund destination (index 4), which is always this
+   * `payer` — the program returns the rent to no one else. Pass `executor` when
+   * another key will send tx2 (a relayer); it defaults to `payer`. An inner
+   * instruction that names either key is then hashed as the program will see
+   * it: the executor as a writable signer, this payer as a signer as well only
+   * when it is the executor. The payload records both, and
+   * `executeDeferredFromPayload` refuses a different payer when an inner
+   * instruction names either slot, rather than build a tx2 that fails with
+   * `DeferredHashMismatch` (3015).
    */
   async prepareAuthorize(params: {
     payer: Address;
@@ -2558,6 +2611,10 @@ export class LazorKit {
     secp256r1: Secp256r1Params;
     instructions: Instruction[];
     expiryOffset?: number;
+    /** Who will send tx2 (ExecuteDeferred's payer). Defaults to `payer`. */
+    executor?: Address;
+    /** Tx2's fee payer, when it is not the executor (see `prepareExecute`). */
+    feePayer?: Address;
   }): Promise<PreparedAuthorize> {
     const [vaultPda] = await this.findVault(params.walletPda);
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
@@ -2572,17 +2629,23 @@ export class LazorKit {
     );
 
     // TX2's (ExecuteDeferred's) layout, which is what the program hashes when
-    // it replays, with the roles createExecuteDeferredIx gives them. The payer
-    // is there twice, as tx2's payer and as the refund destination (see above).
+    // it replays, with the roles createExecuteDeferredIx gives them: the
+    // executor as tx2's payer, this payer as the refund destination (see above).
+    const executor = params.executor ?? params.payer;
     const fixedAccounts: AccountMeta[] = [
-      { address: params.payer, role: AccountRole.WRITABLE_SIGNER },
+      { address: executor, role: AccountRole.WRITABLE_SIGNER },
       { address: params.walletPda, role: AccountRole.READONLY },
       { address: vaultPda, role: AccountRole.WRITABLE },
       { address: deferredExecPda, role: AccountRole.WRITABLE },
       { address: params.payer, role: AccountRole.WRITABLE },
     ];
     const { compactInstructions, remainingAccounts, accountsHash } =
-      this.buildCompactLayoutAndHash(fixedAccounts, params.instructions, params.payer);
+      this.buildCompactLayoutAndHash(
+        fixedAccounts,
+        params.instructions,
+        executor,
+        params.feePayer,
+      );
     const instructionsHash = computeInstructionsHash(compactInstructions);
     const expiryOffsetBuf = new Uint8Array(2);
     expiryOffsetBuf[0] = expiryOffset & 0xff;
@@ -2607,6 +2670,7 @@ export class LazorKit {
       _internal: {
         signing,
         payer: params.payer,
+        executor,
         walletPda: params.walletPda,
         authorityPda,
         deferredExecPda,
@@ -2651,17 +2715,43 @@ export class LazorKit {
         deferredExecPda: i.deferredExecPda,
         compactInstructions: i.compactInstructions,
         remainingAccounts: i.remainingAccounts,
+        executor: i.executor,
+        refundDestination: i.payer,
       },
     };
   }
 
+  /**
+   * Build TX2 from the payload returned by `authorize()`.
+   *
+   * The refund destination defaults to the Authorize payer the payload
+   * records, the only one the program accepts (older payloads: `payer`). A
+   * payload authorized for another executor is refused when an inner
+   * instruction names tx2's payer or refund slot: the accounts hash fixed who
+   * sends it, and the program would fail it with `DeferredHashMismatch` (3015).
+   */
   async executeDeferredFromPayload(params: {
     payer: Address;
     deferredPayload: DeferredPayload;
     refundDestination?: Address;
   }): Promise<{ instructions: Instruction[] }> {
+    const { executor } = params.deferredPayload;
+    if (
+      executor &&
+      executor !== params.payer &&
+      namesDeferredPayerSlot(params.deferredPayload.compactInstructions)
+    ) {
+      throw new Error(
+        `This authorization was signed for ${executor} to send ExecuteDeferred, and an ` +
+          `inner instruction names tx2's payer or refund destination, whose flags depend ` +
+          `on who sends it. Sent by ${params.payer} it would fail with ` +
+          `DeferredHashMismatch (3015). Send it from ${executor}, or authorize again ` +
+          `with executor: ${params.payer}.`,
+      );
+    }
     const [vaultPda] = await this.findVault(params.deferredPayload.walletPda);
-    const refundDest = params.refundDestination ?? params.payer;
+    const refundDest =
+      params.refundDestination ?? params.deferredPayload.refundDestination ?? params.payer;
     const packed = packCompactInstructions(params.deferredPayload.compactInstructions);
     const fee = await this.resolveProtocolFeeWithRegister(params.payer);
     const ix = createExecuteDeferredIx({

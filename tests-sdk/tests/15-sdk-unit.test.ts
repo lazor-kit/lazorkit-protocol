@@ -25,6 +25,8 @@ import {
   buildAuthPayloadPrefix,
   buildSecp256r1Challenge,
   buildSecp256r1PrecompileIx,
+  serializeDeferredPayload,
+  deserializeDeferredPayload,
   type WalletAuthorityRecord,
 } from '../../sdk/sdk-legacy/src';
 import { createExecuteIx } from '../../sdk/sdk-legacy/src/utils/instructions';
@@ -340,6 +342,133 @@ describe('prepareExecute / prepareAuthorize — the accounts hash uses runtime f
         ),
       ).toString('hex'),
     );
+  });
+
+  const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
+  /** The Execute challenge over `hash`, as the program recomputes it. */
+  const executeChallenge = (
+    prepared: Awaited<ReturnType<LazorKitClient['prepareExecute']>>,
+    payer: PublicKey,
+    walletPda: PublicKey,
+    hash: Uint8Array,
+  ) =>
+    buildSecp256r1Challenge({
+      discriminator: new Uint8Array([DISC_EXECUTE]),
+      authPayload: buildAuthPayloadPrefix({
+        slot: SLOT,
+        counter: 1,
+        sysvarIxIndex: prepared._internal.signing._internal.sysvarIxIndex,
+      }),
+      signedPayload: new Uint8Array([...prepared._internal.packed, ...hash]),
+      slot: SLOT,
+      payer,
+      wallet: walletPda,
+      counter: 1,
+      programId: DEVNET_PROGRAM_ID,
+    });
+  // finalizeAuthorize only packages the response; nothing here verifies it.
+  const unverifiedResponse = {
+    signature: new Uint8Array(64),
+    authenticatorData: new Uint8Array(37),
+    clientDataJsonHash: new Uint8Array(32),
+    clientDataJson: new Uint8Array(Buffer.from('{}')),
+  };
+
+  // Another key pays the fee. The fee payer is then an inner account like any
+  // other, except that the runtime reports it a writable signer — which the SDK
+  // can only know if told. Repaying it used to fail with 3005.
+  it('Execute hashes a separate fee payer as a writable signer', async () => {
+    const { client, payer, walletPda, vaultPda, secp256r1 } = setup();
+    const feePayer = Keypair.generate().publicKey;
+    const repayFeePayer = SystemProgram.transfer({
+      fromPubkey: vaultPda,
+      toPubkey: feePayer,
+      lamports: 1_000_000,
+    });
+
+    const prepared = await client.prepareExecute({
+      payer,
+      walletPda,
+      secp256r1,
+      instructions: [repayFeePayer],
+      feePayer,
+    });
+    const hash = accountsHash([SystemProgram.programId, 0b00], [vaultPda, 0b10], [feePayer, 0b11]);
+    expect(hex(prepared.challenge)).toBe(hex(executeChallenge(prepared, payer, walletPda, hash)));
+
+    // Not told, it hashes what the instruction declares.
+    const unaware = await client.prepareExecute({ payer, walletPda, secp256r1, instructions: [repayFeePayer] });
+    const declared = accountsHash([SystemProgram.programId, 0b00], [vaultPda, 0b10], [feePayer, 0b10]);
+    expect(hex(unaware.challenge)).toBe(hex(executeChallenge(unaware, payer, walletPda, declared)));
+  });
+
+  // A relayer sends tx2. The refund destination is still the Authorize payer —
+  // the program returns the rent to no one else — but it no longer signs tx2;
+  // the relayer does, at index 0. Hashing the payer a signer there, as for the
+  // same-payer case, failed tx2 with 3015.
+  it('Authorize for another executor hashes it at index 0, and the payer writable only', async () => {
+    const { client, payer, walletPda, vaultPda, secp256r1, repay } = setup();
+    const executor = Keypair.generate().publicKey;
+    const repayExecutor = SystemProgram.transfer({ fromPubkey: vaultPda, toPubkey: executor, lamports: 5_000 });
+
+    const prepared = await client.prepareAuthorize({
+      payer,
+      walletPda,
+      secp256r1,
+      instructions: [repay, repayExecutor],
+      executor,
+    });
+    expect(hex(prepared._internal.accountsHash)).toBe(
+      hex(
+        accountsHash(
+          [SystemProgram.programId, 0b00],
+          [vaultPda, 0b10],
+          [payer, 0b10], // index 4, the refund destination
+          [SystemProgram.programId, 0b00],
+          [vaultPda, 0b10],
+          [executor, 0b11], // index 0, tx2's payer
+        ),
+      ),
+    );
+
+    // The payload carries who the hash was built for, across the wire too.
+    const { deferredPayload } = client.finalizeAuthorize(prepared, unverifiedResponse);
+    const received = deserializeDeferredPayload(serializeDeferredPayload(deferredPayload));
+    expect(received.executor?.toBase58()).toBe(executor.toBase58());
+    expect(received.refundDestination?.toBase58()).toBe(payer.toBase58());
+  });
+
+  it('executeDeferredFromPayload refuses a sender the hash was not built for, when it matters', async () => {
+    const { client, payer, walletPda, vaultPda, secp256r1, repay } = setup();
+    const relayer = Keypair.generate().publicKey;
+    const authorize = async (instructions: TransactionInstruction[], executor?: PublicKey) =>
+      client.finalizeAuthorize(
+        await client.prepareAuthorize({ payer, walletPda, secp256r1, instructions, executor }),
+        unverifiedResponse,
+      ).deferredPayload;
+    const tx2 = async (sender: PublicKey, deferredPayload: Awaited<ReturnType<typeof authorize>>) =>
+      (await client.executeDeferredFromPayload({ payer: sender, deferredPayload })).instructions.at(-1)!;
+
+    // Repays the payer, authorized for the payer to send: a relayer's tx2
+    // would read the refund slot writable only.
+    const forPayer = await authorize([repay]);
+    await expect(tx2(relayer, forPayer)).rejects.toThrow(/DeferredHashMismatch \(3015\)/);
+    expect((await tx2(payer, forPayer)).keys[0].pubkey.toBase58()).toBe(payer.toBase58());
+
+    // Authorized for the relayer: it sends, and the rent still goes to the
+    // payer without being told.
+    const forRelayer = await authorize([repay], relayer);
+    const ix = await tx2(relayer, forRelayer);
+    expect(ix.keys[0].pubkey.toBase58()).toBe(relayer.toBase58());
+    expect(ix.keys[4].pubkey.toBase58()).toBe(payer.toBase58());
+    await expect(tx2(payer, forRelayer)).rejects.toThrow(/DeferredHashMismatch \(3015\)/);
+
+    // Names neither slot: whoever sends it, the hash is the same.
+    const stranger = Keypair.generate().publicKey;
+    const toStranger = await authorize([
+      SystemProgram.transfer({ fromPubkey: vaultPda, toPubkey: stranger, lamports: 1 }),
+    ]);
+    expect((await tx2(relayer, toStranger)).keys[0].pubkey.toBase58()).toBe(relayer.toBase58());
   });
 });
 
