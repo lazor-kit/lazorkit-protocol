@@ -28,6 +28,8 @@ import {
 } from './pdas';
 import {
   classifyV1VaultTokens,
+  harvestWithheldIx,
+  tokenAccountFrozen,
   deriveV1Accounts,
   findV1AuthorityPda,
   findV1VaultPda,
@@ -1418,6 +1420,26 @@ export class LazorKitClient {
   }
 
   /**
+   * Throws unless `owner` is exactly the passkey on this v1 authority — its
+   * public key and the relying party it was created under. `migrateV1Wallet`
+   * uses `owner` to create or vet the v2 destination, where a wrong rpId would
+   * mean a wallet no assertion can ever satisfy.
+   */
+  private async assertV1PasskeyOwner(authority: PublicKey, owner: CreateWalletOwner): Promise<void> {
+    const { secp256r1Pubkey, rpId } = resolveOwnerFields(owner);
+    const info = await this.connection.getAccountInfo(authority);
+    if (!info) throw new Error(`v1 authority ${authority.toBase58()} not found`);
+    const data = info.data;
+    if (data.length < 145) throw new Error('the v1 authority is not a passkey authority');
+    if (!Buffer.from(data.subarray(80, 113)).equals(Buffer.from(secp256r1Pubkey!))) {
+      throw new Error("owner.compressedPubkey is not the v1 authority's public key");
+    }
+    if (!Buffer.from(data.subarray(113, 145)).equals(Buffer.from(sha256(Buffer.from(rpId ?? '', 'utf8'))))) {
+      throw new Error('owner.rpId is not the relying party the v1 wallet was created under');
+    }
+  }
+
+  /**
    * Whether `wallet` belongs to `credential` alone — safe to receive a v1
    * migration. `null` means yes; otherwise the reason it is not.
    *
@@ -2425,7 +2447,13 @@ export class LazorKitClient {
     skippedTokens: { token: V1VaultToken; reason: UnmovableReason }[];
     setupInstructions: TransactionInstruction[];
     migrate:
-      | { type: 'ed25519'; instruction: TransactionInstruction }
+      | {
+          type: 'ed25519';
+          /** The MigrateWallet instruction alone. */
+          instruction: TransactionInstruction;
+          /** What to send, in one transaction: any fee harvests, then MigrateWallet. */
+          instructions: TransactionInstruction[];
+        }
       | {
           type: 'secp256r1';
           challenge: Uint8Array;
@@ -2475,6 +2503,13 @@ export class LazorKitClient {
     if (state.ownerRole !== ROLE_OWNER) {
       throw new Error('MigrateWallet requires an Owner-rank v1 authority');
     }
+    if (authType === AUTH_TYPE_SECP256R1) {
+      // The migration itself checks the passkey against the v1 authority, but
+      // `owner` also creates (or vets) the v2 wallet the funds land in. A wrong
+      // rpId there would sweep everything into a wallet no assertion can ever
+      // satisfy. So the owner given must be exactly the one on the v1 account.
+      await this.assertV1PasskeyOwner(v1.authority, params.owner);
+    }
 
     // Where the funds land. With a seed, the destination is that seed's wallet.
     // Without one, reuse whatever v2 wallet this owner already has, and only
@@ -2507,11 +2542,34 @@ export class LazorKitClient {
     }
     const [v2Vault] = this.findVault(v2Wallet);
 
-    const { movable: tokens, skipped: skippedTokens } = await classifyV1VaultTokens(
+    const classified = await classifyV1VaultTokens(
       this.connection,
       await enumerateV1VaultTokens(this.connection, v1.vault),
       params.excludeTokenAccounts,
     );
+    // The destination side, now that the vault is known. An existing frozen
+    // destination account makes the transfer fail; an existing thawed one
+    // means a mint that freezes new accounts is no obstacle after all.
+    const destOf = (t: V1VaultToken) => getAssociatedTokenAddress(t.mint, v2Vault, t.tokenProgram);
+    const toCheck = [...classified.movable, ...classified.skipped.filter((s) => s.reason === 'frozen-on-arrival').map((s) => s.token)];
+    const destState = new Map<string, 'frozen' | 'open'>();
+    for (let i = 0; i < toCheck.length; i += 100) {
+      const page = toCheck.slice(i, i + 100);
+      const infos = await this.connection.getMultipleAccountsInfo(page.map(destOf));
+      infos.forEach((info, j) => {
+        if (info) destState.set(page[j].ata.toBase58(), tokenAccountFrozen(info.data) ? 'frozen' : 'open');
+      });
+    }
+    const tokens: V1VaultToken[] = [];
+    const skippedTokens = classified.skipped.filter((s) => s.reason !== 'frozen-on-arrival');
+    for (const t of classified.movable) {
+      if (destState.get(t.ata.toBase58()) === 'frozen') skippedTokens.push({ token: t, reason: 'destination-frozen' });
+      else tokens.push(t);
+    }
+    for (const s of classified.skipped.filter((s) => s.reason === 'frozen-on-arrival')) {
+      if (destState.get(s.token.ata.toBase58()) === 'open') tokens.push(s.token);
+      else skippedTokens.push(s);
+    }
     if (tokens.length > 255) {
       throw new Error(`the v1 vault holds ${tokens.length} token accounts; one migration moves at most 255`);
     }
@@ -2550,6 +2608,19 @@ export class LazorKitClient {
     // — without them a relayer could keep the count and swap in dust it created,
     // stranding the user's real tokens when the vault closes. Order must match
     // the program's read order (the migrateTokens order used to build the ix).
+    // Withheld Token-2022 fees stop a source account from closing; harvesting
+    // them to the mint needs no signer. Done in the migration's own
+    // transaction, so none can be planted in between.
+    const withheldByMint = new Map<string, PublicKey[]>();
+    for (const t of tokens) {
+      if (!t.withheldFees) continue;
+      const key = t.mint.toBase58();
+      withheldByMint.set(key, [...(withheldByMint.get(key) ?? []), t.ata]);
+    }
+    const harvestInstructions = [...withheldByMint].map(([mint, sources]) =>
+      harvestWithheldIx(new PublicKey(mint), sources),
+    );
+
     const refundDestination = params.refundDestination ?? params.payer;
     const signedPayload = concatBytes([
       v2Vault.toBytes(),
@@ -2580,7 +2651,7 @@ export class LazorKitClient {
         tokens,
         skippedTokens,
         setupInstructions,
-        migrate: { type: 'ed25519', instruction },
+        migrate: { type: 'ed25519', instruction, instructions: [...harvestInstructions, instruction] },
       };
     }
 
@@ -2615,7 +2686,8 @@ export class LazorKitClient {
         authPayload,
         programId: v1ProgramId,
       });
-      return [precompileIx, migrateIx];
+      // Harvests first; the precompile must sit immediately before the migrate.
+      return [...harvestInstructions, precompileIx, migrateIx];
     };
     return {
       v1,

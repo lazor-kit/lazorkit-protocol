@@ -231,18 +231,45 @@ const pkAta = await retry('passkey ata', () =>
   spl.getOrCreateAssociatedTokenAccount(connection, payer, mint, pkVault, true),
 );
 await retry('passkey mintTo', () => spl.mintTo(connection, payer, mint, pkAta.address, payer, 555_000));
-// A second token, on Token-2022: the passkey challenge binds each source
-// account by its position, which only a vault with two or more can exercise.
-const mint22 = await retry('mint22', () =>
-  spl.createMint(connection, payer, payer.publicKey, null, 6, undefined, undefined, spl.TOKEN_2022_PROGRAM_ID),
+// A second token, on Token-2022 with a 1% transfer fee, received by transfer
+// so the vault's account holds withheld fees: the passkey challenge binds each
+// source account by its position (two or more exercise it), and withheld fees
+// stop an account from closing unless the migration harvests them first.
+const mint22Kp = Keypair.generate();
+const mint22 = mint22Kp.publicKey;
+const T22 = spl.TOKEN_2022_PROGRAM_ID;
+const mintLen = spl.getMintLen([spl.ExtensionType.TransferFeeConfig]);
+await retry('mint22', async () =>
+  sendAndConfirmTransaction(
+    connection,
+    new Transaction().add(
+      SystemProgram.createAccount({
+        fromPubkey: payer.publicKey,
+        newAccountPubkey: mint22,
+        space: mintLen,
+        lamports: await connection.getMinimumBalanceForRentExemption(mintLen),
+        programId: T22,
+      }),
+      spl.createInitializeTransferFeeConfigInstruction(mint22, payer.publicKey, payer.publicKey, 100, 1_000_000_000n, T22),
+      spl.createInitializeMintInstruction(mint22, 6, payer.publicKey, null, T22),
+    ),
+    [payer, mint22Kp],
+    { commitment: 'confirmed' },
+  ),
 );
+const payerAta22 = await retry('payer ata22', () =>
+  spl.getOrCreateAssociatedTokenAccount(connection, payer, mint22, payer.publicKey, false, undefined, undefined, T22),
+);
+await retry('mintTo22', () => spl.mintTo(connection, payer, mint22, payerAta22.address, payer, 1_000_000, [], undefined, T22));
 const pkAta22 = await retry('passkey ata22', () =>
-  spl.getOrCreateAssociatedTokenAccount(connection, payer, mint22, pkVault, true, undefined, undefined, spl.TOKEN_2022_PROGRAM_ID),
+  spl.getOrCreateAssociatedTokenAccount(connection, payer, mint22, pkVault, true, undefined, undefined, T22),
 );
-await retry('passkey mintTo22', () =>
-  spl.mintTo(connection, payer, mint22, pkAta22.address, payer, 333_000, [], undefined, spl.TOKEN_2022_PROGRAM_ID),
+await retry('fee transfer', () =>
+  spl.transferCheckedWithFee(connection, payer, payerAta22.address, mint22, pkAta22.address, payer, 333_000n, 6, 3_330n, [], { commitment: 'confirmed' }, T22),
 );
-console.log(`v1 passkey  ${pkCreated.walletPda.toBase58()}  0.02 SOL + 555,000 SPL + 333,000 Token-2022`);
+const pk22Before = await spl.getAccount(connection, pkAta22.address, 'confirmed', T22);
+const withheldBefore = spl.getTransferFeeAmount(pk22Before)?.withheldAmount ?? 0n;
+console.log(`v1 passkey  ${pkCreated.walletPda.toBase58()}  0.02 SOL + 555,000 SPL + ${pk22Before.amount} fee-bearing Token-2022 (withheld ${withheldBefore})`);
 
 // ── 2. retire the v1 id ────────────────────────────────────────────────
 deploy(process.env.SUNSET_SO, `upgrading ${V1} to the sunset binary`);
@@ -366,7 +393,11 @@ const lsend = (label, instructions) =>
 await lsend('setup', pkPlan.setupInstructions);
 
 const response = authenticate(pkPlan.migrate.challenge);
-const [precompile, migrateIx] = pkPlan.migrate.finalize(response);
+// [...fee harvests, precompile, migrate] — the precompile sits right before the migrate.
+const finalized = pkPlan.migrate.finalize(response);
+const [precompile, migrateIx] = finalized.slice(-2);
+const harvests = finalized.slice(0, -2);
+check('the plan harvests the withheld fees in the migration transaction', harvests.length === 1);
 check('the passkey migrate goes to the v1 program', migrateIx.programId.toBase58() === V1);
 
 // The relayer is the payer and holds a valid assertion. Swapping account 6 for
@@ -380,7 +411,7 @@ const tampered = new w3.TransactionInstruction({
 });
 let swapRefused = false;
 try {
-  await w3.sendAndConfirmTransaction(lconn, new w3.Transaction().add(precompile, tampered), [lpayer], {
+  await w3.sendAndConfirmTransaction(lconn, new w3.Transaction().add(...harvests, precompile, tampered), [lpayer], {
     commitment: 'confirmed',
   });
 } catch (e) {
@@ -388,7 +419,7 @@ try {
 }
 check('a relayer swapping the system program is refused', swapRefused);
 
-await lsend('migrate', [precompile, migrateIx]);
+await lsend('migrate', pkPlan.migrate.finalize(response));
 const [pw, pa, pv] = await lconn.getMultipleAccountsInfo([
   pkPlan.v1.wallet,
   pkPlan.v1.authority,
@@ -400,9 +431,16 @@ check('its SOL is in its own v2 vault', pkV2Vault >= 20_000_000, `${sol(pkV2Vaul
 const pkDest = await spl.getAssociatedTokenAddress(mint, new PublicKey(pkPlan.v2Vault.toBase58()), true);
 const pkBal = await retry('balance', () => connection.getTokenAccountBalance(pkDest)).catch(() => null);
 check('its SPL token is in its own v2 vault', pkBal?.value.amount === '555000', pkBal?.value.amount);
-const pkDest22 = await spl.getAssociatedTokenAddress(mint22, new PublicKey(pkPlan.v2Vault.toBase58()), true, spl.TOKEN_2022_PROGRAM_ID);
+const pkDest22 = await spl.getAssociatedTokenAddress(mint22, new PublicKey(pkPlan.v2Vault.toBase58()), true, T22);
 const pkBal22 = await retry('balance22', () => connection.getTokenAccountBalance(pkDest22)).catch(() => null);
-check('its Token-2022 token is in its own v2 vault', pkBal22?.value.amount === '333000', pkBal22?.value.amount);
+// The source had withheld fees (it could not close without a harvest), and the
+// move itself pays the 1% fee again, withheld at the destination.
+const moved = pk22Before.amount;
+const expected22 = moved - (moved * 100n + 9_999n) / 10_000n;
+check('the fee-bearing token had withheld fees before', withheldBefore > 0n, `${withheldBefore}`);
+check('its fee-bearing Token-2022 token is in its own v2 vault, less the transfer fee',
+  pkBal22?.value.amount === expected22.toString(), `${pkBal22?.value.amount} of ${moved}`);
+check('its old fee-bearing account is closed', (await connection.getAccountInfo(pkAta22.address)) === null);
 
 // ── 5. the keeper closes the expired v1 session ───────────────────────
 while ((await retry('slot', () => connection.getSlot())) <= sessionExpiry) await new Promise((r) => setTimeout(r, 2000));

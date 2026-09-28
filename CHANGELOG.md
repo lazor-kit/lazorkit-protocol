@@ -103,6 +103,26 @@ it is retired.
   only v2, so the relayer would have refused every transaction.
   `scripts/kora-config-lint.cjs` now checks both files in CI.
 
+### Fixed — found in a third review, 2026-09-28
+
+- **Withheld transfer fees no longer strand a token.** They only stop the
+  source account from closing, and anyone may harvest them to the mint:
+  `migrateV1Wallet` now puts a `HarvestWithheldTokensToMint` before the
+  migration in the same transaction (ed25519: `migrate.instructions`; passkey:
+  `finalize()` returns `[...harvests, precompile, migrate]`). Proven on a local
+  validator with a 1% fee token: the rehearsal is 18/18.
+- A token whose mint is gone or owned by another token program is left behind
+  as `mint-missing` instead of reverting the migration; a destination account
+  that exists and is frozen is `destination-frozen`; a default-frozen mint whose
+  destination is already thawed moves.
+- Mints and destinations are read in pages of 100 (the RPC limit), after
+  `excludeTokenAccounts` is applied: 101 planted mints no longer make a vault
+  unmigratable.
+- A passkey `owner` must be exactly the v1 authority's key and relying party;
+  a wrong `rpId` used to sweep funds into a wallet no assertion could satisfy.
+- `kora-config-lint` also requires every required program to be allowed and
+  the v1 id to be in both lists or neither.
+
 **SDKs** (`@lazorkit/sdk-legacy` 1.2.0, `@lazorkit/sdk` 1.0.0-rc.3)
 - **Breaking:** `PROGRAM_ID_MAINNET` / `PROGRAM_ID_DEVNET` are the v2 ids
   (`LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8`, `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv`).

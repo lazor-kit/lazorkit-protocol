@@ -11,7 +11,7 @@
  * Mirrors tests-sdk/tests/16-v1-migration-unit.test.ts, the sdk-legacy twin.
  */
 import { describe, it, expect } from 'vitest';
-import { address, getAddressEncoder, type Address } from '@solana/kit';
+import { address, getAddressDecoder, getAddressEncoder, type Address } from '@solana/kit';
 import bs58lib from 'bs58';
 import { sha256 } from '@noble/hashes/sha2';
 
@@ -28,6 +28,7 @@ import {
   getAssociatedTokenAddress,
   mintBlocker,
   tokenAccountBlocker,
+  tokenAccountWithheldFees,
 } from '../src/index.js';
 import { ACCOUNT_DISCRIMINATOR } from '../src/constants.js';
 import {
@@ -63,7 +64,10 @@ function v1AuthorityData(wallet: Address, role = 0, authType = 0): Uint8Array {
   data[2] = role;
   data.set(bytesOf(wallet), 16);
   data.set(CREDENTIAL, 48);
-  if (authType === 1) data.set(new Uint8Array(33).fill(0x7c), 80); // compressed pubkey
+  if (authType === 1) {
+    data.set(new Uint8Array(33).fill(0x7c), 80); // compressed pubkey
+    data.set(sha256(new TextEncoder().encode('portal.lazor.sh')), 113); // rpIdHash
+  }
   return data;
 }
 
@@ -73,8 +77,8 @@ function v1WalletData(): Uint8Array {
   return data;
 }
 
-function account(data: Uint8Array, lamports = 1n) {
-  return { data: [b64(data), 'base64'] as const, lamports, executable: false };
+function account(data: Uint8Array, lamports = 1n, owner?: Address) {
+  return { data: [b64(data), 'base64'] as const, lamports, executable: false, ...(owner ? { owner } : {}) };
 }
 
 describe('findV1WalletsByOwner', () => {
@@ -187,7 +191,8 @@ describe('migrateV1Wallet by address', () => {
           value: keys.map((key) => {
             if (key === v1Wallet) return account(v1WalletData(), 890_880n);
             if (key === v1Authority) return account(v1AuthorityData(v1Wallet));
-            if (key === HOOKED_MINT) return account(hookedMintData());
+            if (key === HOOKED_MINT) return account(hookedMintData(), 1n, TOKEN_2022_PROGRAM_ADDRESS);
+            if (key === MINT) return account(new Uint8Array(82), 1n, TOKEN_PROGRAM_ADDRESS);
             return account(new Uint8Array(0), 50_000_000n);
           }),
         }),
@@ -473,6 +478,202 @@ describe('migrateV1Wallet by address', () => {
     expect(ix!.accounts![5]!.address).toBe(refund);
   });
 
+  // The token side of a plan, against a vault holding exactly `accounts`.
+  describe('which tokens a plan moves', () => {
+    const T22 = TOKEN_2022_PROGRAM_ADDRESS;
+    const tokenData = (mint: Address, owner: Address, amount: bigint, extras: Array<[number, Uint8Array]> = [], state = 1) => {
+      const tlv = extras.flatMap(([type, value]) => {
+        const head = new Uint8Array(4);
+        new DataView(head.buffer).setUint16(0, type, true);
+        new DataView(head.buffer).setUint16(2, value.length, true);
+        return [...head, ...value];
+      });
+      const d = new Uint8Array(extras.length ? 166 + tlv.length : 165);
+      d.set(bytesOf(mint), 0);
+      d.set(bytesOf(owner), 32);
+      new DataView(d.buffer).setBigUint64(64, amount, true);
+      d[108] = state;
+      if (extras.length) {
+        d[165] = 2;
+        d.set(tlv, 166);
+      }
+      return d;
+    };
+    type Held = { ata: Address; mint: Address; program: Address; data: Uint8Array };
+    async function planWith(
+      held: (vault: Address) => Promise<Held[]>,
+      mints: Record<string, { owner: Address; data: Uint8Array } | null>,
+      dests: (v2Vault: Address) => Promise<Record<string, Uint8Array>> = async () => ({}),
+      pages: number[] = [],
+    ) {
+      const base = await fixture();
+      const inner = base.rpc as unknown as {
+        getMultipleAccounts: (k: Address[]) => { send: () => Promise<{ value: unknown[] }> };
+      };
+      const lk = new LazorKit({} as never, PROGRAM_ID);
+      let destData: Record<string, Uint8Array> = {};
+      const accounts = await held(base.v1Vault);
+      const rpc = {
+        ...(base.rpc as object),
+        getTokenAccountsByOwner: (_o: Address, f: { programId: Address }) => ({
+          send: async () => ({
+            value: accounts
+              .filter((h) => h.program === f.programId)
+              .map((h) => ({ pubkey: h.ata, account: account(h.data, 2_039_280n, h.program) })),
+          }),
+        }),
+        getMultipleAccounts: (keys: Address[]) => ({
+          send: async () => {
+            pages.push(keys.length);
+            if (keys.some((k) => k in mints || k in destData)) {
+              return {
+                value: keys.map((k) =>
+                  k in destData
+                    ? account(destData[k]!, 2_039_280n, TOKEN_PROGRAM_ADDRESS)
+                    : mints[k]
+                      ? account(mints[k]!.data, 1n, mints[k]!.owner)
+                      : k in mints
+                        ? null
+                        : account(new Uint8Array(0), 1n),
+                ),
+              };
+            }
+            return inner.getMultipleAccounts(keys).send();
+          },
+        }),
+      } as never;
+      // Destinations are keyed by ATA, which needs the plan's v2 vault: plan
+      // once to learn it, then plan for real.
+      const first = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+        payer: PAYER,
+        owner: { type: 'ed25519', publicKey: OWNER },
+        v1Wallet: base.v1Wallet,
+        destinationUserSeed: new Uint8Array(32).fill(9),
+      });
+      destData = await dests(first.v2Vault);
+      const plan = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+        payer: PAYER,
+        owner: { type: 'ed25519', publicKey: OWNER },
+        v1Wallet: base.v1Wallet,
+        destinationUserSeed: new Uint8Array(32).fill(9),
+      });
+      void lk;
+      return plan;
+    }
+
+    it('harvests withheld Token-2022 fees in the migration transaction and moves the account', async () => {
+      const mint = address('Ek5JdE3pHMjWMQAhxtBXPH3Z1SutAkZjZ7ARjfFkXFui');
+      const withheld = new Uint8Array(8);
+      withheld[0] = 7;
+      let ata: Address = PAYER;
+      const plan = await planWith(
+        async (vault) => {
+          ata = await getAssociatedTokenAddress(mint, vault, T22);
+          return [{ ata, mint, program: T22, data: tokenData(mint, vault, 990n, [[2, withheld]]) }];
+        },
+        { [mint]: { owner: T22, data: new Uint8Array(82) } },
+      );
+      expect(plan.tokens.map((t) => t.ata)).toEqual([ata]);
+      expect(plan.skippedTokens).toHaveLength(0);
+      if (plan.migrate.type !== 'ed25519') throw new Error('ed25519 expected');
+      const [harvest, migrate] = plan.migrate.instructions;
+      expect(harvest!.programAddress).toBe(T22);
+      expect(Array.from(harvest!.data!)).toEqual([26, 4]);
+      expect(harvest!.accounts!.map((a) => a.address)).toEqual([mint, ata]);
+      expect(migrate).toBe(plan.migrate.instruction);
+    });
+
+    it('leaves a token whose mint is gone, or owned by another program', async () => {
+      const gone = address('9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin');
+      const foreign = address('So11111111111111111111111111111111111111112');
+      const plan = await planWith(
+        async (vault) => [
+          { ata: await getAssociatedTokenAddress(gone, vault, T22), mint: gone, program: T22, data: tokenData(gone, vault, 0n) },
+          { ata: await getAssociatedTokenAddress(foreign, vault, T22), mint: foreign, program: T22, data: tokenData(foreign, vault, 0n) },
+        ],
+        { [gone]: null, [foreign]: { owner: TOKEN_PROGRAM_ADDRESS, data: new Uint8Array(82) } },
+      );
+      expect(plan.tokens).toHaveLength(0);
+      expect(plan.skippedTokens.map((s) => s.reason)).toEqual(['mint-missing', 'mint-missing']);
+    });
+
+    it('leaves a token whose destination account is already frozen', async () => {
+      const plan = await planWith(
+        async (vault) => [
+          { ata: await getAssociatedTokenAddress(MINT, vault, TOKEN_PROGRAM_ADDRESS), mint: MINT, program: TOKEN_PROGRAM_ADDRESS, data: tokenData(MINT, vault, 5n) },
+        ],
+        { [MINT]: { owner: TOKEN_PROGRAM_ADDRESS, data: new Uint8Array(82) } },
+        async (v2Vault) => ({
+          [await getAssociatedTokenAddress(MINT, v2Vault, TOKEN_PROGRAM_ADDRESS)]: tokenData(MINT, v2Vault, 0n, [], 2),
+        }),
+      );
+      expect(plan.tokens).toHaveLength(0);
+      expect(plan.skippedTokens.map((s) => s.reason)).toEqual(['destination-frozen']);
+    });
+
+    it('moves a default-frozen mint when the destination is already thawed', async () => {
+      const mint = address('Ek5JdE3pHMjWMQAhxtBXPH3Z1SutAkZjZ7ARjfFkXFui');
+      const defaultFrozen = new Uint8Array(166 + 4 + 1);
+      defaultFrozen[165] = 1;
+      new DataView(defaultFrozen.buffer).setUint16(166, 6, true);
+      new DataView(defaultFrozen.buffer).setUint16(168, 1, true);
+      defaultFrozen[170] = 2;
+      const plan = await planWith(
+        async (vault) => [
+          { ata: await getAssociatedTokenAddress(mint, vault, T22), mint, program: T22, data: tokenData(mint, vault, 5n) },
+        ],
+        { [mint]: { owner: T22, data: defaultFrozen } },
+        async (v2Vault) => ({ [await getAssociatedTokenAddress(mint, v2Vault, T22)]: tokenData(mint, v2Vault, 0n) }),
+      );
+      expect(plan.tokens).toHaveLength(1);
+    });
+
+    it('reads mints in pages of at most 100', async () => {
+      const pages: number[] = [];
+      const many = Array.from({ length: 150 }, (_, i) => {
+        const b = new Uint8Array(32);
+        b[0] = 1 + (i >> 8);
+        b[1] = i & 0xff;
+        b[31] = 7;
+        return getAddressDecoder().decode(b);
+      });
+      const mintMap = Object.fromEntries(many.map((m) => [m, { owner: TOKEN_PROGRAM_ADDRESS, data: new Uint8Array(82) }]));
+      await expect(
+        planWith(
+          async (vault) =>
+            Promise.all(
+              many.map(async (m) => ({
+                ata: await getAssociatedTokenAddress(m, vault, TOKEN_PROGRAM_ADDRESS),
+                mint: m,
+                program: TOKEN_PROGRAM_ADDRESS,
+                data: tokenData(m, vault, 0n),
+              })),
+            ),
+          mintMap,
+          async () => ({}),
+          pages,
+        ),
+      ).resolves.toBeDefined();
+      expect(Math.max(...pages)).toBeLessThanOrEqual(100);
+    });
+  });
+
+  it("refuses a passkey owner whose relying party is not the v1 wallet's", async () => {
+    const { rpc, v1Wallet } = await fixture();
+    await expect(
+      new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+        payer: PAYER,
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: CREDENTIAL,
+          compressedPubkey: new Uint8Array(33).fill(0x7c),
+          rpId: 'lazor.sh',
+        },
+        v1Wallet,
+      }),
+    ).rejects.toThrow('relying party');
+  });
+
   it('creates a destination ATA per token and passes the quadruple to the program', async () => {
     const { rpc, v1Wallet, sourceAta } = await fixture({ token: true });
     const lk = new LazorKit(rpc, PROGRAM_ID);
@@ -510,6 +711,7 @@ describe('migrateV1Wallet by address', () => {
         // Read off the v1 authority account by findV1WalletsByOwner — a
         // WebAuthn assertion does not carry it.
         compressedPubkey: new Uint8Array(33).fill(0x7c),
+        rpId: 'portal.lazor.sh',
       },
       v1Wallet,
     });
@@ -571,11 +773,14 @@ describe('unmovable Token-2022 states', () => {
   it('mints that freeze new accounts', () =>
     expect(mintBlocker(mint([[6, new Uint8Array([2])]]))).toBe('frozen-on-arrival'));
   it('frozen accounts', () => expect(tokenAccountBlocker(tokenAccount([], 2))).toBe('frozen'));
-  it('accounts holding withheld transfer fees, but not empty ones', () => {
+  // Withheld fees only stop the account from closing, and anyone may harvest
+  // them — so they are not a reason to leave the balance behind.
+  it('withheld transfer fees are noted, not a blocker', () => {
     const withheld = new Uint8Array(8);
     withheld[0] = 5;
-    expect(tokenAccountBlocker(tokenAccount([[2, withheld]]))).toBe('withheld-fees');
-    expect(tokenAccountBlocker(tokenAccount([[2, new Uint8Array(8)]]))).toBeNull();
+    expect(tokenAccountBlocker(tokenAccount([[2, withheld]]))).toBeNull();
+    expect(tokenAccountWithheldFees(tokenAccount([[2, withheld]]))).toBe(true);
+    expect(tokenAccountWithheldFees(tokenAccount([[2, new Uint8Array(8)]]))).toBe(false);
   });
   it('accounts with the CPI guard on', () =>
     expect(tokenAccountBlocker(tokenAccount([[11, new Uint8Array([1])]]))).toBe('cpi-guard'));
