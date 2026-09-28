@@ -65,10 +65,10 @@ it is retired.
   and v2 `AddAuthority` never asks the key being added, so an attacker could
   list a victim's passkey on a wallet they control and receive the migration.
   The `userSeed` path had the same hole (v1 seeds are public). A wallet is now
-  reused only if `vetMigrationDestination` passes — exactly one authority, this
-  key at Owner rank, no live session, no unexpired deferred execution;
-  otherwise a fresh wallet is created, or, for a `userSeed` wallet, the call
-  throws. **Published `sdk-legacy` 1.1.x and `@lazorkit/sdk` 1.0.0-rc.2 have
+  reused only if it passes `vetMigrationDestination`, and only on the terms in
+  "Choosing the destination" below (the final rule, after three reviews);
+  otherwise a fresh wallet is created, or, for a `userSeed` or
+  `destinationUserSeed` wallet, the call throws. **Published `sdk-legacy` 1.1.x and `@lazorkit/sdk` 1.0.0-rc.2 have
   the hole** — no exposure yet, since v2 is not on mainnet, but do not use
   their `migrateV1Wallet` against it.
 - **Unmovable tokens are left out and reported.** Frozen accounts and
@@ -93,7 +93,8 @@ it is retired.
   takes any owner: a wallet with the victim's hash and the attacker's public
   key passed, and received the migration. It now also requires the stored
   public key and relying-party hash to match (both SDKs). The signature is
-  `vetMigrationDestination(wallet, owner)`.
+  now `vetMigrationDestination(wallet, owner, { watchMints }?)` (see
+  "Vetting a migration destination" below).
 - **More Token-2022 states are recognised as unmovable**: non-transferable
   mints and accounts, paused mints, mints that freeze new accounts, withheld
   transfer fees, CPI guard. New helpers `mintBlocker` / `tokenAccountBlocker`.
@@ -137,6 +138,207 @@ it is retired.
 - The v2 relayer does not sponsor the v1 id until it runs the sunset binary:
   full v1's Execute forwards every outer signer (H-3), so sponsoring it lets any
   v1 transaction conscript the fee payer.
+
+### Added — finding a returning passkey's own wallet (both SDKs)
+
+`CreateWallet` and `AddAuthority` take any key without its consent, on v1 and
+v2, and a passkey's credential-id hash is public — it sits in every authority
+account the passkey has. So "the first wallet that lists my credential", the
+lookup the docs showed as `const [wallet] = await
+client.findWalletsByAuthority(credentialIdHash)`, can be a wallet someone else
+planted: the victim's hash next to the attacker's public key, or the victim's
+real passkey added to the attacker's wallet. A user who funds it funds the
+attacker.
+
+The new lookup adopts a wallet only when (1) this passkey is an Owner on it,
+under this relying party, and the key stored there is the one a fresh assertion
+just proved; (2) nothing untrusted can spend from it — no other authority,
+live session, pending deferred execution, delegate / foreign close authority on
+the vault's token accounts, or vault handed to another program, apart from
+Ed25519 keys the integrator declares trusted; and (3) the passkey has signed
+for it before. Anything else comes back as `needsConfirmation`, for the user to
+choose from. Accounts too short to read count against the wallet rather than
+being skipped.
+
+The rules, the same in both packages. Each attack below was reproduced on a
+local validator; the read ordering is pinned with a stubbed RPC that serves
+each read from before or after one transaction.
+- **A pending deferred execution is never trusted**, whatever authority it
+  names (`pendingDeferred[].trusted` is always `false`). The authority PDA is
+  derived from `[lk2:authority, wallet, credentialIdHash]` and does not bind
+  the public key, and `ExecuteDeferred` does not re-check who authorized it: an
+  attacker can queue a drain from their own key at the victim's authority
+  address, remove it, re-create it holding the victim's real key, and leave.
+  The same seed can also land on a trusted Ed25519 key's address.
+- **Live through the expiry slot.** Sessions and deferred executions count
+  while `expiresAt >= slot`: the program refuses only once
+  `current_slot > expires_at`. One too short to read counts as live.
+- **`WalletFacts.tokenGrants`, and `watchMints`.** Token rights outlive every
+  authority: a delegate set with `Approve`, a close authority other than the
+  vault, or (SPL Token) the vault's canonical account for a watched mint whose
+  owner was moved off the vault with `SetAuthority`, which senders still pay
+  into. Each is reported for every SPL Token / Token-2022 account the vault
+  owns (kinds `delegate`, `closeAuthority`, `owner`, `unreadable`), trusted
+  when its grantee is in `trustedKeys`; an untrusted one makes
+  `controlledAlone` false. The watched mints are wSOL, USDC, USDT and devnet
+  USDC, plus every mint passed as `watchMints` to `describeWalletCandidates`,
+  `findOwnPasskeyWallet`, `vetMigrationDestination` (third argument,
+  `{ watchMints }`) and `migrateV1Wallet`. Nothing on chain leads from a moved
+  account back to the vault, so only a mint named in advance can be checked:
+  pass the mints your app receives. A malformed mint throws.
+- **`WalletFacts.vaultIsSystemAccount`.** An Owner without a policy can
+  `Execute` System `Assign` / `Allocate` on the vault (the vault signs via
+  `invoke_signed`); from then on the new owner program, not LazorKit, decides
+  what leaves it — then hand the wallet to the victim's passkey with
+  `TransferOwnership`. `controlledAlone` requires the vault to be missing or
+  owned by the System Program with no data, and no trusted key waives it.
+- **Dead wallets are left out.** A candidate whose wallet account is missing,
+  owned by another program or carries the wrong discriminator is dropped from
+  `describeWalletCandidates` — checked before its reads and again with them.
+  `MigrateWallet` closes the v1 wallet and only the authority that migrated;
+  another Owner passkey's v1 authority stays behind and, as v1, would have been
+  adopted ahead of the live v2 wallet, with nothing ever able to move funds
+  sent to it.
+- **Only a wallet the passkey has signed for is adopted; a never-used wallet
+  needs confirmation** (`WalletFacts.signatureCount`, the u32 replay counter
+  at offset 8 of this passkey's own authority, the same on v1: every authority
+  starts at 0 and only a signature verified against its stored key advances
+  it; 0 unless that authority is still intact). `TransferOwnership` hands a
+  wallet to a passkey without asking it, and its earlier Owner can have moved
+  the vault's canonical SPL Token account for any mint to themselves; it then
+  no longer lists as the vault's and nothing leads back to it, so for an
+  unwatched mint the wallet looks spotless — and a lamport more in its vault
+  ranked it above the user's own, so it was adopted and later deposits of that
+  mint went to the attacker. Now a wallet never signed for is only ever
+  offered, even the only one and with `trustedKeys`; the user's own wallet
+  before its first transaction, and the one a migration just created, are
+  confirmed once. Order: signed for first, then v1, then balance, then
+  address — the balance order is anyone's to change.
+- **A signature count can be forged by replay, so only the one wallet signed
+  for is adopted.** The program's passkey challenge binds the payer, the
+  counter and the instruction's arguments but not the wallet for
+  `CreateSession`, `AddAuthority`, `TransferOwnership` and `Authorize`. The
+  signature from a user's first such transaction on their own wallet can be
+  submitted again, within about 150 slots and through the same fee payer (the
+  relayer signs for anyone), on a wallet planted for their passkey, raising
+  its counter to 1 — reproduced on a local validator, where the planted wallet,
+  a lamport richer, was adopted. `pickOwnWallet` now adopts only when exactly
+  one wallet has `signatureCount > 0` and it is `controlledAlone`; two signed
+  for (alone or not) go to the user. `migrateV1Wallet` reuses a wallet only
+  when it is the one authority on the program storing this passkey that has
+  signed at all (any rank: an Admin seat's signature replays onto an Owner's).
+  Left open, until the program binds the wallet into the challenge: a copy of
+  a signature made where the passkey is not an Owner candidate (an Admin
+  seat) or on an authority since removed makes the planted wallet the only one
+  signed for, and `findOwnPasskeyWallet` adopts it.
+- **Consistent reads.** `describeWalletCandidates` and
+  `vetMigrationDestination` read the slot first, then in the order power flows
+  between accounts: the wallet's authorities; then its sessions and deferred
+  executions; then the wallet account, vault, watched token accounts and the
+  vault's token accounts. Each step asks the RPC for state at least as new as
+  the slot the previous one was answered at (`minContextSlot`). Read
+  concurrently, one transaction landing mid-read — a co-owner that opens a
+  session or approves a delegate and removes itself, a deferred execution that
+  runs and closes itself, a sole owner that assigns the vault away and hands
+  the wallet over — could show as none of it, especially behind a
+  load-balanced RPC. A node that has not reached the slot is asked again, up
+  to five times; then the call throws. `migrateV1Wallet` reads a vetted
+  destination's token accounts no older than its vet.
+- **Vetting a migration destination.** `vetMigrationDestination(wallet, owner,
+  { watchMints }?)` returns `null` or the reason, and passes only: a wallet
+  account of this program (missing, foreign-owned, another discriminator, or
+  only lamports: `<address> is not a wallet of program <id>`); exactly one
+  authority, this whole key at Owner rank (for a passkey the credential-id
+  hash, the public key and the relying party); no session or deferred
+  execution with `expiresAt >= slot`; a vault that is a plain system account
+  (a missing one is fine); and no token grant on the vault's token accounts —
+  no key is trusted here. The reason strings are for people, not parsing.
+- **Delivering a migration.** `migrateV1Wallet` refuses to deliver into an
+  existing destination token account that is not the v2 vault's alone —
+  another token program or owner, a delegate, a close authority other than the
+  vault, too short to read — and throws naming up to three
+  (`refusing to migrate into <wallet>: destination token account …`), rather
+  than skipping the token, which the closing v1 vault would strand. Fresh
+  destinations are unaffected; a frozen one is skipped as
+  `destination-frozen`. Bare lamports at a destination address no longer count
+  as an open token account, so a token whose mint freezes new accounts stays
+  in `skippedTokens` instead of failing the migration on-chain.
+- **Choosing the destination.** Without a `userSeed`, `migrateV1Wallet` reuses
+  an existing v2 wallet only if it passes the vet **and** the passkey has
+  signed for it (`signatureCount > 0`) **and** on no other authority of the
+  program, at any rank (see the replay above); it used to take the first that
+  passed vetting, which a planted one does. An Ed25519 owner's wallets, which record
+  no signatures, are never reused this way. Otherwise the destination is
+  `destinationUserSeed`'s wallet or a fresh random seed's (returned as
+  `destinationUserSeed` — persist it).
+- **`destinationUserSeed` is vetted.** A wallet already at the named seed is
+  used only if it passes the vet, as a `userSeed` wallet is; otherwise the
+  call throws `refusing to migrate into the destinationUserSeed's v2 wallet: …`
+  (`userSeed's`). A wallet address holding only lamports (anyone can send
+  them; a v1 `userSeed` is public) is no longer refused as a wallet with
+  "0 authorities": the wallet is created there, as `CreateWallet` allows.
+- **Setup and migrate in one transaction.** The owner signs the destination
+  vault, not who owns its wallet. `setupInstructions` must land before the
+  migrate, in the same transaction — where they succeed or fail together — or
+  an earlier one that is confirmed *successful* before the migrate is sent: if
+  someone else's `CreateWallet` at that seed lands first, the setup fails, and
+  a migrate sent anyway pays into their vault. Both SDKs' JSDoc and READMEs say
+  so.
+
+**`@lazorkit/sdk-legacy`**
+- `client.findOwnPasskeyWallet({ credentialIdHash, rpId, proof, trustedKeys?, watchMints?, includeV1? })`
+  → `{ adopt, needsConfirmation, unproven }`. Both empty: the passkey provably
+  owns no wallet, so create one. `unproven` counts wallets listing the
+  credential with another public key.
+- The steps on their own: `client.findPasskeyWalletCandidates({ credentialIdHash, rpId, includeV1? })`
+  (Owner-rank passkey authorities under this rpId — v2 hits, then the paired v1
+  deployment's), `verifyOwnershipProof(candidates, proof, rpId)`,
+  `client.describeWalletCandidates(candidates, { trustedKeys?, watchMints? })` (vault
+  balance, other authorities, live sessions, pending deferred executions,
+  `vaultIsSystemAccount`, `tokenGrants`, `controlledAlone`, `signatureCount`)
+  and `pickOwnWallet(facts)` (adopts only the one wallet with
+  `signatureCount > 0`, when it is `controlledAlone`; order: signed for, v1,
+  fullest vault, wallet address).
+- `client.vetMigrationDestination(wallet, owner, { watchMints }?)`.
+- `createOwnershipChallenge()` (32 random bytes) and
+  `selectWalletByAddress(candidates, address)` (vault or wallet address).
+- Types `PasskeyWalletCandidate`, `OwnershipProof`, `WalletFacts` (keys as
+  `PublicKey`, `lamports: number`, `signatureCount: number`),
+  `AuthorityRoleName`; constants `V1_DISC_SESSION`, `V1_DISC_DEFERRED_EXEC`.
+- New dependency `@noble/curves` ^1.9.7 for P-256 verification. It stays on
+  1.x: 2.x `verify` prehashes by default.
+- The README ("Finding a returning user's wallet"), the repo-root README, the
+  `findWalletsByAuthority` JSDoc, `docs/use-cases/eoa-with-passkey-spender.md`
+  and the migration guides (`docs/migration-ui-flow.md`,
+  `docs/migration-v1-to-v2.md`) no longer present a lookup by credential hash
+  as the way to find a user's wallet, or "a wallet this key holds alone" as
+  the migration's reuse rule. `findWalletsByAuthority` itself is unchanged — a
+  raw lookup.
+
+**`@lazorkit/sdk`** (kit)
+- The same API and rules in `src/ownership.ts` (pure functions) and on the kit
+  `LazorKit` client (`findPasskeyWalletCandidates`, `describeWalletCandidates`,
+  `findOwnPasskeyWallet`, `vetMigrationDestination(wallet, owner, { watchMints }?)`),
+  in kit types: `Address` strings in place of `PublicKey`, `lamports: bigint`,
+  and plain `Uint8Array` bytes. `WalletFacts` has the same fields in the same
+  order as sdk-legacy's, `signatureCount: number` included.
+- Constants `V1_DISC_SESSION`, `V1_DISC_DEFERRED_EXEC`; new dependency
+  `@noble/curves` ^1.9.7.
+- `findWalletsByAuthority` gains JSDoc saying it is a raw lookup and pointing
+  to `findOwnPasskeyWallet` (the kit had no `[0]` example to fix).
+- The README gains "Finding a returning user's wallet", and "Migrating a v1
+  wallet" now migrates the proven wallet from that flow (`version: 1`, its
+  stored `publicKey` and `rpId`) instead of the first hit of
+  `findV1WalletsByOwner(credentialIdHash)`. Its Ed25519 branch sends
+  `migrate.instructions` (any fee harvests, then MigrateWallet), not the bare
+  `migrate.instruction`, which left a transfer-fee token's source account
+  unclosable.
+- Brought in line with sdk-legacy: `describeWalletCandidates([], …)` throws on
+  a malformed `trustedKeys` or `watchMints` entry instead of returning `[]`
+  unchecked; `migrateV1Wallet` no longer reads a reused destination's wallet
+  account again after its vet (the pinned vet already found it, and no v2
+  instruction closes a wallet), so a lagging node cannot fail the migration
+  with "is no longer on chain".
 
 ### Added — `CloseExpiredSession` (instruction 18)
 

@@ -41,3 +41,15 @@ export * from './signing';
 export * from './compact';
 export * from './client';
 export * from './transactions';
+// The chain reads behind `LazorKitClient.findPasskeyWalletCandidates` /
+// `describeWalletCandidates` stay internal; reach them through the client.
+export {
+  createOwnershipChallenge,
+  verifyOwnershipProof,
+  pickOwnWallet,
+  selectWalletByAddress,
+  type PasskeyWalletCandidate,
+  type OwnershipProof,
+  type AuthorityRoleName,
+  type WalletFacts,
+} from './ownership';

@@ -62,18 +62,56 @@ price of its rent. The SDK therefore enumerates every vault token account
 `migrateV1Wallet` picks where the funds land:
 
 - with `userSeed`: that seed's v2 wallet;
-- otherwise: a v2 wallet this owner already has, or a fresh one from a random
-  seed (returned as `destinationUserSeed` — persist it).
+- otherwise: a v2 wallet this owner already has, **if the owner is a passkey
+  that has signed for it before** (`signatureCount > 0`), and on no other
+  authority of the program at any rank, and it passes the vet below — an
+  Ed25519 owner's wallets are never reused this way, since Ed25519 signing
+  records nothing on the authority;
+- failing that: the wallet of `destinationUserSeed`, or of a fresh random seed
+  (returned as `destinationUserSeed` — persist it).
 
-A wallet is only reused if `vetMigrationDestination` passes: **exactly one
-authority — this key, at Owner rank — no live session, no unexpired deferred
-execution.** Being *an* authority on a wallet proves nothing. v2 `CreateWallet`
-takes the owner as plain data and `AddAuthority` never asks the key being added,
-so anyone can build a wallet that lists a victim's passkey and still keep a hand
-on the vault through another authority, a session or a pending authorization.
+Being *an* authority on a wallet proves nothing. v2 `CreateWallet` takes the
+owner as plain data, `AddAuthority` never asks the key being added, and
+`TransferOwnership` hands a wallet to a key without asking it — so anyone can
+build a wallet that lists a victim's passkey and keep a hand on the vault. Hence
+`vetMigrationDestination(wallet, owner, { watchMints })`: the address must be a
+wallet of this program with **exactly one authority — this whole key (for a
+passkey: credential-id hash, public key and relying party) at Owner rank — no
+session or deferred execution the program still accepts** (live through its
+expiry slot; unreadable counts as live), **a vault that is still a plain system
+account**, and **no delegate, foreign close authority, handed-away canonical
+account of a watched mint, or unreadable account among the vault's token
+accounts**. It reads the authorities, then sessions and deferred executions,
+then the wallet, vault and token accounts, each at or after the slot of the
+read before, so a transaction landing mid-vet cannot be half-seen.
+
+The vet cannot see an SPL Token account an earlier holder moved off the vault
+for a mint nobody named: it no longer lists as the vault's, and nothing on
+chain leads back to it. The canonical accounts of wSOL, USDC, USDT, devnet
+USDC and every mint in `watchMints` are checked; for the rest, only a wallet
+the passkey has already signed for — one its user chose — is reused unasked.
+Even that count can be forged by replay: the program's passkey challenge does
+not name the wallet for `CreateSession`, `AddAuthority`, `TransferOwnership`
+or `Authorize`, so the signature from a user's first such transaction on one
+wallet can be submitted again, within about 150 slots and through the same fee
+payer, on a wallet planted for their passkey. So a wallet is reused only when
+it is the one authority the passkey has signed on; with two, either may be the
+copy, and a fresh wallet is created.
+
 The v1 `user_seed` is public (it is in the v1 `CreateWallet` instruction data),
-so a `userSeed` wallet can be squatted too; one that fails the check throws
-rather than being used.
+so a `userSeed` wallet can be squatted, and so can any seed once it shows in a
+transaction. A wallet at `userSeed` or `destinationUserSeed` is therefore
+vetted, and one that fails throws rather than being used. An address holding
+only lamports is not a wallet: the wallet is created there (`CreateWallet`
+builds over them), so a few lamports cannot block a migration. An existing
+destination token account must be the new vault's alone, or the call throws
+naming it.
+
+**Setup and migrate belong in one transaction.** The owner signs the
+destination vault, not who owns its wallet. Sent together they succeed or fail
+together; sent separately, the migrate goes only after the setup transaction is
+confirmed successful — if someone else's `CreateWallet` at that seed lands
+first, the setup fails, and a migrate sent anyway pays into their vault.
 
 ## What is proven
 
@@ -116,18 +154,25 @@ destination token accounts and binds the right payload:
 import { LazorKitClient } from '@lazorkit/sdk-legacy';
 
 const client = new LazorKitClient(connection); // the v2 program id
-const [found] = await client.findV1WalletsByOwner(credentialIdHash, 'secp256r1');
+// A passkey user's v1 wallet: the `version: 1` result of findOwnPasskeyWallet
+// (proven against a fresh assertion), not the first hit of findV1WalletsByOwner
+// — v1's CreateWallet took any owner without its consent too.
+const { adopt, needsConfirmation } = await client.findOwnPasskeyWallet({ credentialIdHash, rpId, proof });
+const wallet = adopt ?? (await askUserToChoose(needsConfirmation));
+if (wallet?.version !== 1) return; // nothing to migrate
 
 const plan = await client.migrateV1Wallet({
   payer,
-  owner: { type: 'secp256r1', credentialIdHash, compressedPubkey: found.ownerPubkey, rpId },
-  v1Wallet: found.wallet,
+  owner: { type: 'secp256r1', credentialIdHash, compressedPubkey: wallet.publicKey, rpId },
+  v1Wallet: wallet.walletPda,
+  // watchMints: [...],             // SPL Token mints your app receives
   // excludeTokenAccounts: [...],   // anything the user chose to abandon
 });
-// show plan.skippedTokens to the user before they sign
-// send plan.setupInstructions, then:
-//   passkey:  sign plan.migrate.challenge, send plan.migrate.finalize(response)
-//   ed25519:  send plan.migrate.instruction signed by payer + owner
+// show plan.skippedTokens to the user before they sign; persist
+// plan.destinationUserSeed when set, and select plan.destinationWallet
+// send plan.setupInstructions and the migrate in one transaction:
+//   passkey:  sign plan.migrate.challenge, add plan.migrate.finalize(response)
+//   ed25519:  add plan.migrate.instructions, signed by payer + owner
 ```
 
 The v1 program id is found by pairing (`legacyProgramIdFor`): mainnet v2 pairs

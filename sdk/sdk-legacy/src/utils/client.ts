@@ -94,6 +94,25 @@ import {
 import { concatBytes } from './bytes';
 import { buildCompactLayout } from './compact';
 import { serializeActions, type SessionAction } from './actions';
+import {
+  deferredExpiry,
+  describePasskeyWallets,
+  grantPhrase,
+  isPlainSystemAccount,
+  pickOwnWallet,
+  readAccounts,
+  readSpendingState,
+  scanPasskeyWalletCandidates,
+  sessionExpiry,
+  tokenAccountProblem,
+  vaultTokenGrants,
+  verifyOwnershipProof,
+  watchedMints,
+  watchedTokenAccounts,
+  type OwnershipProof,
+  type PasskeyWalletCandidate,
+  type WalletFacts,
+} from './ownership';
 import type {
   CreateWalletOwner,
   AdminSigner,
@@ -102,7 +121,7 @@ import type {
   Secp256r1Params,
   DeferredPayload,
 } from './types';
-import type { AccountMeta } from '@solana/web3.js';
+import type { AccountInfo, AccountMeta } from '@solana/web3.js';
 
 // ─── Prepared operation types (for secp256r1 prepare/finalize flow) ──
 
@@ -1354,7 +1373,14 @@ export class LazorKitClient {
   // ─── Wallet lookup ─────────────────────────────────────────────────
 
   /**
-   * Look up wallets by credential.
+   * Look up wallets by credential — a raw lookup: every wallet that lists it,
+   * at any rank.
+   *
+   * Not the way to find a returning user's wallet. A credential-id hash is
+   * public (it sits in every authority account the passkey has), and
+   * `CreateWallet` / `AddAuthority` take any key without its consent, so
+   * anyone can plant a wallet that lists it. Use {@link findOwnPasskeyWallet},
+   * which proves the passkey and checks who else can spend.
    *
    * @param credential - 32 bytes: Ed25519 pubkey or Secp256r1 credentialIdHash
    * @param authorityType - `'secp256r1'` (default) or `'ed25519'`
@@ -1362,12 +1388,17 @@ export class LazorKitClient {
    *
    * @example Passkey user returns
    * ```typescript
-   * const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
+   * const challenge = createOwnershipChallenge();
+   * // navigator.credentials.get({ publicKey: { challenge, rpId } }) → proof
+   * const { adopt, needsConfirmation } = await client.findOwnPasskeyWallet({
+   *   credentialIdHash, rpId, proof,
+   * });
    * ```
    *
    * @example Ed25519 lookup
    * ```typescript
-   * const [wallet] = await client.findWalletsByAuthority(pubkeyBytes, 'ed25519');
+   * // Every wallet listing this key — including any a stranger added it to.
+   * const records = await client.findWalletsByAuthority(pubkeyBytes, 'ed25519');
    * ```
    */
   async findWalletsByAuthority(
@@ -1420,6 +1451,144 @@ export class LazorKitClient {
   }
 
   /**
+   * Every wallet on which this passkey is an Owner, created under `rpId` — on
+   * this client's program and, unless `includeV1` is `false`, on the v1
+   * deployment paired with it (`version: 1`, a wallet not yet migrated). v2
+   * hits come first.
+   *
+   * Nothing here is proven: the credential-id hash is public, and anyone can
+   * create a wallet listing it next to their own public key. Keep only the
+   * candidates a fresh assertion verifies against ({@link verifyOwnershipProof}),
+   * or use {@link findOwnPasskeyWallet}, which does all of it.
+   *
+   * One `getProgramAccounts` per program, which some RPC providers
+   * rate-limit or refuse; use an endpoint that allows it.
+   */
+  async findPasskeyWalletCandidates(params: {
+    credentialIdHash: Uint8Array;
+    rpId: string;
+    /** Also scan the v1 deployment paired with this client's program. Default `true`. */
+    includeV1?: boolean;
+  }): Promise<PasskeyWalletCandidate[]> {
+    return scanPasskeyWalletCandidates(this.connection, this.programId, params);
+  }
+
+  /**
+   * Who, besides this passkey, can spend from each candidate: its other
+   * authorities, live sessions, pending deferred executions, delegates or
+   * foreign close authorities on the vault's token accounts, and whether the
+   * vault is still a plain system account — plus the vault balance.
+   * `controlledAlone` is true when the vault is a plain system account and
+   * every one of the others is trusted.
+   *
+   * `trustedKeys` are the integrator's own Ed25519 keys (a backend admin, a
+   * session key it issued): an authority, session or token grant held by one
+   * of them does not count against the wallet. A passkey is never trusted by
+   * declaration, and a pending deferred execution never is: the program does
+   * not tie it to the key that signed it. Nor does any key make up for a vault
+   * handed to another program (`vaultIsSystemAccount: false`).
+   *
+   * A candidate whose wallet account no longer exists — a migrated v1 wallet
+   * leaves its other authorities behind — is left out of the result.
+   *
+   * `watchMints` are SPL Token mints whose canonical vault token account is
+   * checked for a changed owner, on top of wSOL, USDC, USDT and devnet USDC.
+   * Pass the mints your app receives: one handed away for any other mint
+   * cannot be found.
+   *
+   * `signatureCount` is how many times this passkey has signed for the
+   * wallet. 0 for a wallet someone handed to it, which `controlledAlone`
+   * cannot fully vouch for: an SPL Token account moved off the vault is only
+   * found for the watched mints. Not proof on its own: a signature the passkey
+   * made on another wallet can be replayed onto this one (see
+   * {@link pickOwnWallet}).
+   *
+   * Reads the slot once, then every candidate's wallet account; then per
+   * candidate, four at a time, in the order power flows: its authorities;
+   * then its sessions and deferred executions; then its wallet account,
+   * vault, watched token accounts and the vault's token accounts. Each step
+   * asks the RPC for state at least as new as the one before
+   * (`minContextSlot`), so a transaction that lands mid-read — a co-owner
+   * that opens a session and removes itself, say — cannot be half-seen. A
+   * node that has not caught up is asked again, up to five times, then the
+   * call throws.
+   */
+  async describeWalletCandidates(
+    candidates: PasskeyWalletCandidate[],
+    options?: { trustedKeys?: (PublicKey | string)[]; watchMints?: (PublicKey | string)[] },
+  ): Promise<WalletFacts[]> {
+    return describePasskeyWallets(this.connection, candidates, options);
+  }
+
+  /**
+   * Find a returning passkey user's own wallet.
+   *
+   * Candidates are found by credential-id hash, kept only if `proof` — an
+   * assertion over a challenge from {@link createOwnershipChallenge} — verifies
+   * against the key stored on them, and then described. `adopt` is the one
+   * proven wallet this passkey has signed for, when nothing untrusted can
+   * spend from it; use it. Otherwise `needsConfirmation` lists the proven
+   * wallets for the user to choose from (show the vault address; never pick
+   * for them). Both empty: this passkey owns no live wallet yet — create one.
+   * `unproven` counts wallets that list the credential with some other public
+   * key; someone planted them, and they are ignored.
+   *
+   * A wallet this passkey has never signed for is never adopted, even the
+   * only one and even with `trustedKeys`: anyone can hand a wallet to a
+   * passkey, and what its earlier holder left on the vault is not all
+   * readable. Nor is any wallet when two have been signed for: a signature
+   * can be replayed from one wallet onto another (see {@link pickOwnWallet}).
+   * So a user whose wallet was created but not used yet confirms it once;
+   * after the first transaction it is adopted. An app that just created or
+   * migrated into a wallet already knows it and need not look it up.
+   *
+   * @example
+   * ```typescript
+   * const challenge = createOwnershipChallenge();
+   * const credential = await navigator.credentials.get({ publicKey: { challenge, rpId } });
+   * const response = credential.response as AuthenticatorAssertionResponse;
+   * const { adopt, needsConfirmation } = await client.findOwnPasskeyWallet({
+   *   credentialIdHash: sha256(new Uint8Array(credential.rawId)),
+   *   rpId,
+   *   proof: {
+   *     challenge,
+   *     signature: new Uint8Array(response.signature),
+   *     authenticatorData: new Uint8Array(response.authenticatorData),
+   *     clientDataJson: new Uint8Array(response.clientDataJSON),
+   *   },
+   * });
+   * ```
+   */
+  async findOwnPasskeyWallet(params: {
+    credentialIdHash: Uint8Array;
+    rpId: string;
+    proof: OwnershipProof;
+    trustedKeys?: (PublicKey | string)[];
+    /** SPL Token mints to check the vault's canonical account of; see describeWalletCandidates. */
+    watchMints?: (PublicKey | string)[];
+    includeV1?: boolean;
+  }): Promise<{
+    adopt: WalletFacts | null;
+    needsConfirmation: WalletFacts[];
+    /** found by hash but not proven */
+    unproven: number;
+  }> {
+    const candidates = await this.findPasskeyWalletCandidates({
+      credentialIdHash: params.credentialIdHash,
+      rpId: params.rpId,
+      includeV1: params.includeV1,
+    });
+    const proven = verifyOwnershipProof(candidates, params.proof, params.rpId);
+    const unproven = candidates.length - proven.length;
+    if (proven.length === 0) return { adopt: null, needsConfirmation: [], unproven };
+    const facts = await this.describeWalletCandidates(proven, {
+      trustedKeys: params.trustedKeys,
+      watchMints: params.watchMints,
+    });
+    return { ...pickOwnWallet(facts), unproven };
+  }
+
+  /**
    * Throws unless `owner` is exactly the passkey on this v1 authority — its
    * public key and the relying party it was created under. `migrateV1Wallet`
    * uses `owner` to create or vet the v2 destination, where a wrong rpId would
@@ -1446,44 +1615,94 @@ export class LazorKitClient {
    * Being *an* authority on a wallet proves nothing: anyone can add your key
    * to a wallet they control, then hand themselves the vault through another
    * authority, a session, or a pending deferred execution — none of which the
-   * migration's signature covers. So the bar is: exactly one authority, which
-   * is this key at Owner rank, no live session, no unexpired deferred.
+   * migration's signature covers. Nor does handing the wallet over with
+   * `TransferOwnership` undo what its earlier Owner did to the vault itself:
+   * `Assign` it to another program or `Allocate` it data (the vault signs for
+   * an Owner's `Execute`), or leave a delegate or a close authority on its
+   * token accounts. So the bar is: exactly one authority, which is this key
+   * at Owner rank; no session or deferred execution the program would still
+   * accept (expiry at or after the current slot); a vault that is a plain
+   * system account, or not created yet; and no token account of the vault's
+   * with a delegate, a close authority other than the vault, or a canonical
+   * account moved to another owner for a watched mint (wSOL, USDC, USDT, devnet
+   * USDC, and any in `watchMints`).
    *
    * For a passkey, "this key" means all of it: the credential-id hash, the
    * public key and the relying party. The credential-id hash alone is public —
    * it sits in every authority account the passkey has — and `CreateWallet`
    * takes any owner without its consent, so a wallet with the victim's hash
    * and the attacker's public key would otherwise pass.
+   *
+   * Passing is not proof the wallet is clean. An earlier holder could have
+   * handed an SPL Token account of the vault's, for any mint not watched, to
+   * someone else, and nothing on chain leads back to it; senders would still
+   * pay into it. Which is why `migrateV1Wallet` reuses a wallet it finds by
+   * itself only if it is the one wallet the passkey has signed on.
+   *
+   * An address that is not a wallet of this program — including one that only
+   * holds lamports — fails; `migrateV1Wallet` creates a wallet there instead.
+   *
+   * Reads in the same order as {@link describeWalletCandidates} — the slot,
+   * then the authorities, then sessions and deferred executions, then the
+   * wallet account, vault and token accounts — each step at or after the slot
+   * of the one before, so no transaction is half-seen.
+   *
+   * Fails closed: a session or deferred execution too short to read its expiry
+   * counts as live, a token account too short to read as a grant.
    */
   async vetMigrationDestination(
     wallet: PublicKey,
     owner: CreateWalletOwner,
+    options: { watchMints?: (PublicKey | string)[] } = {},
   ): Promise<string | null> {
+    return (await this.inspectMigrationDestination(wallet, owner, watchedMints(options.watchMints))).problem;
+  }
+
+  /**
+   * {@link vetMigrationDestination}, plus how many times the passkey has signed
+   * for the wallet (its authority's replay counter; 0 for an Ed25519 owner,
+   * which has none, and whenever there is a problem), and the slot the vet's
+   * newest read was answered at: reads that must not see older state (the
+   * migration's destination token accounts) are made at or after it.
+   */
+  private async inspectMigrationDestination(
+    wallet: PublicKey,
+    owner: CreateWalletOwner,
+    mints: PublicKey[],
+  ): Promise<{ problem: string | null; signatureCount: number; slot: number }> {
     const { authType, credentialOrPubkey: credential, secp256r1Pubkey, rpId } =
       resolveOwnerFields(owner);
-    const scan = (disc: number, walletOffset: number) =>
-      this.connection.getProgramAccounts(this.programId, {
-        encoding: 'base64',
-        filters: [
-          { memcmp: { offset: 0, bytes: Buffer.from([disc]).toString('base64'), encoding: 'base64' } },
-          {
-            memcmp: {
-              offset: walletOffset,
-              bytes: wallet.toBuffer().toString('base64'),
-              encoding: 'base64',
-            },
-          },
-        ],
-      });
-    const [authorities, sessions, deferred, slot] = await Promise.all([
-      scan(ACCOUNT_DISCRIMINATOR.AUTHORITY, 16),
-      scan(ACCOUNT_DISCRIMINATOR.SESSION, 8),
-      scan(ACCOUNT_DISCRIMINATOR.DEFERRED_EXEC, 72),
-      this.connection.getSlot().then((v) => BigInt(v)),
-    ]);
+    // The slot first: one older than the scans can only count more things live.
+    const slot = BigInt(await this.connection.getSlot());
+    const [vault] = this.findVault(wallet);
+    const watched = watchedTokenAccounts(vault, mints);
+    const read = await readSpendingState(
+      this.connection,
+      this.programId,
+      wallet,
+      vault,
+      {
+        authority: ACCOUNT_DISCRIMINATOR.AUTHORITY,
+        session: ACCOUNT_DISCRIMINATOR.SESSION,
+        deferred: ACCOUNT_DISCRIMINATOR.DEFERRED_EXEC,
+      },
+      [wallet, vault, ...watched.map((w) => w.address)],
+    );
+    const { authorities, sessions, deferred, ownedTokens } = read;
+    const [walletInfo, vaultInfo, ...watchedInfos] = read.infos;
+    const fail = (problem: string) => ({ problem, signatureCount: 0, slot: read.slot });
     const where = wallet.toBase58();
+    if (
+      !walletInfo ||
+      !walletInfo.owner.equals(this.programId) ||
+      walletInfo.data[0] !== ACCOUNT_DISCRIMINATOR.WALLET
+    ) {
+      return fail(`${where} is not a wallet of program ${this.programId.toBase58()}`);
+    }
     if (authorities.length !== 1) {
-      return `wallet ${where} has ${authorities.length} authorities; a migration destination must have only its owner`;
+      return fail(
+        `wallet ${where} has ${authorities.length} authorities; a migration destination must have only its owner`,
+      );
     }
     const a = authorities[0].account.data;
     if (
@@ -1491,7 +1710,7 @@ export class LazorKitClient {
       a[2] !== ROLE_OWNER ||
       !Buffer.from(a.subarray(48, 80)).equals(Buffer.from(credential))
     ) {
-      return `wallet ${where} is not owned by this key alone`;
+      return fail(`wallet ${where} is not owned by this key alone`);
     }
     if (
       authType === AUTH_TYPE_SECP256R1 &&
@@ -1500,15 +1719,79 @@ export class LazorKitClient {
           Buffer.from(sha256(Buffer.from(rpId ?? '', 'utf8'))),
         ))
     ) {
-      return `wallet ${where} lists this passkey's credential with another public key or relying party`;
+      return fail(`wallet ${where} lists this passkey's credential with another public key or relying party`);
     }
-    if (sessions.some((x) => x.account.data.readBigUInt64LE(72) > slot)) {
-      return `wallet ${where} has a live session`;
+    // The program refuses a session or deferred execution only once the slot
+    // is past its expiry; one too short to read counts as live.
+    if (sessions.some((x) => sessionExpiry(x.account.data) >= slot)) {
+      return fail(`wallet ${where} has a live session`);
     }
-    if (deferred.some((x) => x.account.data.readBigUInt64LE(168) > slot)) {
-      return `wallet ${where} has a pending deferred execution`;
+    if (deferred.some((x) => deferredExpiry(x.account.data) >= slot)) {
+      return fail(`wallet ${where} has a pending deferred execution`);
     }
-    return null;
+    if (!isPlainSystemAccount(vaultInfo)) {
+      return fail(
+        vaultInfo!.owner.equals(SystemProgram.programId)
+          ? `wallet ${where}'s vault ${vault.toBase58()} carries data, so it is no longer a plain system account`
+          : `wallet ${where}'s vault ${vault.toBase58()} is owned by program ${vaultInfo!.owner.toBase58()}, not the System Program`,
+      );
+    }
+    const [grant] = vaultTokenGrants(
+      vault,
+      ownedTokens,
+      watched.map((w, i) => ({ ...w, info: watchedInfos[i] })),
+      new Set(),
+    );
+    if (grant) {
+      return fail(`wallet ${where}'s vault token account ${grant.tokenAccount.toBase58()} ${grantPhrase(grant)}`);
+    }
+    // Only the key this authority stores advances its counter (Ed25519 never
+    // does); the checks above made that key this passkey.
+    return {
+      problem: null,
+      signatureCount: authType === AUTH_TYPE_SECP256R1 ? Buffer.from(a).readUInt32LE(8) : 0,
+      slot: read.slot,
+    };
+  }
+
+  /**
+   * Every authority on this program that stores `owner`'s whole passkey — its
+   * credential-id hash, public key and relying party — and that has taken a
+   * signature (replay counter above 0), on any wallet, at any rank. Only this
+   * passkey's signatures, first made or replayed, advance such a counter.
+   */
+  private async signedPasskeyAuthorities(
+    owner: CreateWalletOwner,
+  ): Promise<{ walletPda: PublicKey; authorityPda: PublicKey; role: number }[]> {
+    const { credentialOrPubkey: credential, secp256r1Pubkey, rpId } = resolveOwnerFields(owner);
+    const rpIdHash = Buffer.from(sha256(Buffer.from(rpId ?? '', 'utf8')));
+    const accounts = await this.connection.getProgramAccounts(this.programId, {
+      encoding: 'base64',
+      filters: [
+        {
+          memcmp: {
+            offset: 0,
+            bytes: Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY, AUTH_TYPE_SECP256R1]).toString('base64'),
+            encoding: 'base64',
+          },
+        },
+        { memcmp: { offset: 48, bytes: Buffer.from(credential).toString('base64'), encoding: 'base64' } },
+        { memcmp: { offset: 113, bytes: rpIdHash.toString('base64'), encoding: 'base64' } },
+      ],
+    });
+    return accounts
+      .filter(
+        ({ account: { data } }) =>
+          data.length >= 145 &&
+          data.subarray(80, 113).equals(Buffer.from(secp256r1Pubkey!)) &&
+          data.subarray(113, 145).equals(rpIdHash) &&
+          data.readUInt32LE(8) > 0,
+      )
+      .map(({ pubkey, account: { data } }) => ({
+        walletPda: new PublicKey(data.subarray(16, 48)),
+        authorityPda: pubkey,
+        role: data[2],
+      }));
   }
 
   /**
@@ -2380,11 +2663,19 @@ export class LazorKitClient {
    * exist yet, and a destination token account for every token being moved) and
    * the MigrateWallet step.
    *
-   * Send `setupInstructions` first, then the migrate:
-   *  - Ed25519: sign `migrate.instruction` with the payer and the owner key.
+   * `setupInstructions` must land before the migrate, in the same transaction
+   * or an earlier one:
+   *  - Ed25519: send `migrate.instructions` (any fee harvests, then the
+   *    migrate), signed by the payer and the owner key.
    *  - Secp256r1: have the passkey sign `migrate.challenge`, pass the WebAuthn
-   *    response to `migrate.finalize`, and send the returned
-   *    `[precompile, migrate]`.
+   *    response to `migrate.finalize`, and send what it returns
+   *    (`[...harvests, precompile, migrate]`).
+   * One transaction makes the two succeed or fail together; prefer it when
+   * everything fits. Sent separately, the migrate goes only after the setup
+   * transaction is confirmed *successful*: what the owner signs names the
+   * destination vault, not who owns its wallet, so if someone else's
+   * `CreateWallet` at that seed lands first, the setup fails and a migrate
+   * sent anyway pays into their vault.
    *
    * Identify the v1 wallet in one of two ways:
    *  - `userSeed`, when the app still has the seed the wallet was created with.
@@ -2394,17 +2685,40 @@ export class LazorKitClient {
    *    that key.
    *
    * The v2 destination follows: with `userSeed` it is that seed's wallet;
-   * otherwise an existing v2 wallet for this owner is reused, and if there is
-   * none a fresh one is created from `destinationUserSeed` or a random seed.
-   * An existing wallet is only used if this owner holds it alone (see
-   * {@link vetMigrationDestination}); a `userSeed` wallet that fails that throws.
+   * otherwise an existing v2 wallet is reused only if this owner is a passkey
+   * that has already signed for it — and on no other authority of this
+   * program, at any rank — and if there is none a fresh one is created from
+   * `destinationUserSeed` or a random seed. An Ed25519 owner's
+   * wallets are never reused this way (its authority records no signatures);
+   * name one with `destinationUserSeed`. A wallet is only ever used if this
+   * owner holds it alone (see {@link vetMigrationDestination}); a `userSeed` or
+   * `destinationUserSeed` wallet that fails that throws. An address holding
+   * nothing but lamports is not a wallet yet, and one is created there.
    * The seed used is returned as `destinationUserSeed` when one was generated,
    * so the caller can persist it.
+   *
+   * Why not any wallet that lists this owner: `TransferOwnership` hands one
+   * over without asking, and the vetting cannot see everything its earlier
+   * holder left behind — an SPL Token account of the vault's, for a mint not
+   * watched (see `watchMints`), handed to someone else, into which later
+   * deposits of that mint would go. A wallet the passkey signed for is one its
+   * user chose — unless the signature was replayed there from another wallet,
+   * which the program's challenge does not name (see {@link pickOwnWallet});
+   * so when the passkey has signed on two authorities, neither wallet is
+   * reused. A `userSeed` wallet is vetted but cannot be held to that bar
+   * (the one this call creates has no signature on it either, until used);
+   * because the seed is public, pass `v1Wallet` without `userSeed` (a fresh
+   * destination) when a v2 wallet already exists at the userSeed and this app
+   * did not create it.
    *
    * Only an Owner-rank v1 authority may migrate; throws otherwise, or if no v1
    * wallet is found. Every vault-owned token account (SPL Token and Token-2022)
    * that can move is migrated in one call; frozen accounts, transfer-hook mints
-   * and `excludeTokenAccounts` come back in `skippedTokens` instead.
+   * and `excludeTokenAccounts` come back in `skippedTokens` instead. A
+   * destination token account that already exists must be the v2 vault's
+   * alone — owned by it, with no delegate and no close authority but the
+   * vault — or this throws, naming it: whoever holds such a right would get
+   * what is delivered there.
    */
   async migrateV1Wallet(params: {
     payer: PublicKey;
@@ -2424,6 +2738,13 @@ export class LazorKitClient {
     v1ProgramId?: PublicKey;
     /** Vault token accounts to leave behind, e.g. ones the user marked as spam. */
     excludeTokenAccounts?: PublicKey[];
+    /**
+     * SPL Token mints whose canonical account in an existing destination vault
+     * is checked for a changed owner, on top of wSOL, USDC, USDT and devnet
+     * USDC; see vetMigrationDestination. The mints this migration moves are
+     * checked regardless.
+     */
+    watchMints?: (PublicKey | string)[];
     /**
      * Where the rent of every closed v1 account goes: the wallet, the authority
      * and each emptied token account. Defaults to `payer`, which paid for the
@@ -2512,32 +2833,62 @@ export class LazorKitClient {
     }
 
     // Where the funds land. With a seed, the destination is that seed's wallet.
-    // Without one, reuse whatever v2 wallet this owner already has, and only
-    // mint a seed when there is nothing to reuse.
-    // Anything reused is vetted first: see vetMigrationDestination.
+    // Without one, reuse the v2 wallet this passkey has signed for, and only
+    // mint a seed when there is none.
+    //
+    // Why "signed for": anyone can hand a wallet to this owner with
+    // TransferOwnership (its key is public) after using the vault as they
+    // liked, and vetting cannot see all of it — an SPL Token account moved off
+    // the vault is only found for a watched mint. A passkey signs only
+    // for a wallet its user chose, and its authority's counter records that.
+    // An Ed25519 authority keeps no such record, so for one nothing is reused.
+    //
+    // Why "the": the program's passkey challenge does not name the wallet for
+    // CreateSession, AddAuthority, TransferOwnership or Authorize, so a
+    // signature made on one authority of this key can be replayed on another
+    // at the same counter, raising it too. With two signed-on authorities —
+    // at any rank, since an Admin seat's signature replays onto an Owner's —
+    // either could be the copy, and a fresh wallet is the safe answer.
+    const mints = watchedMints(params.watchMints);
     let v2Wallet: PublicKey | undefined;
     let destinationUserSeed: Uint8Array | undefined;
+    /** Once `v2Wallet` has passed the vet: the slot its newest read was answered at. */
+    let vettedAt: number | undefined;
     if (params.userSeed) {
       [v2Wallet] = this.findWallet(params.userSeed);
-      if (await this.connection.getAccountInfo(v2Wallet)) {
-        const problem = await this.vetMigrationDestination(v2Wallet, params.owner);
-        if (problem) throw new Error(`refusing to migrate into the userSeed's v2 wallet: ${problem}`);
-      }
     } else {
-      const existing = await this.findWalletsByAuthority(
-        credentialOrPubkey,
-        authType === AUTH_TYPE_ED25519 ? 'ed25519' : 'secp256r1',
-      );
-      for (const record of existing) {
-        if (record.role !== ROLE_OWNER) continue;
-        if (!(await this.vetMigrationDestination(record.walletPda, params.owner))) {
-          v2Wallet = record.walletPda;
-          break;
+      if (authType === AUTH_TYPE_SECP256R1) {
+        const signed = await this.signedPasskeyAuthorities(params.owner);
+        if (signed.length === 1 && signed[0].role === ROLE_OWNER) {
+          const vet = await this.inspectMigrationDestination(signed[0].walletPda, params.owner, mints);
+          if (!vet.problem && vet.signatureCount > 0) {
+            v2Wallet = signed[0].walletPda;
+            vettedAt = vet.slot;
+          }
         }
       }
       if (!v2Wallet) {
         destinationUserSeed = params.destinationUserSeed ?? randomBytes(32);
         [v2Wallet] = this.findWallet(destinationUserSeed);
+      }
+    }
+    // A seed's address holds nothing, bare lamports (anyone can send them to
+    // a PDA; CreateWallet tops the balance up and takes the account), or a
+    // wallet. The v1 CreateWallet instruction made the userSeed public, so a
+    // wallet there may be anyone's: vet it. Otherwise create one — never
+    // deliver into the vault of a wallet that does not exist yet, which
+    // whoever creates it at that public seed would own.
+    let createV2Wallet = false;
+    if (vettedAt === undefined) {
+      if (isPlainSystemAccount(await this.connection.getAccountInfo(v2Wallet))) {
+        createV2Wallet = true;
+      } else {
+        const vet = await this.inspectMigrationDestination(v2Wallet, params.owner, mints);
+        if (vet.problem) {
+          const which = params.userSeed ? 'userSeed' : 'destinationUserSeed';
+          throw new Error(`refusing to migrate into the ${which}'s v2 wallet: ${vet.problem}`);
+        }
+        vettedAt = vet.slot;
       }
     }
     const [v2Vault] = this.findVault(v2Wallet);
@@ -2549,15 +2900,23 @@ export class LazorKitClient {
     );
     // The destination side, now that the vault is known. An existing frozen
     // destination account makes the transfer fail; an existing thawed one
-    // means a mint that freezes new accounts is no obstacle after all.
+    // means a mint that freezes new accounts is no obstacle after all. For a
+    // wallet that passed the vet, read no older state than the vet did — a
+    // stale node could still show a destination account before it was rigged.
     const destOf = (t: V1VaultToken) => getAssociatedTokenAddress(t.mint, v2Vault, t.tokenProgram);
     const toCheck = [...classified.movable, ...classified.skipped.filter((s) => s.reason === 'frozen-on-arrival').map((s) => s.token)];
     const destState = new Map<string, 'frozen' | 'open'>();
+    const destInfo = new Map<string, AccountInfo<Buffer>>();
     for (let i = 0; i < toCheck.length; i += 100) {
       const page = toCheck.slice(i, i + 100);
-      const infos = await this.connection.getMultipleAccountsInfo(page.map(destOf));
+      const { infos } = await readAccounts(this.connection, page.map(destOf), vettedAt);
       infos.forEach((info, j) => {
-        if (info) destState.set(page[j].ata.toBase58(), tokenAccountFrozen(info.data) ? 'frozen' : 'open');
+        // Nothing there, or bare lamports: the idempotent create below makes a
+        // fresh account, the vault's alone (and frozen, for a mint that
+        // freezes new accounts).
+        if (isPlainSystemAccount(info)) return;
+        destState.set(page[j].ata.toBase58(), tokenAccountFrozen(info!.data) ? 'frozen' : 'open');
+        destInfo.set(page[j].ata.toBase58(), info!);
       });
     }
     const tokens: V1VaultToken[] = [];
@@ -2570,23 +2929,39 @@ export class LazorKitClient {
       if (destState.get(s.token.ata.toBase58()) === 'open') tokens.push(s.token);
       else skippedTokens.push(s);
     }
+    // Every existing account the migration delivers into must be the v2
+    // vault's alone. A wallet can be handed to this owner (TransferOwnership
+    // asks the new owner nothing) with its vault's token accounts rigged: one
+    // given to another owner, or carrying a delegate or close authority that
+    // would take what arrives. The program checks the owner, not the rest.
+    // Refuse rather than skip: a skipped token is stranded once the v1 vault
+    // closes.
+    const rigged = tokens.flatMap((t) => {
+      const dest = destInfo.get(t.ata.toBase58());
+      const problem = dest && tokenAccountProblem(destOf(t), dest, v2Vault, t.tokenProgram);
+      return problem ? [`${destOf(t).toBase58()} (mint ${t.mint.toBase58()}) ${problem}`] : [];
+    });
+    if (rigged.length > 0) {
+      const named = rigged.slice(0, 3).join('; ');
+      const more = rigged.length > 3 ? `; and ${rigged.length - 3} more` : '';
+      throw new Error(
+        `refusing to migrate into ${v2Wallet.toBase58()}: destination token account ${named}${more}`,
+      );
+    }
     if (tokens.length > 255) {
       throw new Error(`the v1 vault holds ${tokens.length} token accounts; one migration moves at most 255`);
     }
 
     const setupInstructions: TransactionInstruction[] = [];
-    const v2WalletInfo = await this.connection.getAccountInfo(v2Wallet);
-    if (!v2WalletInfo) {
-      // Creating the v2 wallet needs a seed even though migrating does not.
-      destinationUserSeed =
-        params.userSeed ?? destinationUserSeed ?? params.destinationUserSeed ?? randomBytes(32);
+    if (createV2Wallet) {
+      // Only a seed's address is ever created: the userSeed's, or the one
+      // minted (or given) above.
       const created = await this.createWallet({
         payer: params.payer,
-        userSeed: destinationUserSeed,
+        userSeed: params.userSeed ?? destinationUserSeed!,
         owner: params.owner,
       });
       setupInstructions.push(...created.instructions);
-      if (params.userSeed) destinationUserSeed = undefined; // caller already has it
     }
     const migrateTokens = tokens.map((t) => {
       const destAta = getAssociatedTokenAddress(t.mint, v2Vault, t.tokenProgram);

@@ -45,13 +45,23 @@ export async function generateMockSecp256r1Key(
   };
 }
 
-function enforceLowS(rawSig: Uint8Array): Uint8Array {
-  // Pad to 64 bytes if the library returned a shorter buffer
-  if (rawSig.length < 64) {
-    const padded = new Uint8Array(64);
-    padded.set(rawSig, 64 - rawSig.length);
-    rawSig = padded;
+/**
+ * A 64-byte r || s signature over `message`, low-S.
+ *
+ * The library strips leading zero bytes from r and from s alike (bn.js
+ * `toBuffer()`), so a 63-byte result cannot say which half was short, and
+ * padding it at the front corrupts it whenever s was the short one — about one
+ * signature in 256. ECDSA signing here is randomized: sign again until neither
+ * half is short.
+ */
+async function signLowS(key: MockSecp256r1Key, message: Uint8Array): Promise<Uint8Array> {
+  for (;;) {
+    const raw = new Uint8Array(Buffer.from(await key.privateKey.sign(Buffer.from(message)), 'base64'));
+    if (raw.length === 64) return enforceLowS(raw);
   }
+}
+
+function enforceLowS(rawSig: Uint8Array): Uint8Array {
   const sBytes = rawSig.slice(32, 64);
   let s = 0n;
   for (let i = 0; i < 32; i++) s = (s << 8n) + BigInt(sBytes[i]);
@@ -95,8 +105,7 @@ export function createMockRawSigner(key: MockSecp256r1Key): Secp256r1Signer {
       );
 
       const messageToSign = Buffer.concat([authenticatorData, clientDataJsonHash]);
-      const signatureBase64 = await key.privateKey.sign(Buffer.from(messageToSign));
-      const signature = enforceLowS(new Uint8Array(Buffer.from(signatureBase64, 'base64')));
+      const signature = await signLowS(key, messageToSign);
 
       return { signature, authenticatorData, clientDataJsonHash, clientDataJson: clientDataJsonBytes };
     },
@@ -126,8 +135,7 @@ export async function fakeWebAuthnSign(
   );
 
   const messageToSign = Buffer.concat([authenticatorData, clientDataJsonHash]);
-  const signatureBase64 = await key.privateKey.sign(Buffer.from(messageToSign));
-  const signature = enforceLowS(new Uint8Array(Buffer.from(signatureBase64, 'base64')));
+  const signature = await signLowS(key, messageToSign);
 
   return { signature, authenticatorData, clientDataJsonHash, clientDataJson: clientDataJsonBytes };
 }
@@ -193,8 +201,7 @@ export async function signSecp256r1Raw(params: {
 
   // Sign: authenticatorData || clientDataJsonHash
   const messageToSign = Buffer.concat([authenticatorData, clientDataJsonHash]);
-  const signatureBase64 = await params.key.privateKey.sign(Buffer.from(messageToSign));
-  const rawSig = enforceLowS(new Uint8Array(Buffer.from(signatureBase64, 'base64')));
+  const rawSig = await signLowS(params.key, messageToSign);
 
   // Build full auth payload
   const authPayload = buildAuthPayload({
