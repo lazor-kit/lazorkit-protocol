@@ -996,3 +996,260 @@ pub fn authority_role(svm: &LiteSVM, authority_pda: Pubkey) -> u8 {
         .expect("authority account")
         .data[2]
 }
+
+/// The `counter` odometer of an authority account (bytes 8..12).
+pub fn authority_counter(svm: &LiteSVM, authority_pda: Pubkey) -> u32 {
+    let data = svm
+        .get_account(&authority_pda)
+        .expect("authority account")
+        .data;
+    u32::from_le_bytes(data[8..12].try_into().expect("counter field"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Passkeys (Secp256r1)
+//
+// What a WebAuthn client does, done by hand: hash the challenge the program
+// will recompute, wrap it in clientDataJSON, sign authenticatorData ‖
+// SHA256(clientDataJSON) with the P-256 key, and hand the program both halves.
+// One copy here, so a change to the challenge layout is one edit for every
+// suite that signs as a passkey.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The Secp256r1 challenge, in the order `auth/secp256r1/mod.rs` hashes it:
+/// `SHA256(discriminator || prefix14 || signed_payload || payer || wallet ||
+/// counter_le4 || program_id)`.
+///
+/// `wallet` is the authenticating authority's own wallet — its header's
+/// `wallet` field. It is what stops an assertion made for one wallet from
+/// verifying on another wallet the same passkey also controls.
+pub fn secp256r1_challenge(
+    discriminator: u8,
+    prefix14: &[u8],
+    signed_payload: &[u8],
+    payer: &Pubkey,
+    wallet: &Pubkey,
+    counter: u32,
+    program_id: &Pubkey,
+) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update([discriminator]);
+    h.update(prefix14);
+    h.update(signed_payload);
+    h.update(payer.as_ref());
+    h.update(wallet.as_ref());
+    h.update(counter.to_le_bytes());
+    h.update(program_id.as_ref());
+    h.finalize().into()
+}
+
+/// The fixed 14-byte head of a Secp256r1 auth payload, and the only part of it
+/// the challenge covers: `[slot u64][counter u32][sysvar_ix_index u8][reserved u8]`.
+pub fn secp256r1_prefix(slot: u64, counter: u32, sysvar_ix_index: u8) -> Vec<u8> {
+    let mut prefix = Vec::with_capacity(14);
+    prefix.extend_from_slice(&slot.to_le_bytes());
+    prefix.extend_from_slice(&counter.to_le_bytes());
+    prefix.push(sysvar_ix_index);
+    prefix.push(0);
+    prefix
+}
+
+/// Sign `challenge` as a passkey would.
+///
+/// Returns the precompile instruction, which must sit immediately before the
+/// program's, and the full auth payload:
+/// `prefix14 ‖ authDataLen u16 ‖ authenticatorData ‖ cdjLen u16 ‖ clientDataJSON`.
+pub fn passkey_assertion(
+    signing_key: &p256::ecdsa::SigningKey,
+    rp_id: &str,
+    prefix14: &[u8],
+    challenge: &[u8; 32],
+) -> (Instruction, Vec<u8>) {
+    use p256::ecdsa::{signature::Signer as _, Signature, VerifyingKey};
+    use sha2::Digest;
+
+    let client_data_json = format!(
+        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\",\"origin\":\"https://{}\",\"crossOrigin\":false}}",
+        base64url_no_pad(challenge),
+        rp_id
+    );
+    let cdj_hash: [u8; 32] = sha2::Sha256::digest(client_data_json.as_bytes()).into();
+
+    let rp_id_hash: [u8; 32] = sha2::Sha256::digest(rp_id.as_bytes()).into();
+    let mut authenticator_data = Vec::new();
+    authenticator_data.extend_from_slice(&rp_id_hash);
+    authenticator_data.push(0x01); // user present
+    authenticator_data.extend_from_slice(&1u32.to_be_bytes()); // webauthn counter
+
+    let mut message = authenticator_data.clone();
+    message.extend_from_slice(&cdj_hash);
+
+    // The Secp256r1 precompile requires a low-S signature; p256 does not
+    // normalize by default.
+    let sig: Signature = signing_key.sign(&message);
+    let sig = sig.normalize_s().unwrap_or(sig);
+    let sig_bytes: [u8; 64] = sig.to_bytes().into();
+    let pubkey_compressed: [u8; 33] = VerifyingKey::from(signing_key)
+        .to_encoded_point(true)
+        .as_bytes()
+        .try_into()
+        .unwrap();
+
+    let precompile_ix = build_secp256r1_precompile_ix(&pubkey_compressed, &sig_bytes, &message);
+
+    let mut auth_payload = prefix14.to_vec();
+    auth_payload.extend_from_slice(&(authenticator_data.len() as u16).to_le_bytes());
+    auth_payload.extend_from_slice(&authenticator_data);
+    auth_payload.extend_from_slice(&(client_data_json.len() as u16).to_le_bytes());
+    auth_payload.extend_from_slice(client_data_json.as_bytes());
+
+    (precompile_ix, auth_payload)
+}
+
+pub fn base64url_no_pad(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = match chunk.len() {
+            3 => (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8 | chunk[2] as u32,
+            2 => (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8,
+            _ => (chunk[0] as u32) << 16,
+        };
+        out.push(A[((b >> 18) & 0x3f) as usize] as char);
+        out.push(A[((b >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(A[((b >> 6) & 0x3f) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(A[(b & 0x3f) as usize] as char);
+        }
+    }
+    out
+}
+
+/// The Secp256r1 precompile instruction, in the exact fixed-offset layout the
+/// program's introspection requires (signature@16, pubkey@80, message@114, all
+/// indices self-referential 0xFFFF). The generic SDK builder lays the fields out
+/// differently, so this mirrors `buildSecp256r1PrecompileIx` in sdk-legacy.
+pub fn build_secp256r1_precompile_ix(
+    pubkey33: &[u8; 33],
+    sig64: &[u8; 64],
+    message: &[u8],
+) -> Instruction {
+    const HEADER: usize = 16;
+    let sig_off = HEADER;
+    let pk_off = sig_off + 64;
+    let msg_off = pk_off + 33 + 1; // 1 byte alignment padding
+    let mut data = vec![0u8; msg_off + message.len()];
+    data[0] = 1; // num signatures
+    data[1] = 0; // padding
+    data[2..4].copy_from_slice(&(sig_off as u16).to_le_bytes());
+    data[4..6].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    data[6..8].copy_from_slice(&(pk_off as u16).to_le_bytes());
+    data[8..10].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    data[10..12].copy_from_slice(&(msg_off as u16).to_le_bytes());
+    data[12..14].copy_from_slice(&(message.len() as u16).to_le_bytes());
+    data[14..16].copy_from_slice(&0xFFFFu16.to_le_bytes());
+    data[sig_off..sig_off + 64].copy_from_slice(sig64);
+    data[pk_off..pk_off + 33].copy_from_slice(pubkey33);
+    data[msg_off..msg_off + message.len()].copy_from_slice(message);
+    Instruction {
+        program_id: "Secp256r1SigVerify1111111111111111111111111"
+            .parse()
+            .unwrap(),
+        accounts: vec![],
+        data,
+    }
+}
+
+/// A passkey as the program sees it: the P-256 key, the credential id hash
+/// that seeds its authority PDA, and the relying party it was registered for.
+pub struct Passkey {
+    pub signing_key: p256::ecdsa::SigningKey,
+    pub credential_id_hash: [u8; 32],
+    pub rp_id: &'static str,
+}
+
+impl Passkey {
+    pub fn new() -> Self {
+        Self {
+            signing_key: p256::ecdsa::SigningKey::random(&mut rand::thread_rng()),
+            credential_id_hash: rand::random(),
+            rp_id: "lazorkit.test",
+        }
+    }
+}
+
+impl Default for Passkey {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A v2 wallet whose only Owner is a passkey.
+pub struct PasskeyWallet {
+    pub wallet: Pubkey,
+    pub vault: Pubkey,
+    pub authority: Pubkey,
+}
+
+/// `CreateWallet` with `pk` as the Owner. Called twice with the same passkey it
+/// gives one credential and one key on two wallets, each with its own counter.
+pub fn create_passkey_wallet(context: &mut TestContext, pk: &Passkey) -> PasskeyWallet {
+    let program_id = context.program_id;
+    let user_seed = rand::random::<[u8; 32]>();
+    let (wallet, _) =
+        Pubkey::find_program_address(&[lazorkit_program::seeds::WALLET, &user_seed], &program_id);
+    let (vault, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet.as_ref()],
+        &program_id,
+    );
+    let (authority, auth_bump) = Pubkey::find_program_address(
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet.as_ref(),
+            &pk.credential_id_hash,
+        ],
+        &program_id,
+    );
+
+    // [0][user_seed 32][type 1][bump][padding 6][credential_id_hash 32][pubkey 33][rpIdLen][rpId]
+    let mut data = vec![0u8];
+    data.extend_from_slice(&user_seed);
+    data.push(1); // Secp256r1
+    data.push(auth_bump);
+    data.extend_from_slice(&[0u8; 6]);
+    data.extend_from_slice(&pk.credential_id_hash);
+    data.extend_from_slice(
+        p256::ecdsa::VerifyingKey::from(&pk.signing_key)
+            .to_encoded_point(true)
+            .as_bytes(),
+    );
+    data.push(pk.rp_id.len() as u8);
+    data.extend_from_slice(pk.rp_id.as_bytes());
+
+    let ix = Instruction {
+        program_id,
+        accounts: with_protocol_fee_accounts(
+            vec![
+                AccountMeta::new(context.payer.pubkey(), true),
+                AccountMeta::new(wallet, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new(authority, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            ],
+            context,
+        ),
+        data,
+    };
+    let payer = context.payer.insecure_clone();
+    try_send(&mut context.svm, &payer, &[ix], &[&payer]).expect("CreateWallet (passkey) failed");
+
+    PasskeyWallet {
+        wallet,
+        vault,
+        authority,
+    }
+}

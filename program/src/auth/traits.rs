@@ -21,7 +21,10 @@ pub trait Authenticator {
     ///
     /// # Arguments
     /// * `accounts` - The full slice of accounts passed to the instruction.
-    /// * `authority_data` - The mutable data of the authority account.
+    /// * `authority_data` - The mutable data of the authority account. Secp256r1
+    ///   also folds the header's `wallet` into its challenge; that binds the
+    ///   signature to the wallet the instruction acts on only because every
+    ///   caller checks `header.wallet` against the wallet account first.
     /// * `auth_payload` - The authentication payload (e.g. signature, proof).
     ///   Ignored by Ed25519 — see above.
     /// * `signed_payload` - The message that was signed. Ignored by Ed25519 —

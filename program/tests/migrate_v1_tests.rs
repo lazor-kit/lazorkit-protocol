@@ -338,7 +338,7 @@ fn migrate_refuses_a_non_v1_wallet() {
 // Secp256r1 (passkey) — the path 85% of mainnet uses
 // ─────────────────────────────────────────────────────────────────────────
 
-use p256::ecdsa::{signature::Signer as _, Signature, SigningKey, VerifyingKey};
+use p256::ecdsa::{SigningKey, VerifyingKey};
 use sha2::Digest;
 
 struct V1Passkey {
@@ -412,62 +412,6 @@ fn fabricate_v1_passkey_wallet(context: &mut TestContext, lamports: u64) -> V1Pa
     }
 }
 
-fn base64url_no_pad(data: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let b = match chunk.len() {
-            3 => (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8 | chunk[2] as u32,
-            2 => (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8,
-            _ => (chunk[0] as u32) << 16,
-        };
-        out.push(A[((b >> 18) & 0x3f) as usize] as char);
-        out.push(A[((b >> 12) & 0x3f) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(A[((b >> 6) & 0x3f) as usize] as char);
-        }
-        if chunk.len() > 2 {
-            out.push(A[(b & 0x3f) as usize] as char);
-        }
-    }
-    out
-}
-
-/// The Secp256r1 precompile instruction, in the exact fixed-offset layout the
-/// program's introspection requires (signature@16, pubkey@80, message@114, all
-/// indices self-referential 0xFFFF). The generic SDK builder lays the fields out
-/// differently, so this mirrors `buildSecp256r1PrecompileIx` in sdk-legacy.
-fn build_secp256r1_precompile_ix(
-    pubkey33: &[u8; 33],
-    sig64: &[u8; 64],
-    message: &[u8],
-) -> Instruction {
-    const HEADER: usize = 16;
-    let sig_off = HEADER;
-    let pk_off = sig_off + 64;
-    let msg_off = pk_off + 33 + 1; // 1 byte alignment padding
-    let mut data = vec![0u8; msg_off + message.len()];
-    data[0] = 1; // num signatures
-    data[1] = 0; // padding
-    data[2..4].copy_from_slice(&(sig_off as u16).to_le_bytes());
-    data[4..6].copy_from_slice(&0xFFFFu16.to_le_bytes());
-    data[6..8].copy_from_slice(&(pk_off as u16).to_le_bytes());
-    data[8..10].copy_from_slice(&0xFFFFu16.to_le_bytes());
-    data[10..12].copy_from_slice(&(msg_off as u16).to_le_bytes());
-    data[12..14].copy_from_slice(&(message.len() as u16).to_le_bytes());
-    data[14..16].copy_from_slice(&0xFFFFu16.to_le_bytes());
-    data[sig_off..sig_off + 64].copy_from_slice(sig64);
-    data[pk_off..pk_off + 33].copy_from_slice(pubkey33);
-    data[msg_off..msg_off + message.len()].copy_from_slice(message);
-    Instruction {
-        program_id: "Secp256r1SigVerify1111111111111111111111111"
-            .parse()
-            .unwrap(),
-        accounts: vec![],
-        data,
-    }
-}
-
 /// Build the `[precompile, migrate]` instruction pair a passkey signs.
 ///
 /// `signed_destination` is what the passkey commits to; `sysvar_ix_index` is
@@ -485,12 +429,7 @@ fn build_passkey_migrate(
     let counter: u32 = 1; // stored 0 + 1
     let sysvar_ix_index: u8 = 7;
 
-    // auth_payload prefix (14 bytes): slot(8) counter(4) sysvarIdx(1) flags(1)
-    let mut prefix = Vec::with_capacity(14);
-    prefix.extend_from_slice(&slot.to_le_bytes());
-    prefix.extend_from_slice(&counter.to_le_bytes());
-    prefix.push(sysvar_ix_index);
-    prefix.push(0);
+    let prefix = secp256r1_prefix(slot, counter, sysvar_ix_index);
 
     // signed_payload = destination ‖ v1_wallet ‖ num_tokens ‖ refund_dest ‖
     //                  source_ata[0..num_tokens] — the program's order. refund_dest
@@ -506,51 +445,20 @@ fn build_passkey_migrate(
         signed_payload.extend_from_slice(migrate_accounts[9 + i * 4].pubkey.as_ref());
     }
 
-    // challenge_hash = SHA256(disc ‖ prefix14 ‖ signed_payload ‖ payer ‖ counter ‖ program_id)
-    let mut h = sha2::Sha256::new();
-    h.update([17u8]);
-    h.update(&prefix);
-    h.update(&signed_payload);
-    h.update(payer.as_ref());
-    h.update(counter.to_le_bytes());
-    h.update(program_id.as_ref());
-    let challenge_hash: [u8; 32] = h.finalize().into();
-
-    let client_data_json = format!(
-        "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\",\"origin\":\"https://{}\",\"crossOrigin\":false}}",
-        base64url_no_pad(&challenge_hash),
-        pk.rp_id
+    // A v1 authority header keeps `wallet` at offset 16 like v2's, so the
+    // challenge binds the v1 wallet the same way — on top of the signed payload
+    // already naming it.
+    let challenge = secp256r1_challenge(
+        DISC_MIGRATE,
+        &prefix,
+        &signed_payload,
+        &payer,
+        &pk.wallet,
+        counter,
+        &program_id,
     );
-    let cdj_hash: [u8; 32] = sha2::Sha256::digest(client_data_json.as_bytes()).into();
-
-    let rp_id_hash: [u8; 32] = sha2::Sha256::digest(pk.rp_id.as_bytes()).into();
-    let mut authenticator_data = Vec::new();
-    authenticator_data.extend_from_slice(&rp_id_hash);
-    authenticator_data.push(0x01); // user present
-    authenticator_data.extend_from_slice(&1u32.to_be_bytes()); // webauthn counter
-
-    let mut message = authenticator_data.clone();
-    message.extend_from_slice(&cdj_hash);
-
-    // The Secp256r1 precompile requires a low-S signature; p256 does not
-    // normalize by default.
-    let sig: Signature = pk.signing_key.sign(&message);
-    let sig = sig.normalize_s().unwrap_or(sig);
-    let sig_bytes: [u8; 64] = sig.to_bytes().into();
-    let pubkey_compressed: [u8; 33] = VerifyingKey::from(&pk.signing_key)
-        .to_encoded_point(true)
-        .as_bytes()
-        .try_into()
-        .unwrap();
-
-    let precompile_ix = build_secp256r1_precompile_ix(&pubkey_compressed, &sig_bytes, &message);
-
-    // Full auth_payload: prefix14 ‖ authDataLen(2) ‖ authData ‖ cdjLen(2) ‖ cdj
-    let mut auth_payload = prefix;
-    auth_payload.extend_from_slice(&(authenticator_data.len() as u16).to_le_bytes());
-    auth_payload.extend_from_slice(&authenticator_data);
-    auth_payload.extend_from_slice(&(client_data_json.len() as u16).to_le_bytes());
-    auth_payload.extend_from_slice(client_data_json.as_bytes());
+    let (precompile_ix, auth_payload) =
+        passkey_assertion(&pk.signing_key, &pk.rp_id, &prefix, &challenge);
 
     let mut data = vec![DISC_MIGRATE, num_tokens];
     data.extend_from_slice(&auth_payload);

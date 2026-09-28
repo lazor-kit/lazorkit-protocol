@@ -41,6 +41,11 @@ impl Authenticator for Secp256r1Authenticator {
     /// Counter is a program-controlled u32 odometer. Client must submit
     /// `on_chain_counter + 1`.
     ///
+    /// The challenge the passkey signs is
+    /// `SHA256(discriminator || auth_payload[..14] || signed_payload || payer
+    /// || wallet || counter_le4 || program_id)`, where `wallet` is the
+    /// authority header's own `wallet` field (bytes 16..48 of `auth_data`).
+    ///
     /// Programmatic/bot signing should use Ed25519 authorities instead —
     /// Secp256r1 is passkeys-only.
     fn authenticate(
@@ -120,12 +125,25 @@ impl Authenticator for Secp256r1Authenticator {
 
         // Challenge hash:
         //   SHA256(discriminator || auth_payload[..14] || signed_payload
-        //          || payer || counter || program_id)
+        //          || payer || wallet || counter || program_id)
         //
         // Only the 14-byte fixed prefix of auth_payload is included because the
         // remainder contains clientDataJSON — which is produced by the
         // authenticator *after* signing the challenge, so it can't be in the
         // hash input.
+        //
+        // `wallet` is what stops an assertion crossing wallets. One passkey can
+        // be an authority on several wallets under the same credential and key,
+        // and nothing else here tells them apart: CreateSession's and
+        // AddAuthority's signed payloads carry only new key material, and the
+        // payer is a relayer shared by every wallet it serves. Without it, an
+        // assertion for wallet A verifies on wallet B whenever the two counters
+        // match, for as long as the slot is fresh. It is read from the
+        // authority's own header rather than passed as another account, so no
+        // instruction layout changes; every caller has already checked
+        // `header.wallet` against the wallet account it acts on, so this is
+        // that wallet.
+        let wallet = header.wallet;
         let counter_bytes = expected_counter.to_le_bytes();
         #[allow(unused_assignments)]
         let mut hasher = [0u8; 32];
@@ -137,17 +155,24 @@ impl Authenticator for Secp256r1Authenticator {
                     &auth_payload[..14],
                     signed_payload,
                     payer.key().as_ref(),
+                    wallet.as_ref(),
                     &counter_bytes,
                     program_id.as_ref(),
                 ]
                 .as_ptr() as *const u8,
-                6,
+                7,
                 hasher.as_mut_ptr(),
             );
         }
         #[cfg(not(target_os = "solana"))]
         {
-            let _ = (signed_payload, discriminator, counter_bytes, program_id);
+            let _ = (
+                signed_payload,
+                discriminator,
+                wallet,
+                counter_bytes,
+                program_id,
+            );
             hasher = [0u8; 32];
         }
 
