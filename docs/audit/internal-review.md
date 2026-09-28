@@ -41,16 +41,20 @@ exploit" to "proves rejection" as its fix landed
   authority.
 - **MEDIUM — the passkey challenge did not name the wallet.** It bound the
   payer, the counter and the instruction's own arguments, and for
-  CreateSession, AddAuthority, TransferOwnership, Authorize, RevokeSession and
-  RemoveAuthority none of those tells two wallets apart: an assertion for wallet
-  A verified on a wallet B holding the same passkey at the same counter, within
-  the slot window, through the same (shared relayer) payer — a session key or
-  Admin approved for A could be installed on B. Fixed: the challenge hashes the
+  CreateSession, AddAuthority and TransferOwnership — and for Authorize or
+  Execute whose inner instructions touch no wallet-derived account — none of
+  those tells two wallets apart: an assertion for wallet A verified on a wallet
+  B holding the same passkey at the same counter, within the slot window,
+  through the same (shared relayer) payer — a session key or Admin approved for
+  A could be installed on B, or B's owner replaced. RevokeSession,
+  RemoveAuthority and MigrateWallet were not exposed: each signs an account the
+  program then checks belongs to the wallet. Fixed: the challenge hashes the
   authenticating authority's own `wallet` header field after the payer (no new
-  account; `MigrateWallet` in the sunset build included). Tests:
-  `wallet_binding_tests` (both replays refused with 3005, the pre-binding layout
-  refused, the SDK fixed vector pinned), and the sunset suite's
-  `a_passkey_wallet_migrates_with_the_wallet_bound_challenge`.
+  account; every Secp256r1 path, `MigrateWallet` in the sunset build
+  included). Tests: `wallet_binding_tests` (both replays refused with 3005, the
+  pre-binding layout refused, the SDK fixed vector pinned; its module doc
+  records the replays landing on the pre-binding build), and the sunset
+  suite's `a_passkey_wallet_migrates_with_the_wallet_bound_challenge`.
 - **LOW — a deferred or passkey Execute could not repay its payer.**
   `ExecuteDeferred` credited the rent to the refund destination before its
   CPIs; the runtime syncs a caller's lamport writes only for the accounts a CPI

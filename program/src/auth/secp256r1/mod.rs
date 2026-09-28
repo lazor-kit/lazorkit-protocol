@@ -134,15 +134,15 @@ impl Authenticator for Secp256r1Authenticator {
         //
         // `wallet` is what stops an assertion crossing wallets. One passkey can
         // be an authority on several wallets under the same credential and key,
-        // and nothing else here tells them apart: CreateSession's and
-        // AddAuthority's signed payloads carry only new key material, and the
-        // payer is a relayer shared by every wallet it serves. Without it, an
-        // assertion for wallet A verifies on wallet B whenever the two counters
-        // match, for as long as the slot is fresh. It is read from the
-        // authority's own header rather than passed as another account, so no
-        // instruction layout changes; every caller has already checked
-        // `header.wallet` against the wallet account it acts on, so this is
-        // that wallet.
+        // and for some instructions nothing else here tells them apart: the
+        // signed payloads of CreateSession, AddAuthority and TransferOwnership
+        // carry key material and the payer, and the payer is a relayer shared
+        // by every wallet it serves. Without it, an assertion for wallet A
+        // verifies on wallet B whenever the two counters match, while the slot
+        // is fresh. It is read from the authority's own header rather than
+        // passed as another account, so no instruction layout changes; every
+        // caller has already checked `header.wallet` against the wallet account
+        // it acts on, so this is that wallet.
         let wallet = header.wallet;
         let counter_bytes = expected_counter.to_le_bytes();
         #[allow(unused_assignments)]

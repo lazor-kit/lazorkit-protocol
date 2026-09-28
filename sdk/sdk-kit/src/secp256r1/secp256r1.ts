@@ -200,9 +200,10 @@ export function buildAuthPayloadPrefix(params: {
  * `wallet` is the wallet the authenticating authority belongs to — the `wallet`
  * field of its account header: the wallet PDA for every v2 instruction, the v1
  * wallet for `MigrateWallet`. Without it a signature for `CreateSession`,
- * `AddAuthority`, `TransferOwnership`, `Authorize`, `RevokeSession` or
- * `RemoveAuthority` names no wallet, and could be submitted again on another
- * wallet holding the same passkey at the same counter, through the same payer.
+ * `AddAuthority` or `TransferOwnership` — or for `Execute` or `Authorize` when
+ * no inner instruction touches an account derived from the wallet — names no
+ * wallet, and could be submitted again on another wallet holding the same
+ * passkey at the same counter, through the same payer.
  *
  * Must exactly match the on-chain `sol_sha256` call in
  * program/src/auth/secp256r1/mod.rs.
