@@ -580,10 +580,11 @@ describe('pickOwnWallet', () => {
     expect(pick.needsConfirmation).toEqual([planted, mineUnused]);
   });
 
-  // The program's passkey challenge does not name the wallet for
-  // CreateSession, AddAuthority, TransferOwnership or Authorize: the
-  // passkey's signature on its own wallet can be submitted again on a planted
-  // one, and that wallet's counter rises too.
+  // Until the program named the wallet in the passkey challenge, the
+  // passkey's signature for CreateSession, AddAuthority, TransferOwnership or
+  // Authorize on its own wallet could be submitted again on a planted one,
+  // raising that wallet's counter too. Counts from then (v1, devnet v2) are
+  // still on chain.
   it('adopts nothing when two wallets have been signed for — either count may be a replayed copy', () => {
     const mine = facts({ signatureCount: 3, lamports: 1_000_000n });
     const copied = facts({ signatureCount: 1, lamports: 1_000_001n });

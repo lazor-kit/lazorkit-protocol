@@ -4,17 +4,21 @@
 //   - PDA helpers
 //   - reclaimDeferred (pure tx assembly)
 //   - createWallet (Ed25519): fee suffix present with no config; opt-out omits it
+//   - the wallet a prepare* challenge names, behind a stub for the counter read
 //
-// Anything requiring `getAccountInfo` / `getSlot` is covered by the
+// Anything else requiring `getAccountInfo` / `getSlot` is covered by the
 // E2E suite under tests-sdk-kit/ against a live validator.
 
 import { describe, it, expect } from 'vitest';
-import { address } from '@solana/kit';
+import { address, getAddressEncoder, type Address } from '@solana/kit';
 import {
+  DISC_REVOKE_SESSION,
   LazorKit,
   LazorKitClient,
   PROGRAM_ID_DEVNET,
   PROGRAM_ID_MAINNET,
+  buildAuthPayloadPrefix,
+  buildSecp256r1Challenge,
 } from '../src/index.js';
 
 const PAYER = address('11111111111111111111111111111112');
@@ -154,5 +158,57 @@ describe('createWallet — Ed25519 owner, protocol not initialised', () => {
         },
       }),
     ).rejects.toThrow('credentialIdHash must not be all zero bytes');
+  });
+});
+
+// The attack the wallet binding closes: RevokeSession's signed payload is the
+// session and refund address, neither of which names a wallet. Before, the
+// same passkey revoking the same session address at the same counter, slot
+// and payer on two wallets signed identical bytes.
+describe('prepare* — the challenge names the wallet', () => {
+  it('binds the wallet the authority belongs to', async () => {
+    const SLOT = 12_345n;
+    // Answers readAuthorityCounter: counter 0 at offset 8, so the next is 1.
+    const rpc = {
+      getAccountInfo: () => ({
+        send: async () => ({ value: { data: [Buffer.alloc(12).toString('base64'), 'base64'] } }),
+      }),
+    };
+    const lk = new LazorKit(rpc as never, PROGRAM_ID_DEVNET);
+    const credentialIdHash = new Uint8Array(32).fill(0xc1);
+    const sessionPda = VAULT;
+    const prepare = async (walletPda: Address) =>
+      lk.prepareRevokeSession({
+        payer: PAYER,
+        walletPda,
+        secp256r1: {
+          credentialIdHash,
+          publicKeyBytes: new Uint8Array(33).fill(0x02),
+          authorityPda: (await lk.findAuthority(walletPda, credentialIdHash))[0],
+          slotOverride: SLOT,
+        },
+        sessionPda,
+      });
+    const [walletA] = await lk.findWallet(new Uint8Array(32).fill(0xa1));
+    const [walletB] = await lk.findWallet(new Uint8Array(32).fill(0xb2));
+    const [a, b] = [await prepare(walletA), await prepare(walletB)];
+
+    expect(a.challenge).not.toEqual(b.challenge);
+    const enc = getAddressEncoder();
+    const signedPayload = new Uint8Array(64);
+    signedPayload.set(enc.encode(sessionPda), 0);
+    signedPayload.set(enc.encode(PAYER), 32);
+    expect(a.challenge).toEqual(
+      buildSecp256r1Challenge({
+        discriminator: new Uint8Array([DISC_REVOKE_SESSION]),
+        // 5: the sysvar-instructions account's index in RevokeSession.
+        authPayload: buildAuthPayloadPrefix({ slot: SLOT, counter: 1, sysvarIxIndex: 5 }),
+        signedPayload,
+        payer: PAYER,
+        wallet: walletA,
+        counter: 1,
+        programId: PROGRAM_ID_DEVNET,
+      }),
+    );
   });
 });

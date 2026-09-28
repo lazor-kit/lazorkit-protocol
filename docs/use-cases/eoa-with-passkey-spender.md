@@ -224,15 +224,17 @@ or the `walletPda` you stored. For a wallet the passkey *owns*, use
 `client.findOwnPasskeyWallet(...)`, which proves the passkey and checks who
 else can spend (see the SDK README, "Finding a returning user's wallet").
 
-One more reason to store the wallet rather than look it up. The program's
-passkey challenge does not name the wallet for `CreateSession`, `AddAuthority`
-or `Authorize`, so a signature this passkey makes here as an Admin can be
+One more reason to store the wallet rather than look it up. Before the program
+named the wallet in the passkey challenge, a signature this passkey made here
+as an Admin for `CreateSession`, `AddAuthority` or `Authorize` could be
 submitted again, within about 150 slots and through the same fee payer, on a
 wallet someone planted for it — raising the counter that `findOwnPasskeyWallet`
 reads as "the user has signed for this wallet". That lookup only sees Owner
-seats, so if the same passkey (same `rpId`) owns no wallet of its own, the
-planted one can be the only signed-for candidate and be adopted. Until the
-program binds the wallet into the challenge, persist the wallet address.
+seats, so if the same passkey (same `rpId`) owns no wallet of its own, a
+planted one whose count was raised that way can be the only signed-for
+candidate and be adopted. The program now refuses such a replay, but counts
+from before are still on chain (on v1, and on devnet v2): persist the wallet
+address.
 
 ### 3. Passkey executes a transaction
 

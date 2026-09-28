@@ -162,7 +162,15 @@ export function buildAuthPayloadPrefix(params: {
 /**
  * Computes the SHA-256 challenge hash that must be signed by the passkey.
  *
- * Hash = SHA256(discriminator || auth_payload || signed_payload || payer || counter_le(4) || program_id)
+ * Hash = SHA256(discriminator || auth_payload || signed_payload || payer || wallet
+ *               || counter_le(4) || program_id)
+ *
+ * `wallet` is the wallet the authenticating authority belongs to — the `wallet`
+ * field of its account header: the wallet PDA for every v2 instruction, the v1
+ * wallet for `MigrateWallet`. Without it a signature for `CreateSession`,
+ * `AddAuthority`, `TransferOwnership`, `Authorize`, `RevokeSession` or
+ * `RemoveAuthority` names no wallet, and could be submitted again on another
+ * wallet holding the same passkey at the same counter, through the same payer.
  *
  * Note: slot is already encoded as the first 8 bytes of auth_payload, so it is NOT hashed again
  * here. The previous redundant `slot_le` field was removed to keep hash inputs non-repetitive.
@@ -174,6 +182,7 @@ export function buildSecp256r1Challenge(params: {
   signedPayload: Uint8Array;
   slot: bigint;
   payer: PublicKey;
+  wallet: PublicKey;
   counter: number;
   programId: PublicKey;
 }): Uint8Array {
@@ -186,6 +195,7 @@ export function buildSecp256r1Challenge(params: {
   hash.update(params.authPayload);
   hash.update(params.signedPayload);
   hash.update(params.payer.toBuffer());
+  hash.update(params.wallet.toBuffer());
   hash.update(counterBuf);
   hash.update(pid.toBuffer());
   return hash.digest();

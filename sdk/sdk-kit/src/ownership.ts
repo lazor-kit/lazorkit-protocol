@@ -19,9 +19,10 @@
  * `AddAuthority` hand a wallet to a passkey without asking it, and what the
  * earlier holder did through the vault is not all readable — an SPL Token
  * account moved off the vault for any mint but a few watched ones cannot be
- * found. Only a wallet the user already chose is past that. But the counter
- * that records a signature can be raised by replaying one the passkey made on
- * another wallet (see `pickOwnWallet`), so two wallets signed for mean asking.
+ * found. Only a wallet the user already chose is past that. But a counter
+ * raised before the passkey challenge named the wallet may hold a signature
+ * replayed from another wallet (see `pickOwnWallet`), so two wallets signed
+ * for mean asking.
  * Anything else, the user must confirm. A wallet whose account is gone (a
  * migrated v1 wallet leaves its other authorities behind) is no candidate.
  *
@@ -143,11 +144,11 @@ export interface WalletFacts extends PasskeyWalletCandidate {
    * not used yet, and of a wallet someone else handed to it. Read only while
    * its authority is intact; 0 otherwise.
    *
-   * The signature need not have been made for this wallet: the program's
-   * passkey challenge does not name the wallet for `CreateSession`,
-   * `AddAuthority`, `TransferOwnership` or `Authorize`, so one made on another
-   * wallet can be submitted here again, within about 150 slots, through the
-   * same fee payer. See {@link pickOwnWallet}.
+   * On v1, and on v2 before the program named the wallet in the passkey
+   * challenge, the signature need not have been made for this wallet: one
+   * made on another wallet for `CreateSession`, `AddAuthority`,
+   * `TransferOwnership` or `Authorize` could be submitted here again, within
+   * about 150 slots, through the same fee payer. See {@link pickOwnWallet}.
    */
   signatureCount: number;
 }
@@ -206,18 +207,20 @@ export function verifyOwnershipProof<T extends { publicKey: Uint8Array }>(
  * signed for — including the user's own, created and not yet used — goes to
  * the user.
  *
- * The one: a signature can be copied. The program's passkey challenge binds
- * the payer, the counter and the instruction's own arguments, but not the
- * wallet, for `CreateSession`, `AddAuthority`, `TransferOwnership` and
- * `Authorize`. So whoever planted a wallet can take the passkey's signature
- * from its first transaction on another wallet and submit it again, within
- * about 150 slots, on the planted one through the same fee payer (a relayer
- * signs for anyone) — and that wallet's count goes up too. When two wallets
- * have been signed for, either count may be the copy, so none is adopted —
- * even when only one of them is `controlledAlone`. This cannot catch a copy of
- * a signature made where the passkey is not an Owner (an Admin seat on someone
- * else's wallet) or on an authority since closed; only binding the wallet into
- * the challenge, in the program, closes that.
+ * The one: a count may hold a copied signature. The v2 program now names the
+ * wallet in the passkey challenge, so a signature verifies only on the wallet
+ * it was made for. v1 never did, nor did v2 before that change: there the
+ * challenge bound the payer, the counter and the instruction's own arguments,
+ * but not the wallet, for `CreateSession`, `AddAuthority`, `TransferOwnership`
+ * and `Authorize`, and whoever planted a wallet could take the passkey's
+ * signature from its first transaction on another wallet and submit it again,
+ * within about 150 slots, on the planted one through the same fee payer (a
+ * relayer signs for anyone) — raising that wallet's count too. Counts from
+ * then are still on chain, so when two wallets have been signed for, either
+ * may be the copy, and none is adopted — even when only one of them is
+ * `controlledAlone`. Among those counts this cannot catch a copy of a
+ * signature made where the passkey is not an Owner (an Admin seat on someone
+ * else's wallet) or on an authority since closed.
  *
  * Order, for `needsConfirmation`: signed for first, then the oldest protocol
  * version (a live v1 wallet has not been migrated — its funds are still

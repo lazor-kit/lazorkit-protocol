@@ -159,6 +159,8 @@ export async function signSecp256r1Raw(params: {
   slot: bigint;
   counter: number;
   payer: PublicKey;
+  /** The wallet the signing authority belongs to; the challenge names it. */
+  wallet: PublicKey;
   sysvarIxIndex: number;
   programId?: PublicKey;
 }): Promise<{
@@ -181,6 +183,7 @@ export async function signSecp256r1Raw(params: {
     signedPayload: params.signedPayload,
     slot: params.slot,
     payer: params.payer,
+    wallet: params.wallet,
     counter: params.counter,
     programId: pid,
   });

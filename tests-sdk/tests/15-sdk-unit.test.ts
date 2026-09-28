@@ -17,7 +17,10 @@ import * as crypto from 'crypto';
 import {
   LazorKitClient,
   PROGRAM_ID_DEVNET,
+  DISC_REVOKE_SESSION,
   buildAuthPayload,
+  buildAuthPayloadPrefix,
+  buildSecp256r1Challenge,
   buildSecp256r1PrecompileIx,
   type WalletAuthorityRecord,
 } from '../../sdk/sdk-legacy/src';
@@ -130,6 +133,103 @@ describe('buildAuthPayload — u16 overflow guards', () => {
       clientDataJson: new Uint8Array(100),
     });
     expect(out.length).toBe(14 + 2 + 65535 + 2 + 100);
+  });
+});
+
+// ─── Secp256r1 challenge binds the wallet ───────────────────────────
+
+describe('buildSecp256r1Challenge — wallet binding', () => {
+  // The same vector sdk-kit's tests/secp256r1.test.ts pins: both SDKs and the
+  // program's sol_sha256 must agree on it byte for byte.
+  const SLOT = 234_567_890n;
+  const PAYER = new PublicKey('11111111111111111111111111111112');
+  const WALLET = new PublicKey(new Uint8Array(32).fill(0x57));
+  const PROGRAM = new PublicKey('4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS');
+  const prefix = buildAuthPayloadPrefix({ slot: SLOT, counter: 42, sysvarIxIndex: 1 });
+  const challenge = (wallet: PublicKey, payer = PAYER) =>
+    buildSecp256r1Challenge({
+      discriminator: new Uint8Array([4]),
+      authPayload: prefix,
+      signedPayload: new Uint8Array(Buffer.from('cafebabe1234', 'hex')),
+      slot: SLOT,
+      payer,
+      wallet,
+      counter: 42,
+      programId: PROGRAM,
+    });
+
+  it('matches the fixed vector: discriminator || prefix || signed || payer || wallet || counter_le4 || program_id', () => {
+    // Spelled out byte by byte, not rebuilt with SDK helpers, so a reordering
+    // in the SDK fails here rather than as InvalidMessageHash (3005) on chain.
+    const preimage = Buffer.concat([
+      Buffer.from([4]),
+      Buffer.from('d238fb0d000000002a0000000180', 'hex'), // slot_le8 || counter_le4 || sysvarIxIdx || 0x80
+      Buffer.from('cafebabe1234', 'hex'),
+      PAYER.toBuffer(),
+      WALLET.toBuffer(),
+      Buffer.from('2a000000', 'hex'), // counter 42, LE
+      PROGRAM.toBuffer(),
+    ]);
+    const expected = '31f26fb840bdfae901ec007fb8c8be9d12b2e521ec382fbbffddc66f92efd9ae';
+    expect(Buffer.from(prefix).toString('hex')).toBe('d238fb0d000000002a0000000180');
+    expect(crypto.createHash('sha256').update(preimage).digest('hex')).toBe(expected);
+    expect(Buffer.from(challenge(WALLET)).toString('hex')).toBe(expected);
+  });
+
+  it('a different wallet yields a different challenge', () => {
+    const other = new PublicKey(new Uint8Array(32).fill(0x58));
+    expect(Buffer.from(challenge(other)).toString('hex')).toBe(
+      '50c48d8ba2655f8fb6078b63ac9d00a77508ffa602c5589d31b45e9962235084',
+    );
+    expect(Buffer.from(challenge(other)).equals(Buffer.from(challenge(WALLET)))).toBe(false);
+    // Nor is the wallet interchangeable with the payer next to it.
+    expect(Buffer.from(challenge(PAYER, WALLET)).equals(Buffer.from(challenge(WALLET)))).toBe(false);
+  });
+
+  // The attack the binding closes: RevokeSession's signed payload is the
+  // session and refund address, neither of which names a wallet. Before, the
+  // same passkey revoking the same session address at the same counter,
+  // slot and payer on two wallets signed identical bytes.
+  it('prepare* names the wallet the authority belongs to', async () => {
+    const connection = {
+      // readAuthorityCounter: counter 0 at offset 8, so the next is 1.
+      getAccountInfo: async () =>
+        ({ data: Buffer.alloc(12), owner: DEVNET_PROGRAM_ID, executable: false, lamports: 0, rentEpoch: 0 }) as AccountInfo<Buffer>,
+    };
+    const client = makeClient(connection);
+    const payer = Keypair.generate().publicKey;
+    const sessionPda = Keypair.generate().publicKey;
+    const credentialIdHash = new Uint8Array(32).fill(0xc1);
+    const publicKeyBytes = new Uint8Array(33).fill(0x02);
+    const prepare = (walletPda: PublicKey) =>
+      client.prepareRevokeSession({
+        payer,
+        walletPda,
+        secp256r1: {
+          credentialIdHash,
+          publicKeyBytes,
+          authorityPda: client.findAuthority(walletPda, credentialIdHash)[0],
+          slotOverride: SLOT,
+        },
+        sessionPda,
+      });
+    const walletA = Keypair.generate().publicKey;
+    const walletB = Keypair.generate().publicKey;
+    const [a, b] = [await prepare(walletA), await prepare(walletB)];
+
+    expect(Buffer.from(a.challenge).equals(Buffer.from(b.challenge))).toBe(false);
+    const expected = buildSecp256r1Challenge({
+      discriminator: new Uint8Array([DISC_REVOKE_SESSION]),
+      // 5: the sysvar-instructions account's index in RevokeSession.
+      authPayload: buildAuthPayloadPrefix({ slot: SLOT, counter: 1, sysvarIxIndex: 5 }),
+      signedPayload: new Uint8Array(Buffer.concat([sessionPda.toBuffer(), payer.toBuffer()])),
+      slot: SLOT,
+      payer,
+      wallet: walletA,
+      counter: 1,
+      programId: DEVNET_PROGRAM_ID,
+    });
+    expect(Buffer.from(a.challenge).toString('hex')).toBe(Buffer.from(expected).toString('hex'));
   });
 });
 

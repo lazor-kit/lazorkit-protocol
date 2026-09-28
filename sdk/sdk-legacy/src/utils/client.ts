@@ -723,6 +723,8 @@ export class LazorKitClient {
     slot: bigint;
     counter: number;
     payer: PublicKey;
+    /** The wallet the signing authority belongs to; the challenge names it. */
+    wallet: PublicKey;
     publicKeyBytes: Uint8Array;
   }): PreparedSecp256r1 {
     return prepareSecp256r1({
@@ -732,6 +734,7 @@ export class LazorKitClient {
       slot: args.slot,
       counter: args.counter,
       payer: args.payer,
+      wallet: args.wallet,
       programId: this.programId,
       publicKeyBytes: args.publicKeyBytes,
     });
@@ -776,6 +779,7 @@ export class LazorKitClient {
       slot,
       counter,
       payer: params.payer,
+      wallet: params.walletPda,
       publicKeyBytes,
     });
 
@@ -878,6 +882,7 @@ export class LazorKitClient {
       slot,
       counter,
       payer: params.payer,
+      wallet: params.walletPda,
       publicKeyBytes,
     });
 
@@ -963,6 +968,7 @@ export class LazorKitClient {
       slot,
       counter,
       payer: params.payer,
+      wallet: params.walletPda,
       publicKeyBytes,
     });
 
@@ -1045,6 +1051,7 @@ export class LazorKitClient {
       slot,
       counter,
       payer: params.payer,
+      wallet: params.walletPda,
       publicKeyBytes,
     });
 
@@ -1144,6 +1151,7 @@ export class LazorKitClient {
       slot,
       counter,
       payer: params.payer,
+      wallet: params.walletPda,
       publicKeyBytes,
     });
 
@@ -1220,6 +1228,7 @@ export class LazorKitClient {
       slot,
       counter,
       payer: params.payer,
+      wallet: params.walletPda,
       publicKeyBytes,
     });
 
@@ -1309,6 +1318,7 @@ export class LazorKitClient {
       slot,
       counter,
       payer: params.payer,
+      wallet: params.walletPda,
       publicKeyBytes,
     });
 
@@ -1499,9 +1509,9 @@ export class LazorKitClient {
    * `signatureCount` is how many times this passkey has signed for the
    * wallet. 0 for a wallet someone handed to it, which `controlledAlone`
    * cannot fully vouch for: an SPL Token account moved off the vault is only
-   * found for the watched mints. Not proof on its own: a signature the passkey
-   * made on another wallet can be replayed onto this one (see
-   * {@link pickOwnWallet}).
+   * found for the watched mints. Not proof on its own: a count raised before
+   * the passkey challenge named the wallet may hold a signature replayed from
+   * another wallet (see {@link pickOwnWallet}).
    *
    * Reads the slot once, then every candidate's wallet account; then per
    * candidate, four at a time, in the order power flows: its authorities;
@@ -1536,8 +1546,9 @@ export class LazorKitClient {
    * A wallet this passkey has never signed for is never adopted, even the
    * only one and even with `trustedKeys`: anyone can hand a wallet to a
    * passkey, and what its earlier holder left on the vault is not all
-   * readable. Nor is any wallet when two have been signed for: a signature
-   * can be replayed from one wallet onto another (see {@link pickOwnWallet}).
+   * readable. Nor is any wallet when two have been signed for: a count raised
+   * before the passkey challenge named the wallet may hold a signature
+   * replayed from another wallet (see {@link pickOwnWallet}).
    * So a user whose wallet was created but not used yet confirms it once;
    * after the first transaction it is adopted. An app that just created or
    * migrated into a wallet already knows it and need not look it up.
@@ -2704,9 +2715,10 @@ export class LazorKitClient {
    * watched (see `watchMints`), handed to someone else, into which later
    * deposits of that mint would go. A wallet the passkey signed for is one its
    * user chose — unless the signature was replayed there from another wallet,
-   * which the program's challenge does not name (see {@link pickOwnWallet});
-   * so when the passkey has signed on two authorities, neither wallet is
-   * reused. A `userSeed` wallet is vetted but cannot be held to that bar
+   * which the passkey challenge did not name until the program bound it (see
+   * {@link pickOwnWallet}); so when the passkey has signed on two
+   * authorities, neither wallet is reused. A `userSeed` wallet is vetted but
+   * cannot be held to that bar
    * (the one this call creates has no signature on it either, until used);
    * because the seed is public, pass `v1Wallet` without `userSeed` (a fresh
    * destination) when a v2 wallet already exists at the userSeed and this app
@@ -2844,12 +2856,13 @@ export class LazorKitClient {
     // for a wallet its user chose, and its authority's counter records that.
     // An Ed25519 authority keeps no such record, so for one nothing is reused.
     //
-    // Why "the": the program's passkey challenge does not name the wallet for
-    // CreateSession, AddAuthority, TransferOwnership or Authorize, so a
-    // signature made on one authority of this key can be replayed on another
-    // at the same counter, raising it too. With two signed-on authorities —
-    // at any rank, since an Admin seat's signature replays onto an Owner's —
-    // either could be the copy, and a fresh wallet is the safe answer.
+    // Why "the": until the program named the wallet in the passkey challenge,
+    // a signature for CreateSession, AddAuthority, TransferOwnership or
+    // Authorize made on one authority of this key could be replayed on another
+    // at the same counter, raising it too, and counts from then are still on
+    // chain. With two signed-on authorities — at any rank, since an Admin
+    // seat's signature replayed onto an Owner's — either could be the copy,
+    // and a fresh wallet is the safe answer.
     const mints = watchedMints(params.watchMints);
     let v2Wallet: PublicKey | undefined;
     let destinationUserSeed: Uint8Array | undefined;
@@ -3042,6 +3055,9 @@ export class LazorKitClient {
       slot,
       counter,
       payer: params.payer,
+      // The authority signing is the v1 one, and the challenge names the
+      // wallet in its header: the v1 wallet, not the v2 destination.
+      wallet: v1.wallet,
       // The challenge binds the program that verifies it, which is the one the
       // migration executes in — the v1 program, not this client's.
       programId: v1ProgramId,

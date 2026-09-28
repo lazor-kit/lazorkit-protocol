@@ -98,18 +98,20 @@ signed for is never adopted — not even the only one, and not with
 transaction: they confirm it once. A wallet your app has just created or
 migrated into, you already know; keep its address rather than looking it up.
 
-Why "the one": a signature can be copied onto another wallet. The program's
-passkey challenge covers the payer, the counter and the instruction's own
-arguments, but not the wallet, for `CreateSession`, `AddAuthority`,
-`TransferOwnership` and `Authorize`. Whoever planted a wallet for the passkey
-can take the signature from the user's first such transaction and submit it
-again on theirs, within about 150 slots, through the same fee payer (a relayer
-signs for anyone), and its counter goes up too. So when two wallets have been
-signed for, neither is adopted; the user chooses, and both rows look used. A
-copy of a signature the passkey made where it is not an Owner (an Admin seat
-on someone else's wallet), or on an authority since removed, cannot be told
-apart this way; binding the wallet into the challenge, in the program, is the
-fix for that.
+Why "the one": a count may hold a signature copied from another wallet. The
+v2 program names the wallet in the passkey challenge, so a signature made now
+verifies only on the wallet it was made for. v1 never did, nor did v2 before
+that change: the challenge covered the payer, the counter and the
+instruction's own arguments, but not the wallet, for `CreateSession`,
+`AddAuthority`, `TransferOwnership` and `Authorize`, and whoever planted a
+wallet for the passkey could take the signature from the user's first such
+transaction and submit it again on theirs, within about 150 slots, through the
+same fee payer (a relayer signs for anyone), raising its counter too. Those
+counts are still on chain, so when two wallets have been signed for, neither
+is adopted; the user chooses, and both rows look used. Among them, a copy of a
+signature the passkey made where it is not an Owner (an Admin seat on someone
+else's wallet), or on an authority since removed, cannot be told apart this
+way.
 
 ```ts
 import { createOwnershipChallenge, selectWalletByAddress } from '@lazorkit/sdk';
@@ -258,7 +260,8 @@ your setup fails, and a migration sent anyway pays into their vault.
 Where the funds land: without `userSeed`, an existing v2 wallet of this owner
 is reused only when the owner is a passkey that has **signed for it before**
 (`signatureCount > 0`), and on no other authority of the program at any rank
-(a signature from one can be replayed onto another, above), and
+(before the challenge named the wallet, a signature from one could be replayed
+onto another, above), and
 `vetMigrationDestination` finds nothing but this key able to spend from it —
 one authority, this key at Owner rank; no session or deferred execution the
 program still accepts; a vault that is still a plain system account; no

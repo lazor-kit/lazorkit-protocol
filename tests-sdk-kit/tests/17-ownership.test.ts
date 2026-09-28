@@ -18,9 +18,9 @@
  *     why only a wallet the passkey has signed for is adopted
  *     (`signatureCount`): the user's own new wallet is offered until its
  *     first transaction, and a spotless, richer planted one never outranks it
- *   - why only the *one* wallet signed for is adopted: the passkey challenge
- *     does not name the wallet, so the victim's first signature replays onto
- *     a planted wallet and raises its count too
+ *   - that a signature count cannot be copied: the passkey challenge names
+ *     the wallet, so the victim's first signature does not replay onto a
+ *     planted wallet, and the one wallet signed for is adopted
  *   - why a migration creates a destination wallet whose address holds only
  *     lamports: CreateWallet builds over them, for whoever runs it first
  *
@@ -61,6 +61,7 @@ import {
   getSlot,
   makeClient,
   sendTx,
+  sendTxExpectError,
   setupTest,
   systemTransferFromPda,
   type TestContext,
@@ -781,13 +782,13 @@ describe('passkey wallet ownership (validator)', () => {
     expect(balance.value.amount).toBe('1000');
   });
 
-  // The program's passkey challenge binds the payer, the counter and the
-  // instruction's own arguments, but not the wallet, for CreateSession (and
-  // AddAuthority, TransferOwnership, Authorize). So the signature from the
-  // victim's first transaction on their own wallet also works on a wallet
-  // planted for their passkey — through the same fee payer, which a relayer
-  // lends to anyone — and raises its counter too.
-  it("a planted wallet's signature count can be raised by replaying the victim's own first signature, so two signed-for wallets are never adopted", async () => {
+  // CreateSession's signed payload names only the session key, and the payer
+  // is a relayer that signs for anyone. Before the program folded the
+  // authority's wallet into the passkey challenge, the signature from the
+  // victim's first transaction on their own wallet also verified on a wallet
+  // planted for their passkey, at the same counter, and raised its count too —
+  // so two wallets signed for could not be told apart. Now it is refused.
+  it("the victim's own first signature does not replay onto a planted wallet, so the one wallet signed for is adopted", async () => {
     const victim = await generateMockSecp256r1Key(RP_ID);
     const real = await createPasskeyWallet(victim);
     await airdrop(ctx, real.vaultPda, 2_000_000n);
@@ -817,24 +818,26 @@ describe('passkey wallet ownership (validator)', () => {
       ...ix,
       accounts: ix.accounts?.map((a) => ({ ...a, address: swap.get(a.address) ?? a.address })),
     }));
-    await sendTx(ctx, replayed);
+    // Same counter (1 on both authorities), same payer, fresh slot: only the
+    // wallet differs, and the challenge the program recomputes names it.
+    await sendTxExpectError(ctx, replayed, [], 3005); // InvalidMessageHash
+    expect(await client.readCounter(bait.victimAuthorityPda)).toBe(0);
+    expect((await ctx.rpc.getAccountInfo(baitSession, { encoding: 'base64' }).send()).value).toBeNull();
     // A lamport more than the victim's own vault, to rank first by balance.
     await airdrop(ctx, bait.vaultPda, (await getBalance(ctx, real.vaultPda)) + 1n);
 
-    // With the app's session key trusted, both wallets are clean and both
-    // signed for once: the counts cannot tell the user's wallet from the copy.
+    // With the app's session key trusted, the user's wallet is the one signed
+    // for; the richer planted one never was, and does not outrank it.
     const own = await client.findOwnPasskeyWallet({
       credentialIdHash: victim.credentialIdHash,
       rpId: RP_ID,
       proof: await proofFrom(victim),
       trustedKeys: [appSessionKey],
     });
-    expect(own.adopt).toBeNull();
-    expect(own.needsConfirmation.map((f) => f.walletPda)).toEqual([bait.walletPda, real.walletPda]);
-    for (const f of own.needsConfirmation) {
-      expect(f).toMatchObject({ controlledAlone: true, signatureCount: 1, otherAuthorities: [], tokenGrants: [] });
-      expect(f.liveSessions.map((s) => s.sessionKey)).toEqual([appSessionKey]);
-    }
+    expect(own.adopt?.walletPda).toBe(real.walletPda);
+    expect(own.adopt).toMatchObject({ controlledAlone: true, signatureCount: 1, otherAuthorities: [], tokenGrants: [] });
+    expect(own.adopt!.liveSessions.map((s) => s.sessionKey)).toEqual([appSessionKey]);
+    expect(own.needsConfirmation).toEqual([]);
   });
 
   // Why migrateV1Wallet creates a destination wallet whose address holds only

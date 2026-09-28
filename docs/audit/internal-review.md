@@ -39,6 +39,18 @@ exploit" to "proves rejection" as its fix landed
   run the action engine — so a policy-bearing Admin could spend without limit via
   Authorize + ExecuteDeferred. Fixed: `authorize.rs` refuses a policy-bearing
   authority.
+- **MEDIUM — the passkey challenge did not name the wallet.** It bound the
+  payer, the counter and the instruction's own arguments, and for
+  CreateSession, AddAuthority, TransferOwnership, Authorize, RevokeSession and
+  RemoveAuthority none of those tells two wallets apart: an assertion for wallet
+  A verified on a wallet B holding the same passkey at the same counter, within
+  the slot window, through the same (shared relayer) payer — a session key or
+  Admin approved for A could be installed on B. Fixed: the challenge hashes the
+  authenticating authority's own `wallet` header field after the payer (no new
+  account; `MigrateWallet` in the sunset build included). Tests:
+  `wallet_binding_tests` (both replays refused with 3005, the pre-binding layout
+  refused, the SDK fixed vector pinned), and the sunset suite's
+  `a_passkey_wallet_migrates_with_the_wallet_bound_challenge`.
 - **LOW** — `deferred.rs` gained the anti-CPI guard `immediate.rs` had; both SDK
   `computeAccountsHash` builders mask the forward bit off the program-id index;
   stale `entrypoint`/`error` comments describing an abandoned "strict reject"

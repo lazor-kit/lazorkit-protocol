@@ -19,6 +19,7 @@ import {
   LazorKit,
   PROGRAM_ID_DEVNET,
   PROGRAM_ID_DEVNET_V1,
+  buildSecp256r1Challenge,
   findVaultPda,
   V1_DISC_AUTHORITY,
   V1_DISC_WALLET,
@@ -479,11 +480,12 @@ describe('migrateV1Wallet by address', () => {
     return data;
   }
 
-  // The program's passkey challenge does not name the wallet for
-  // CreateSession, AddAuthority, TransferOwnership or Authorize: a signature
-  // this passkey made on one authority can be submitted again on another at
-  // the same counter, through the same fee payer. With two signed on, either
-  // wallet's count may be the copy — including one copied from an Admin seat.
+  // Until the program named the wallet in the passkey challenge, a signature
+  // this passkey made on one authority for CreateSession, AddAuthority,
+  // TransferOwnership or Authorize could be submitted again on another at the
+  // same counter, through the same fee payer, and counts from then are still
+  // on chain. With two signed on, either wallet's count may be the copy —
+  // including one copied from an Admin seat.
   for (const [label, role] of [
     ['as an Owner of another wallet', 0],
     ['at Admin rank on another wallet', 1],
@@ -1383,6 +1385,55 @@ describe('migrateV1Wallet by address', () => {
     if (result.migrate.type !== 'secp256r1') return;
     expect(result.migrate.challenge).toHaveLength(32);
     expect(result.migrate.finalize).toBeTypeOf('function');
+  });
+
+  // The v1 authority signs, so the wallet the challenge names is the one in
+  // its header — the v1 wallet — and the program verifying it is the v1 id.
+  // Naming the v2 destination instead would fail on chain with 3005.
+  it("binds a passkey migration's challenge to the v1 wallet, not the v2 destination", async () => {
+    const { rpc, v1Wallet } = await fixture();
+    const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+      payer: PAYER,
+      owner: {
+        type: 'secp256r1',
+        credentialIdHash: CREDENTIAL,
+        compressedPubkey: new Uint8Array(33).fill(0x7c),
+        rpId: 'portal.lazor.sh',
+      },
+      v1Wallet,
+    });
+    if (result.migrate.type !== 'secp256r1') throw new Error('expected a passkey plan');
+    expect(result.tokens).toEqual([]);
+
+    // The 14-byte prefix the program hashes rides in the migrate instruction,
+    // after [discriminator, token count].
+    const instructions = result.migrate.finalize({
+      signature: new Uint8Array(64),
+      authenticatorData: new Uint8Array(37),
+      clientDataJsonHash: new Uint8Array(32),
+      clientDataJson: new TextEncoder().encode('{}'),
+    });
+    const data = instructions[instructions.length - 1]!.data!;
+    const prefix = data.slice(2, 16);
+    const counter = new DataView(prefix.buffer, prefix.byteOffset).getUint32(8, true);
+    // destination || v1_wallet || num_tokens || refund_dest (no tokens here).
+    const signedPayload = new Uint8Array(97);
+    signedPayload.set(addressEncoder.encode(result.v2Vault), 0);
+    signedPayload.set(addressEncoder.encode(v1Wallet), 32);
+    signedPayload.set(addressEncoder.encode(PAYER), 65);
+    const challengeFor = (wallet: Address) =>
+      buildSecp256r1Challenge({
+        discriminator: new Uint8Array([17]),
+        authPayload: prefix,
+        signedPayload,
+        payer: PAYER,
+        wallet,
+        counter,
+        programId: V1_PROGRAM_ID,
+      });
+
+    expect(result.migrate.challenge).toEqual(challengeFor(v1Wallet));
+    expect(result.migrate.challenge).not.toEqual(challengeFor(result.destinationWallet));
   });
 
   it('says what to do when neither a seed nor an address is given', async () => {

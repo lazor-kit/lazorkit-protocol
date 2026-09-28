@@ -126,6 +126,7 @@ describe('Counter Edge Cases', () => {
       slot: slot1,
       counter: 1,
       payer: ctx.payer.address,
+      wallet: walletPda,
       programId: PROGRAM_ID_DEVNET,
       publicKeyBytes: ownerKey.publicKeyBytes,
     });
@@ -182,6 +183,7 @@ describe('Counter Edge Cases', () => {
       slot: slot2,
       counter: 2,
       payer: ctx.payer.address,
+      wallet: walletPda,
       programId: PROGRAM_ID_DEVNET,
       publicKeyBytes: ownerKey.publicKeyBytes,
     });
@@ -276,6 +278,7 @@ describe('Counter Edge Cases', () => {
       slot,
       counter: 1,
       payer: ctx.payer.address,
+      wallet: walletPda,
       programId: PROGRAM_ID_DEVNET,
       publicKeyBytes: key1.publicKeyBytes,
     });
