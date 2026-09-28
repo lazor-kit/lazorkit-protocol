@@ -701,6 +701,26 @@ export type LazorKitRpc = Rpc<
 >;
 
 /**
+ * The runtime reports an account's privileges per key, not per position: a key
+ * listed twice in a message is a signer, and writable, at every position if it
+ * is so at any one. The accounts hash is over those runtime flags, so a layout
+ * that repeats a key has to hash the union. Authorize's does — the payer is
+ * index 0 (signer) and again the refund destination at index 4 (writable only),
+ * and `buildCompactLayout` maps an inner reference to the payer onto index 4,
+ * where the program reads signer + writable.
+ *
+ * That models this instruction's own list. The rest of the transaction can
+ * only add privileges; the fee payer, always a writable signer, is why the
+ * Execute payer is declared writable.
+ */
+function withRuntimeRoles(metas: AccountMeta[]): AccountMeta[] {
+  // AccountRole is a bit set: bit 0 writable, bit 1 signer.
+  const union = new Map<Address, number>();
+  for (const m of metas) union.set(m.address, (union.get(m.address) ?? 0) | (m.role as number));
+  return metas.map((m) => ({ address: m.address, role: union.get(m.address)! as AccountRole }));
+}
+
+/**
  * Construct a LazorKit client.
  *
  * @param rpc       kit Rpc with at least GetAccountInfoApi + GetSlotApi capabilities
@@ -940,7 +960,9 @@ export class LazorKit {
       userInstructions,
       payer,
     );
-    const allAccountMetas = [...fixedAccounts, ...remainingAccounts];
+    // The program hashes the flags the runtime reports, so read the metas the
+    // way the runtime does (see withRuntimeRoles).
+    const allAccountMetas = withRuntimeRoles([...fixedAccounts, ...remainingAccounts]);
     const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
     return { compactInstructions, remainingAccounts, allAccountMetas, accountsHash };
   }
@@ -2430,8 +2452,13 @@ export class LazorKit {
     const registerIx = fee?.registerIx;
 
     const SYSVAR_INSTRUCTIONS_ADDRESS = (await import('./instructions/system.js')).SYSVAR_INSTRUCTIONS_ADDRESS;
+    // As createExecuteIx declares them. The payer is a writable signer there
+    // because the runtime reports it as one anyway when it pays the fee, and
+    // the accounts hash is over what the runtime reports: an inner
+    // instruction that names the payer (repaying a paymaster) is hashed with
+    // those flags on chain.
     const fixedAccounts: AccountMeta[] = [
-      { address: params.payer, role: AccountRole.READONLY_SIGNER },
+      { address: params.payer, role: AccountRole.WRITABLE_SIGNER },
       { address: params.walletPda, role: AccountRole.READONLY },
       { address: authorityPda, role: AccountRole.WRITABLE },
       { address: vaultPda, role: AccountRole.WRITABLE },
@@ -2514,6 +2541,17 @@ export class LazorKit {
     return this.finalizeAuthorize(prepared, response);
   }
 
+  /**
+   * Tx1 of the deferred flow: the passkey approves `instructions` for a later
+   * `ExecuteDeferred`, and `finalizeAuthorize` returns what tx2 needs.
+   *
+   * The accounts hash it signs assumes `payer` also sends tx2, as
+   * `executeDeferredFromPayload` does by default: it is then a signer of tx2 as
+   * well as its refund destination, and the program reads it that way. If
+   * another key pays for tx2 and an inner instruction names this payer (to
+   * repay it, say), the program reads it as writable only and `ExecuteDeferred`
+   * fails with `DeferredHashMismatch` (3015).
+   */
   async prepareAuthorize(params: {
     payer: Address;
     walletPda: Address;
@@ -2533,9 +2571,12 @@ export class LazorKit {
       counter,
     );
 
+    // TX2's (ExecuteDeferred's) layout, which is what the program hashes when
+    // it replays, with the roles createExecuteDeferredIx gives them. The payer
+    // is there twice, as tx2's payer and as the refund destination (see above).
     const fixedAccounts: AccountMeta[] = [
       { address: params.payer, role: AccountRole.WRITABLE_SIGNER },
-      { address: params.walletPda, role: AccountRole.WRITABLE },
+      { address: params.walletPda, role: AccountRole.READONLY },
       { address: vaultPda, role: AccountRole.WRITABLE },
       { address: deferredExecPda, role: AccountRole.WRITABLE },
       { address: params.payer, role: AccountRole.WRITABLE },

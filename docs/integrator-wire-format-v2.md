@@ -163,6 +163,13 @@ flags = (is_signer as u8) | ((is_writable as u8) << 1)
 ```
 
 Use the account's **runtime** signer/writable flags, in the walk order above.
+The runtime reports them per key over the whole transaction, not per position:
+the fee payer is always signer + writable (so declare the Execute payer
+writable, as the IDL does, and hash it `0x03` when an inner instruction names
+it), and a key listed twice carries the union of its entries — Authorize's tx2
+layout has the payer at index 0 and again as the refund destination at index 4,
+which is signer + writable when the same payer sends tx2 and writable only when
+another key does.
 The compact instruction's account-index byte carries an opt-in forward-signer
 bit in its high bit (`0x80`); mask it off (`& 0x7f`) before using the index for
 this hash, and account for it in your compact encoding (see `compact.rs`).

@@ -652,6 +652,14 @@ the program id account then each referenced account, each contributing its
 `is_writable`). The forward-signer bit is masked off before lookup, so requesting
 forwarding does not change the digest.
 
+The flags are the runtime's, which are per key over the whole message, not what
+any one instruction declared: the fee payer is always a writable signer, and a
+key listed twice has the union of its entries. A client has to predict them.
+The SDKs declare the Execute payer writable (as the IDL does), and merge a
+repeated key's flags before hashing — Authorize's tx2 layout lists the payer
+both as payer and as refund destination, and inner references resolve to the
+latter. That prediction assumes the Authorize payer also sends tx2.
+
 The flags byte is M-4. Binding only the keys left the privileges for the relayer
 to choose: it could take an account the passkey holder had approved as read-only
 and submit it writable. Golden vectors for the exact encoding live in
@@ -679,7 +687,7 @@ This means admins, spenders, and session keys can all operate on the same wallet
 2-transaction flow for payloads exceeding the ~574 bytes available in a single Secp256r1 Execute (e.g., Jupiter swaps with complex routing).
 
 1. **TX1 (Authorize)** — signer computes `instructions_hash = SHA256(compact_instructions)` and `accounts_hash = SHA256(referenced_pubkeys)`. These are signed via Secp256r1 and stored in a `DeferredExec` PDA. Odometer counter is incremented.
-2. **TX2 (ExecuteDeferred)** — any payer submits the full compact instructions. Program verifies both hashes, closes the `DeferredExec` account (close-before-CPI pattern), and executes via CPI with vault signing.
+2. **TX2 (ExecuteDeferred)** — any payer submits the full compact instructions. Program verifies both hashes, consumes the `DeferredExec` authorization (zeroes its data before any CPI, so nothing reached from the inner instructions can replay it), executes via CPI with vault signing, and only then moves its rent to the original payer. The rent moves last because the runtime syncs a caller's lamport writes into a CPI only for the accounts that CPI is handed: credited earlier, the refund would cross into any inner instruction that names the payer — a paymaster being repaid — without the matching debit, and the CPI would fail with `UnbalancedInstruction`.
 
 ```mermaid
 sequenceDiagram
@@ -706,8 +714,9 @@ sequenceDiagram
     LK->>LK: SHA256(submitted instructions) == stored ?
     LK->>LK: SHA256(submitted account pubkeys) == stored ?
     LK->>LK: current_slot ≤ expires_at ?
-    LK->>DPDA: close (rent → original payer)
+    LK->>DPDA: consume (zero data)
     LK->>LK: execute inner ixs via vault CPI
+    LK->>DPDA: close (rent → original payer)
     end
 
     rect rgb(255,243,224)

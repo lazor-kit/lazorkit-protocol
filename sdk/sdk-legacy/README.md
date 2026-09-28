@@ -707,6 +707,10 @@ import {
 wallet PDA, or the v1 wallet for `MigrateWallet` — and hashes it into the
 challenge after the payer:
 `SHA256(discriminator || auth_payload[..14] || signed_payload || payer || wallet || counter_le4 || program_id)`.
+`computeAccountsHash` hashes the flags each meta carries, and the program
+compares them with the runtime's, which are per key: give the fee payer as a
+writable signer (declare the Execute payer writable) and a key listed twice the
+union of its entries — see §5 of `docs/integrator-wire-format-v2.md`.
 The ref implementations are in `tests-sdk/tests/05-replay.test.ts`, `06-counter.test.ts`, and `08-deferred.test.ts`.
 
 ## Constants

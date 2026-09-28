@@ -360,8 +360,11 @@ export function createExecuteIx(params: {
   ];
   if (params.authPayload) parts.push(params.authPayload);
 
+  // The payer is writable: the execution fee is a transfer out of it, an inner
+  // instruction may pay it back, and as the fee payer the runtime reports it
+  // writable regardless — which is what a passkey's accounts hash binds.
   const accounts: AccountMeta[] = [
-    meta(params.payer, SIGNER_RO),
+    meta(params.payer, SIGNER_RW),
     meta(params.walletPda, RO),
     meta(params.authorityPda, RW),
     meta(params.vaultPda, RW),
