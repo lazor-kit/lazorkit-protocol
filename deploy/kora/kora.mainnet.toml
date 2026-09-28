@@ -94,7 +94,7 @@ cross_cluster_check = false
 # no exemption, and instructions that only appear in simulation are checked too.
 # A missing entry is a refusal at the relayer, before anything reaches the chain.
 allowed_programs = [
-    "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",   # LazorKit v2  <!-- V2_MAINNET_PENDING -->
+    "LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8",   # LazorKit v2
     # The v1 program (LazorjRF…) — uncomment ONLY after it runs the sunset
     # binary. Until then it is full v1, whose Execute forwards every outer signer
     # into its CPIs (H-3): sponsoring it from this relayer would let any v1 wallet

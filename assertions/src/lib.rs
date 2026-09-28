@@ -21,7 +21,7 @@ use pinocchio_pubkey::declare_id;
 // funds on one flag day.
 //
 //   feature          id                                             runs
-//   mainnet          LAZORKIT_V2_MAINNET_ID                         v2
+//   mainnet          LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8    v2
 //   devnet           57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv   v2
 //   staging          HQ584adp8ub2FzrTx1fdNmXmrL5yuyVndafPB3x4NYG3   v2
 //   mainnet-v1       LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi    sunset
@@ -34,7 +34,7 @@ use pinocchio_pubkey::declare_id;
 // flag day this layout exists to avoid.
 
 #[cfg(feature = "mainnet")]
-declare_id!("LAZORKIT_V2_MAINNET_ID");
+declare_id!("LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8");
 
 #[cfg(feature = "devnet")]
 declare_id!("57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv");

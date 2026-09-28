@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./scripts/build-all.sh devnet     # v2 at 57bTNW... (--features devnet)
-#   ./scripts/build-all.sh mainnet    # v2 at the v2 mainnet id (V2_MAINNET_PENDING)
+#   ./scripts/build-all.sh mainnet    # v2 at LazorFroi...
 #
 # Neither builds anything deployable at a v1 id (LazorjRF..., 4h3X...): those
 # take the sunset binary, `--features mainnet-v1` / `devnet-v1` — see

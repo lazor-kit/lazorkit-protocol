@@ -175,9 +175,9 @@ describe('PDA derivation parity with sdk-legacy', () => {
 });
 
 describe('Constants sanity', () => {
-  it('mainnet program id is the canonical vanity address', () => {
+  it('mainnet program id is the v2 deployment, not the v1 one', () => {
     expect(PROGRAM_ID_MAINNET.toString()).toBe(
-      'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi',
+      'LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8',
     );
   });
 

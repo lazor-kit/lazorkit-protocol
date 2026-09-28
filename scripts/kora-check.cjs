@@ -20,7 +20,7 @@ const SECP256R1 = 'Secp256r1SigVerify1111111111111111111111111';
 // v2 ids. The v1 ids are listed separately: a relayer sponsoring migrations
 // has to allow them too, because MigrateWallet executes against the v1 program.
 const LAZORKIT = {
-  mainnet: 'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi', // V2_MAINNET_PENDING
+  mainnet: 'LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8',
   devnet: '57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv',
 };
 const LAZORKIT_V1 = {

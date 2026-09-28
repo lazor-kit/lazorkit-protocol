@@ -160,12 +160,12 @@ files. Nothing below deploys a path that a later build could overwrite.
       ```bash
       solana-test-validator --reset --ledger /tmp/two-id-ledger \
         --deactivate-feature B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g \
-        --upgradeable-program <v2-id> target/artifacts/v2/lazorkit_program.so <payer-pubkey> \
+        --upgradeable-program LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8 target/artifacts/v2/lazorkit_program.so <payer-pubkey> \
         --upgradeable-program LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi target/artifacts/v1-live.so <payer-pubkey>
       solana airdrop 100 <payer-pubkey> -u localhost
 
       PAYER=<payer.json> RPC_URL=http://127.0.0.1:8899 WS_URL=ws://127.0.0.1:8900 \
-      V2_PROGRAM_ID=<v2-id> V1_PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
+      V2_PROGRAM_ID=LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8 V1_PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
       V1_PRELOADED=1 SUNSET_SO=target/artifacts/sunset/lazorkit_program.so \
         node scripts/rehearse/two-id-rehearsal.mjs
       ```
@@ -187,8 +187,9 @@ files. Nothing below deploys a path that a later build could overwrite.
 Nothing here touches a v1 account. The same flow has been rehearsed end to
 end — see [Two-id rehearsal](#two-id-rehearsal).
 
-- [ ] The v2 program keypair is the ground `Lazor…` vanity, kept at
-      `~/.config/solana/lazorkit-v2-program/` (mode 600, never in a repo). It
+- [ ] The v2 program keypair is the ground vanity `LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8`
+      (2026-09-28), kept at `~/.config/solana/lazorkit-v2-program/LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8.json`
+      (mode 600, never in a repo). Back it up offline before the deploy. It
       only signs the first deploy; after that the upgrade authority rules.
 - [ ] Re-hash `target/artifacts/v2/lazorkit_program.so` and compare with the
       deploy log. Any difference: stop. (`mainnet` is pinned to the v2 id; at
@@ -196,7 +197,7 @@ end — see [Two-id rehearsal](#two-id-rehearsal).
 - [ ] Deploy fresh (a new program, not an upgrade):
       ```bash
       solana program deploy target/artifacts/v2/lazorkit_program.so \
-        --program-id ~/.config/solana/lazorkit-v2-program/<v2-id>.json \
+        --program-id ~/.config/solana/lazorkit-v2-program/LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8.json \
         --upgrade-authority <upgrade-authority.json> \
         --url <mainnet-rpc>
       ```
@@ -313,6 +314,23 @@ the same script ran earlier the same day against the rehearsal slot
 (`3AN3Wn…`) and proved the 4018 refusal on chain before a flaky public RPC cut
 it short; the local run replaces it as the record. §3 repeats it with the
 mainnet artifacts at the mainnet ids.
+
+**2026-09-28, the same run at the mainnet ids**, with the §2 commands on this
+branch — the mainnet v2 id had just been ground. The v1 dump preloaded at
+`LazorjRF…`, v2 at `LazorFroi…`, then `LazorjRF…` upgraded to the sunset build:
+**14/14**, the passkey leg again on the default pairing
+(`legacyProgramIdFor(LazorFroi…) = LazorjRF…`). The phase B rollback was then
+rehearsed on the same validator: `LazorjRF…` upgraded back to `v1-live.so`, and
+its programdata dumped with the dump's exact bytes.
+
+| artifact | id | size | SHA-256 (this machine — the release commit re-records) |
+|---|---|---|---|
+| v1 — `solana program dump` of the live program | `LazorjRF…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
+| sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45760 | `ccbecead5990b02302dbfd56c356d5d958d0f7cde1a4fbcbdf0bf18bc47e4a80` |
+| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 150656 | `dd947f6eacebc10ecbd60269caf340b0541640ccb8963d597b0b4f5f6f5a3ffb` |
+
+§3 still has to be run at deploy time: the artifacts that ship are the ones
+built from the merged release commit, and those are the ones to rehearse.
 
 Two things the first local attempts surfaced, both now handled in the script
 and in §2/§3: a program upgraded in slot N only runs from N+1, and Agave 4.2's
@@ -747,7 +765,7 @@ It never reorders or inserts instructions.
       **Confirmed the hard way on devnet (2026-09-21):** a migration through the
       UI was refused with `Program 3AN3Wn… is not in the allowed list`. This
       fails at the relayer, before anything reaches the chain.
-- [ ] Confirm the live `allowed_programs` contains the mainnet vanity id on the
+- [ ] Confirm the live `allowed_programs` contains the v2 id (`LazorFroi…`) on the
       mainnet deployment specifically.
 - [ ] Kora simulates every transaction before signing and rejects on
       simulation failure, folding the simulated inner instructions into the
@@ -836,7 +854,7 @@ Two defects only that run could have found, both fixed:
   (sdk-legacy 1.1.1).
 - **The paymaster refused to sponsor.** Kora answered *"Program 3AN3Wn… is not
   in the allowed list"*, live confirmation of the allowlist gate below. See the
-  paymaster section: the mainnet config must list the vanity program id and the
+  paymaster section: the mainnet config must list the v2 program id and the
   Secp256r1 precompile, or every sponsored transaction fails this way.
 
 ## Kit-SDK migration rehearsal
@@ -1015,7 +1033,7 @@ DEPS=$(mktemp -d) && npm i --prefix "$DEPS" @sqds/multisig@2.1.4 @solana/web3.js
 
 # once per program: the v2 id after phase A, LazorjRF… after phase B
 RPC_URL=https://api.mainnet-beta.solana.com \
-PROGRAM_ID=<v2-id | LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi> \
+PROGRAM_ID=<LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8 | LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi> \
 MULTISIG=Gb65EbMEZocGgotuTzJEfogfT3GPr8t8fARWYfMCHaw9 \
 NODE_PATH="$DEPS/node_modules" node scripts/rehearse/squads-upgrade.cjs preflight
 ```
@@ -1076,7 +1094,7 @@ for good:
         program. Use this one.
       - The CLI fallback, if SAT is unavailable:
         ```bash
-        solana program set-upgrade-authority <v2-id | LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi> \
+        solana program set-upgrade-authority <LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8 | LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi> \
           --new-upgrade-authority E11nkm79w4rEnB2ZNmTKhWKF4BH5z34LUkTw2L4LBjKa \
           --skip-new-upgrade-authority-signer-check \
           --upgrade-authority <current-authority-keypair> \
@@ -1132,7 +1150,7 @@ handover against the v2 deploy window is free. (The sunset binary refuses
 date/operator:
 release commit:                 <sha>
 toolchain (rustc / solana):     <versions>   platform-tools: v1.53
-v2 id:                          <vanity id>
+v2 id:                          LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8
 v2 .so sha256 / size:           <hash> / <bytes>      (target/artifacts/v2)
 sunset .so sha256 / size:       <hash> / <bytes>      (target/artifacts/sunset, ≈ 45 KB)
 v1 live dump sha256:            <hash>                (target/artifacts/v1-live.so)
