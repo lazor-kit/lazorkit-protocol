@@ -85,16 +85,25 @@ jobs:
       # rehearsal and rehearsal-v1 pin the same id (3AN3Wn…), so their binaries
       # differ only by the sunset gate. Comparing mainnet with mainnet-v1 would
       # prove nothing: different ids always hash differently.
+      # Each into its own directory, hashed from there: nothing can read a
+      # stale or missing file and compare two empty hashes as "identical".
       - name: Build rehearsal pair (same id, full vs sunset)
         working-directory: program
         run: |
-          cargo build-sbf --features rehearsal
-          shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal.sha
-          cargo build-sbf --features rehearsal-v1
-          shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal-v1.sha
+          set -euo pipefail
+          cargo build-sbf --features rehearsal --sbf-out-dir /tmp/sbf-rehearsal
+          cargo build-sbf --features rehearsal-v1 --sbf-out-dir /tmp/sbf-rehearsal-v1
+          shasum -a 256 /tmp/sbf-rehearsal/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal.sha
+          shasum -a 256 /tmp/sbf-rehearsal-v1/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal-v1.sha
+          echo "rehearsal    $(cat /tmp/rehearsal.sha) ($(stat -c %s /tmp/sbf-rehearsal/lazorkit_program.so) bytes)"
+          echo "rehearsal-v1 $(cat /tmp/rehearsal-v1.sha) ($(stat -c %s /tmp/sbf-rehearsal-v1/lazorkit_program.so) bytes)"
 
       - name: Verify binaries differ
         run: |
+          if [ ! -s /tmp/rehearsal.sha ] || [ ! -s /tmp/rehearsal-v1.sha ]; then
+            echo "ERROR: a rehearsal hash is missing — the build step did not produce its binary."
+            exit 1
+          fi
           if [ "$(cat /tmp/rehearsal.sha)" = "$(cat /tmp/rehearsal-v1.sha)" ]; then
             echo "ERROR: rehearsal and rehearsal-v1 build the same binary at the same id —"
             echo "       the sunset gate is not being compiled in."
