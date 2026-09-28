@@ -653,12 +653,21 @@ the program id account then each referenced account, each contributing its
 forwarding does not change the digest.
 
 The flags are the runtime's, which are per key over the whole message, not what
-any one instruction declared: the fee payer is always a writable signer, and a
-key listed twice has the union of its entries. A client has to predict them.
-The SDKs declare the Execute payer writable (as the IDL does), and merge a
-repeated key's flags before hashing — Authorize's tx2 layout lists the payer
-both as payer and as refund destination, and inner references resolve to the
-latter. That prediction assumes the Authorize payer also sends tx2.
+any one instruction declared: the fee payer is always a writable signer, a key
+listed twice has the union of its entries, and the runtime demotes a reserved
+account or an invoked program id to read-only whatever any list says. A client
+has to predict them. The SDKs model the instruction's own list and the fee
+payer: they declare the Execute payer writable (as the IDL does), take a
+`feePayer` when another key pays the fee, and merge a repeated key's flags
+before hashing. Authorize's tx2 layout has tx2's payer at index 0 and the
+Authorize payer — the only refund destination the program accepts — at index
+4, where inner references to it resolve; it is a signer there only if it also
+sends tx2, so `prepareAuthorize` takes the `executor` that will, and the
+deferred payload records it. The rest — another top-level instruction listing a
+key with more privilege, the protocol-fee accounts appended after the remaining
+accounts, the runtime's demotions — is the caller's to account for. A wrong
+guess fails closed: the program refuses with 3005 (3015 for ExecuteDeferred) and
+nothing runs.
 
 The flags byte is M-4. Binding only the keys left the privileges for the relayer
 to choose: it could take an account the passkey holder had approved as read-only

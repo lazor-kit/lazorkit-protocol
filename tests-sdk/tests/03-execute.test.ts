@@ -300,5 +300,54 @@ describe('Execute', () => {
       expect(payerDelta).toBeGreaterThan(0);
       expect(payerDelta).toBeLessThanOrEqual(1_000_000);
     });
+
+    // The sponsor that pays the fee is not the Execute payer, and it is the one
+    // repaid. It sits among the inner accounts, declared writable by the
+    // transfer, and the runtime reports it a writable signer: prepareExecute
+    // has to be told who pays the fee (3005 otherwise).
+    it('executes an inner transfer to a fee payer that is not the Execute payer', async () => {
+      const feePayer = Keypair.generate();
+      const airdrop = await ctx.connection.requestAirdrop(feePayer.publicKey, LAMPORTS_PER_SOL);
+      await ctx.connection.confirmTransaction(airdrop, 'confirmed');
+      const prepared = await client.prepareExecute({
+        payer: ctx.payer.publicKey,
+        walletPda,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
+        instructions: [
+          SystemProgram.transfer({
+            fromPubkey: vaultPda,
+            toPubkey: feePayer.publicKey,
+            lamports: 1_000_000,
+          }),
+        ],
+        feePayer: feePayer.publicKey,
+      });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      const { instructions } = client.finalizeExecute(prepared, response);
+
+      const vaultBefore = await ctx.connection.getBalance(vaultPda);
+      const feePayerBefore = await ctx.connection.getBalance(feePayer.publicKey);
+      const tx = new Transaction();
+      for (const ix of instructions) tx.add(ix);
+      tx.feePayer = feePayer.publicKey;
+      const sig = await sendAndConfirmTransaction(ctx.connection, tx, [feePayer, ctx.payer], {
+        commitment: 'confirmed',
+      });
+
+      expect(vaultBefore - (await ctx.connection.getBalance(vaultPda))).toBe(1_000_000);
+      // Repaid in full, less the transaction fee it paid; the execution fee
+      // was the Execute payer's.
+      const { meta } = (await ctx.connection.getTransaction(sig, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      }))!;
+      expect((await ctx.connection.getBalance(feePayer.publicKey)) - feePayerBefore).toBe(
+        1_000_000 - meta!.fee,
+      );
+    });
   });
 });

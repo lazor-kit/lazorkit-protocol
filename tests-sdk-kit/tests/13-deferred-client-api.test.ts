@@ -214,6 +214,48 @@ describe('Deferred Client API ergonomics', () => {
     expect(closed.value).toBeNull();
   });
 
+  // The hand-off: a relayer sends tx2, and the vault repays the sponsor that
+  // paid for tx1. The sponsor is tx2's refund destination but does not sign
+  // it, so the hash must read it writable only — `executor` says who will
+  // send. Hashed as a signer, as when the sponsor sends tx2 itself, this
+  // failed with DeferredHashMismatch (3015).
+  it('executes a deferred inner transfer to the payer when a relayer sends tx2', async () => {
+    const relayer = await generateKeyPairSigner();
+    await airdrop(ctx, relayer.address, 1_000_000_000n);
+    const prepared = await client.prepareAuthorize({
+      payer: ctx.payer.address,
+      walletPda,
+      secp256r1: { credentialIdHash: ownerKey.credentialIdHash, authorityPda },
+      instructions: [systemTransferFromPda(vaultPda, ctx.payer.address, 1_000_000n)],
+      executor: relayer.address,
+    });
+    const webauthnResponse = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+    const { instructions: authIxs, deferredPayload } = client.finalizeAuthorize(
+      prepared,
+      webauthnResponse,
+    );
+    await sendTx(ctx, authIxs);
+    const rent = await getBalance(ctx, deferredPayload.deferredExecPda);
+
+    // The relayer has only the payload off the wire: it names no refund
+    // destination, and the payer does not sign.
+    const tx2 = await client.executeDeferredFromPayload({
+      payer: relayer.address,
+      deferredPayload: deserializeDeferredPayload(serializeDeferredPayload(deferredPayload)),
+    });
+    const vaultBefore = await getBalance(ctx, vaultPda);
+    const payerBefore = await getBalance(ctx, ctx.payer.address);
+    await sendTx(ctx, tx2.instructions, [], relayer);
+
+    expect(vaultBefore - (await getBalance(ctx, vaultPda))).toBe(1_000_000n);
+    // Repaid, and its rent back; the relayer paid every fee.
+    expect((await getBalance(ctx, ctx.payer.address)) - payerBefore).toBe(1_000_000n + rent);
+    const closed = await ctx.rpc
+      .getAccountInfo(deferredPayload.deferredExecPda, { encoding: 'base64' })
+      .send();
+    expect(closed.value).toBeNull();
+  });
+
   it('deserialize rejects malformed JSON', () => {
     expect(() => deserializeDeferredPayload('not json')).toThrow();
     expect(() => deserializeDeferredPayload('{}')).toThrow(

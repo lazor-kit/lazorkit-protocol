@@ -560,6 +560,7 @@ const prepared = await client.prepareAuthorize({
   secp256r1: { credentialIdHash, authorityPda },
   instructions: [jupiterSwapIx],
   expiryOffset: 300,  // slots (~2 min)
+  executor: relayer.publicKey,  // who sends TX2; defaults to `payer`
 });
 const webauthnResponse = await getWebAuthnResponse(prepared.challenge, rpId, credentialId);
 const { instructions: tx1, deferredPayload } = client.finalizeAuthorize(prepared, webauthnResponse);
@@ -577,6 +578,14 @@ const { instructions: tx2 } = await client.executeDeferredFromPayload({
   deferredPayload: payload,
 });
 ```
+
+The accounts hash the passkey signs covers TX2's accounts with the flags the
+program will read there, and TX2's payer and refund destination (always the
+TX1 `payer`) read differently depending on who sends it. So name the
+`executor` up front whenever an inner instruction may pay either of them back;
+`executeDeferredFromPayload` refuses another sender for such a payload rather
+than build a TX2 that fails with `DeferredHashMismatch` (3015). The refund
+destination defaults to the TX1 payer the payload records.
 
 If TX2 never gets submitted and the expiry passes, the original payer can reclaim their rent via `client.reclaimDeferred(...)`.
 
@@ -710,7 +719,10 @@ challenge after the payer:
 `computeAccountsHash` hashes the flags each meta carries, and the program
 compares them with the runtime's, which are per key: give the fee payer as a
 writable signer (declare the Execute payer writable) and a key listed twice the
-union of its entries — see §5 of `docs/integrator-wire-format-v2.md`.
+union of its entries — see §5 of `docs/integrator-wire-format-v2.md`. The
+`prepare*` methods do this for their own accounts; `prepareExecute` and
+`prepareAuthorize` take `feePayer` when another key pays the fee, and
+`prepareAuthorize` takes the `executor` that will send tx2.
 The ref implementations are in `tests-sdk/tests/05-replay.test.ts`, `06-counter.test.ts`, and `08-deferred.test.ts`.
 
 ## Constants

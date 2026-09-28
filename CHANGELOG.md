@@ -90,15 +90,32 @@ with the hash corrected, with `UnbalancedInstruction`.
   pay the execution fee. `prepareAuthorize` declares the wallet read-only, as
   `createExecuteDeferredIx` passes it, and a repeated key's flags are merged
   before hashing.
-- `prepareAuthorize` assumes the same payer sends tx2, as
-  `executeDeferredFromPayload` does by default; if another key pays for tx2
-  and an inner instruction names the Authorize payer, tx2 fails with 3015. The
-  method documents it.
+- **`prepareAuthorize` takes an `executor`** — who will send tx2, default the
+  Authorize payer. Tx2's payer (index 0) and its refund destination (index 4,
+  always the Authorize payer) hash differently depending on who sends it: the
+  Authorize payer is a signer at index 4 only when it sends tx2 itself. Hashing
+  it as one unconditionally, as the first cut of this fix did, broke the
+  relayer hand-off whenever an inner instruction repaid the sponsor (3015). The
+  deferred payload now records the executor and the refund destination
+  (optional fields, serialized; payload version unchanged), and
+  `executeDeferredFromPayload` defaults the refund destination to the recorded
+  one — the only one the program accepts — and refuses a different sender when
+  an inner instruction names either slot, rather than build a tx2 the program
+  would refuse.
+- **`prepareExecute` and `prepareAuthorize` take a `feePayer`** for when
+  another key pays the transaction fee: the runtime reports it a writable
+  signer wherever it appears, so an inner instruction that repays it is hashed
+  that way (3005 before). The SDKs model the instruction's own accounts and the
+  fee payer; another top-level instruction, the protocol-fee suffix and the
+  runtime's read-only demotions are the caller's to account for, and the docs
+  now say so.
 - No format change (`test-vectors/accounts-hash.json` is untouched): the bytes
-  differ only where an inner instruction names the payer, or for Authorize the
-  wallet — exactly the cases that failed. Unit tests pin the flags in both
-  SDKs; both validator suites repay the payer from Execute (also with another
-  key paying the fee) and from ExecuteDeferred.
+  differ only where an inner instruction names the payer, the fee payer or tx2's
+  executor, or for Authorize the wallet — exactly the cases that failed. Unit
+  tests pin the flags in both SDKs; both validator suites repay the payer from
+  Execute (also with another key paying the fee), repay a fee payer that is not
+  the Execute payer, and repay the Authorize payer from ExecuteDeferred sent by
+  itself and by a relayer.
 
 ### Changed — v2 ships at its own program id; v1 is retired, not overwritten
 

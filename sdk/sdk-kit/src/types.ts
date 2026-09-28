@@ -1,4 +1,4 @@
-import { getBase64Decoder, getBase64Encoder } from '@solana/kit';
+import { address, getBase64Decoder, getBase64Encoder } from '@solana/kit';
 /**
  * Shared input/output types for the LazorKit kit-flavored SDK.
  *
@@ -121,6 +121,11 @@ export interface DeferredPayload {
     data: Uint8Array;
   }[];
   remainingAccounts: AccountMeta[];
+  /** Who the accounts hash expects to send TX2 (`prepareAuthorize`'s
+   *  `executor`). Absent on payloads written before it was recorded. */
+  executor?: Address;
+  /** The Authorize payer: the refund destination the program requires. */
+  refundDestination?: Address;
 }
 
 /** JSON-serializable form of DeferredPayload (for HTTP / WebSocket transport). */
@@ -150,6 +155,8 @@ export interface DeferredPayloadJson {
     address: string;
     role: number;
   }[];
+  executor?: string;
+  refundDestination?: string;
 }
 
 const base64Encoder = getBase64Encoder();
@@ -169,6 +176,8 @@ export function serializeDeferredPayload(p: DeferredPayload): string {
       address: a.address,
       role: a.role,
     })),
+    executor: p.executor,
+    refundDestination: p.refundDestination,
   };
   return JSON.stringify(json);
 }
@@ -181,7 +190,9 @@ export function deserializeDeferredPayload(serialized: string): DeferredPayload 
     typeof json.walletPda !== 'string' ||
     typeof json.deferredExecPda !== 'string' ||
     !Array.isArray(json.compactInstructions) ||
-    !Array.isArray(json.remainingAccounts)
+    !Array.isArray(json.remainingAccounts) ||
+    (json.executor !== undefined && typeof json.executor !== 'string') ||
+    (json.refundDestination !== undefined && typeof json.refundDestination !== 'string')
   ) {
     throw new Error('Invalid DeferredPayload JSON shape');
   }
@@ -204,6 +215,9 @@ export function deserializeDeferredPayload(serialized: string): DeferredPayload 
       address: a.address as Address,
       role: a.role,
     })),
+    executor: json.executor !== undefined ? address(json.executor) : undefined,
+    refundDestination:
+      json.refundDestination !== undefined ? address(json.refundDestination) : undefined,
   };
 }
 

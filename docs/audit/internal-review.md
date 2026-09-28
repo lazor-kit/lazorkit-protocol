@@ -64,7 +64,13 @@ exploit" to "proves rejection" as its fix landed
   hashed the payer's flags as declared rather than as the runtime reports them
   (3005 on Execute, 3015 on ExecuteDeferred); no funds were at risk — the
   transaction failed, and an unexecuted authorization is reclaimable after
-  expiry.
+  expiry. A review of the SDK fix found it traded one case for another: it
+  hashed the Authorize payer as a signer of tx2 even when a relayer sends tx2,
+  and it modelled the fee payer only when that is the Execute payer. Fixed:
+  `prepareAuthorize` takes the `executor` that will send tx2 (recorded in the
+  payload, checked by `executeDeferredFromPayload`), and `prepareExecute` /
+  `prepareAuthorize` take a separate `feePayer`; validator tests in both suites
+  cover each.
 - **LOW** — `deferred.rs` gained the anti-CPI guard `immediate.rs` had; both SDK
   `computeAccountsHash` builders mask the forward bit off the program-id index;
   stale `entrypoint`/`error` comments describing an abandoned "strict reject"
