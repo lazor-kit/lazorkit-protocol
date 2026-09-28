@@ -8,8 +8,8 @@ findings behind them are in
 
 | file | for |
 |---|---|
-| [`kora.mainnet.toml`](./kora.mainnet.toml) | mainnet, program `LazorjRF…` |
-| [`kora.devnet.toml`](./kora.devnet.toml) | devnet, program `4h3XoNRe…` |
+| [`kora.mainnet.toml`](./kora.mainnet.toml) | mainnet, v2 program `LazorFroi…` (v1 `LazorjRF…` only once it runs the sunset binary) |
+| [`kora.devnet.toml`](./kora.devnet.toml) | devnet, v2 program `57bTNW…` (v1 `4h3XoNRe…` only once it runs the sunset binary) |
 
 Written against **kora v2.2.0-beta.8**. The devnet relayer answered
 `2.2.0-beta.7` on 2026-09-24, which is a release behind and missing the fixes

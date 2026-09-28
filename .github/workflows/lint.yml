@@ -31,6 +31,9 @@ jobs:
             target
           key: rust-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Kora configs match the two-id rollout
+        run: node scripts/kora-config-lint.cjs
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 

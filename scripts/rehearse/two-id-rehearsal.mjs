@@ -231,7 +231,18 @@ const pkAta = await retry('passkey ata', () =>
   spl.getOrCreateAssociatedTokenAccount(connection, payer, mint, pkVault, true),
 );
 await retry('passkey mintTo', () => spl.mintTo(connection, payer, mint, pkAta.address, payer, 555_000));
-console.log(`v1 passkey  ${pkCreated.walletPda.toBase58()}  0.02 SOL + 555,000`);
+// A second token, on Token-2022: the passkey challenge binds each source
+// account by its position, which only a vault with two or more can exercise.
+const mint22 = await retry('mint22', () =>
+  spl.createMint(connection, payer, payer.publicKey, null, 6, undefined, undefined, spl.TOKEN_2022_PROGRAM_ID),
+);
+const pkAta22 = await retry('passkey ata22', () =>
+  spl.getOrCreateAssociatedTokenAccount(connection, payer, mint22, pkVault, true, undefined, undefined, spl.TOKEN_2022_PROGRAM_ID),
+);
+await retry('passkey mintTo22', () =>
+  spl.mintTo(connection, payer, mint22, pkAta22.address, payer, 333_000, [], undefined, spl.TOKEN_2022_PROGRAM_ID),
+);
+console.log(`v1 passkey  ${pkCreated.walletPda.toBase58()}  0.02 SOL + 555,000 SPL + 333,000 Token-2022`);
 
 // ── 2. retire the v1 id ────────────────────────────────────────────────
 deploy(process.env.SUNSET_SO, `upgrading ${V1} to the sunset binary`);
@@ -388,7 +399,10 @@ const pkV2Vault = await lconn.getBalance(pkPlan.v2Vault);
 check('its SOL is in its own v2 vault', pkV2Vault >= 20_000_000, `${sol(pkV2Vault)} SOL`);
 const pkDest = await spl.getAssociatedTokenAddress(mint, new PublicKey(pkPlan.v2Vault.toBase58()), true);
 const pkBal = await retry('balance', () => connection.getTokenAccountBalance(pkDest)).catch(() => null);
-check('its token is in its own v2 vault', pkBal?.value.amount === '555000', pkBal?.value.amount);
+check('its SPL token is in its own v2 vault', pkBal?.value.amount === '555000', pkBal?.value.amount);
+const pkDest22 = await spl.getAssociatedTokenAddress(mint22, new PublicKey(pkPlan.v2Vault.toBase58()), true, spl.TOKEN_2022_PROGRAM_ID);
+const pkBal22 = await retry('balance22', () => connection.getTokenAccountBalance(pkDest22)).catch(() => null);
+check('its Token-2022 token is in its own v2 vault', pkBal22?.value.amount === '333000', pkBal22?.value.amount);
 
 // ── 5. the keeper closes the expired v1 session ───────────────────────
 while ((await retry('slot', () => connection.getSlot())) <= sessionExpiry) await new Promise((r) => setTimeout(r, 2000));

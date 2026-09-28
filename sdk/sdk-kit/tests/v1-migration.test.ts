@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { address, getAddressEncoder, type Address } from '@solana/kit';
 import bs58lib from 'bs58';
+import { sha256 } from '@noble/hashes/sha2';
 
 import {
   LazorKit,
@@ -25,6 +26,8 @@ import {
   findV1WalletPda,
   findV1WalletsByOwner,
   getAssociatedTokenAddress,
+  mintBlocker,
+  tokenAccountBlocker,
 } from '../src/index.js';
 import { ACCOUNT_DISCRIMINATOR } from '../src/constants.js';
 import {
@@ -392,6 +395,84 @@ describe('migrateV1Wallet by address', () => {
     expect(none.skippedTokens.find((s) => s.token.ata === sourceAta)?.reason).toBe('excluded');
   });
 
+  // The credential-id hash is public and CreateWallet takes any owner, so a
+  // wallet can carry the victim's hash next to the attacker's public key. Only
+  // the whole passkey — hash, key and relying party — makes a wallet the user's.
+  describe('reusing a passkey destination', () => {
+    const RP = 'portal.lazor.sh';
+    const PASSKEY = new Uint8Array(33).fill(0x7c);
+    const passkeyAuthority = (wallet: Address, keyByte: number, rp: string) => {
+      const d = new Uint8Array(145);
+      d[0] = ACCOUNT_DISCRIMINATOR.AUTHORITY;
+      d[1] = 1; // secp256r1
+      d[2] = 0; // Owner
+      d.set(bytesOf(wallet), 16);
+      d.set(CREDENTIAL, 48);
+      d.set(new Uint8Array(33).fill(keyByte), 80);
+      d.set(sha256(new TextEncoder().encode(rp)), 113);
+      return d;
+    };
+    async function planAgainst(keyByte: number, rp = RP) {
+      const planted = (await new LazorKit({} as never, PROGRAM_ID).findWallet(new Uint8Array(32).fill(0x77)))[0];
+      const base = await fixture();
+      const inner = base.rpc as unknown as {
+        getAccountInfo: (k: Address) => { send: () => Promise<unknown> };
+      };
+      const rpc = {
+        ...(base.rpc as object),
+        getAccountInfo: (key: Address) => ({
+          send: async () =>
+            key === planted ? { value: account(new Uint8Array(8)) } : inner.getAccountInfo(key).send(),
+        }),
+        getProgramAccounts: (_id: Address, config: { filters: Array<{ memcmp: { bytes: string } }> }) => ({
+          send: async () => {
+            const head = config.filters[0]!.memcmp.bytes;
+            const tag = (...b: number[]) => bs58(new Uint8Array(b));
+            if (head === tag(ACCOUNT_DISCRIMINATOR.AUTHORITY, 1) || head === tag(ACCOUNT_DISCRIMINATOR.AUTHORITY)) {
+              return [{ pubkey: STRANGER, account: account(passkeyAuthority(planted, keyByte, rp)) }];
+            }
+            return [];
+          },
+        }),
+      } as never;
+      const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+        payer: PAYER,
+        owner: { type: 'secp256r1', credentialIdHash: CREDENTIAL, compressedPubkey: PASSKEY, rpId: RP },
+        v1Wallet: base.v1Wallet,
+      });
+      return { planted, result };
+    }
+
+    it('reuses a v2 wallet that holds exactly this passkey', async () => {
+      const { planted, result } = await planAgainst(0x7c);
+      expect(result.destinationWallet).toBe(planted);
+    });
+
+    it("does not reuse one listing the credential with someone else's public key", async () => {
+      const { planted, result } = await planAgainst(0x7d);
+      expect(result.destinationWallet).not.toBe(planted);
+      expect(result.destinationUserSeed).toHaveLength(32);
+    });
+
+    it('does not reuse one created under another relying party', async () => {
+      const { planted, result } = await planAgainst(0x7c, 'evil.example');
+      expect(result.destinationWallet).not.toBe(planted);
+    });
+  });
+
+  it('sends the closed accounts\' rent where the caller says, and binds it', async () => {
+    const { rpc, v1Wallet } = await fixture();
+    const refund = STRANGER;
+    const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+      payer: PAYER,
+      owner: { type: 'ed25519', publicKey: OWNER },
+      v1Wallet,
+      refundDestination: refund,
+    });
+    const ix = result.migrate.type === 'ed25519' ? result.migrate.instruction : null;
+    expect(ix!.accounts![5]!.address).toBe(refund);
+  });
+
   it('creates a destination ATA per token and passes the quadruple to the program', async () => {
     const { rpc, v1Wallet, sourceAta } = await fixture({ token: true });
     const lk = new LazorKit(rpc, PROGRAM_ID);
@@ -448,4 +529,54 @@ describe('migrateV1Wallet by address', () => {
       }),
     ).rejects.toThrow('findV1WalletsByOwner');
   });
+});
+
+// Token-2022 states that make a migration revert. Each is plantable in any
+// vault, so each must be caught before the owner signs.
+describe('unmovable Token-2022 states', () => {
+  const tlv = (base: number, entries: Array<[number, Uint8Array]>) => {
+    const parts = entries.map(([type, value]) => {
+      const head = new Uint8Array(4);
+      new DataView(head.buffer).setUint16(0, type, true);
+      new DataView(head.buffer).setUint16(2, value.length, true);
+      return [head, value];
+    });
+    const out = new Uint8Array(166 + parts.flat().reduce((n, p) => n + p.length, 0));
+    out[165] = base; // AccountType: 1 mint, 2 account
+    let off = 166;
+    for (const p of parts.flat()) {
+      out.set(p, off);
+      off += p.length;
+    }
+    return out;
+  };
+  const mint = (entries: Array<[number, Uint8Array]>) => tlv(1, entries);
+  const tokenAccount = (entries: Array<[number, Uint8Array]>, state = 1) => {
+    const d = tlv(2, entries);
+    d[108] = state;
+    return d;
+  };
+
+  it('a plain mint and account can move', () => {
+    expect(mintBlocker(mint([]))).toBeNull();
+    expect(tokenAccountBlocker(tokenAccount([]))).toBeNull();
+  });
+  it('non-transferable mints', () => expect(mintBlocker(mint([[9, new Uint8Array(0)]]))).toBe('non-transferable'));
+  it('paused mints, but not unpaused ones', () => {
+    const paused = new Uint8Array(33);
+    paused[32] = 1;
+    expect(mintBlocker(mint([[26, paused]]))).toBe('paused');
+    expect(mintBlocker(mint([[26, new Uint8Array(33)]]))).toBeNull();
+  });
+  it('mints that freeze new accounts', () =>
+    expect(mintBlocker(mint([[6, new Uint8Array([2])]]))).toBe('frozen-on-arrival'));
+  it('frozen accounts', () => expect(tokenAccountBlocker(tokenAccount([], 2))).toBe('frozen'));
+  it('accounts holding withheld transfer fees, but not empty ones', () => {
+    const withheld = new Uint8Array(8);
+    withheld[0] = 5;
+    expect(tokenAccountBlocker(tokenAccount([[2, withheld]]))).toBe('withheld-fees');
+    expect(tokenAccountBlocker(tokenAccount([[2, new Uint8Array(8)]]))).toBeNull();
+  });
+  it('accounts with the CPI guard on', () =>
+    expect(tokenAccountBlocker(tokenAccount([[11, new Uint8Array([1])]]))).toBe('cpi-guard'));
 });

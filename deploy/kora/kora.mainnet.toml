@@ -115,7 +115,7 @@ allowed_programs = [
 # asks for. Without it, `allowed_programs` alone still sponsors a bare System
 # transfer.
 require_one_of_programs = [
-    "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",
+    "LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8",
     # "LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi",  # the v1 program — with the sunset binary only, see above
 ]
 

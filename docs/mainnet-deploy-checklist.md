@@ -169,7 +169,7 @@ files. Nothing below deploys a path that a later build could overwrite.
       V1_PRELOADED=1 SUNSET_SO=target/artifacts/sunset/lazorkit_program.so \
         node scripts/rehearse/two-id-rehearsal.mjs
       ```
-      It must end `14/14 checks passed`. At the real ids this is the whole
+      It must end `15/15 checks passed`. At the real ids this is the whole
       rollout with the files that will ship: the v1 wallets are made by the
       live v1 binary; the sunset upgrade refuses CreateWallet with 4018; an
       Ed25519 wallet leaves through the kit SDK; a passkey wallet leaves through
@@ -253,7 +253,9 @@ still a breaking change for whoever is left on v1, so announce it.
       with 4018.
 - [ ] Only now add the v1 id to the relayer's `allowed_programs` and
       `require_one_of_programs` (commented in `deploy/kora/kora.mainnet.toml`),
-      so migrations can be sponsored. Before this it is full v1, and H-3 lets
+      so migrations can be sponsored. Add a `# PHASE_B_SUNSET_LIVE` line to the
+      file in the same change: `scripts/kora-config-lint.cjs` (run in CI) fails
+      any config that lists the v1 id without it. Before this it is full v1, and H-3 lets
       any v1 transaction conscript the fee payer. (Reclaiming the sponsor's
       expired v1 authorizations through the relayer is safe from here: the
       sunset binary pays `ReclaimDeferred`'s rent only to the stored payer.)
@@ -316,7 +318,12 @@ it short; the local run replaces it as the record. §3 repeats it with the
 mainnet artifacts at the mainnet ids.
 
 **2026-09-28, the same run at the mainnet ids**, with the §2 commands on this
-branch — the mainnet v2 id had just been ground. The v1 dump preloaded at
+branch — the mainnet v2 id had just been ground. Re-run the same day after a
+review found the migration's signed payload read a 3-account stride while each
+token had become 4 accounts: every passkey migration of two or more token
+accounts failed, and the earlier runs moved one token per wallet, so they could
+not see it. The passkey wallet now holds an SPL and a Token-2022 token, and the
+run is **15/15** with the fixed artifacts below. The v1 dump preloaded at
 `LazorjRF…`, v2 at `LazorFroi…`, then `LazorjRF…` upgraded to the sunset build:
 **14/14**, the passkey leg again on the default pairing
 (`legacyProgramIdFor(LazorFroi…) = LazorjRF…`). The phase B rollback was then
@@ -326,8 +333,8 @@ its programdata dumped with the dump's exact bytes.
 | artifact | id | size | SHA-256 (this machine — the release commit re-records) |
 |---|---|---|---|
 | v1 — `solana program dump` of the live program | `LazorjRF…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
-| sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45760 | `ccbecead5990b02302dbfd56c356d5d958d0f7cde1a4fbcbdf0bf18bc47e4a80` |
-| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 150656 | `dd947f6eacebc10ecbd60269caf340b0541640ccb8963d597b0b4f5f6f5a3ffb` |
+| sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45760 | `03231e46bffe519340842c02127dacb34c2509b92803f2848bb35df647657b97` |
+| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 150656 | `83913449bba893e2a3fe85144583b5783e138ce94a53c899b2ffc6257bbaf833` |
 
 §3 still has to be run at deploy time: the artifacts that ship are the ones
 built from the merged release commit, and those are the ones to rehearse.

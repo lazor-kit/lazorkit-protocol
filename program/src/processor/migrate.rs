@@ -26,8 +26,9 @@
 //!  6. []                 system program
 //!  7. []                 sysvar instructions (Secp256r1 only)
 //!  8. [signer]           Ed25519 signer (Ed25519 only; ignored for passkeys)
-//!  9..                   per token, a triple:
+//!  9..                   per token, TOKEN_ACCOUNTS (4) accounts:
 //!                          [writable] source ATA, [writable] dest ATA,
+//!                          []         mint,
 //!                          []         token program (SPL Token or Token-2022)
 //! ```
 //!
@@ -71,6 +72,11 @@ const SPL_TRANSFER_CHECKED: u8 = 12;
 /// The same offset in SPL Token and Token-2022.
 const MINT_DECIMALS_OFFSET: usize = 44;
 const MINT_MIN_SIZE: usize = 82;
+
+/// Accounts per migrated token: source, destination, mint, token program. The
+/// signed payload and the transfer loop both index by it — they read the same
+/// list, and a stride that differs between them binds the wrong accounts.
+const TOKEN_ACCOUNTS: usize = 4;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let (num_tokens, auth_payload) = data
@@ -166,7 +172,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     // Ed25519 already binds every account through its transaction signature.
     for i in 0..num_tokens {
         let source_ata = accounts
-            .get(9 + i * 3)
+            .get(9 + i * TOKEN_ACCOUNTS)
             .ok_or(ProgramError::NotEnoughAccountKeys)?;
         signed_payload.extend_from_slice(source_ata.key().as_ref());
     }
@@ -223,7 +229,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         let dest_ata = rest.get(1).ok_or(ProgramError::NotEnoughAccountKeys)?;
         let mint = rest.get(2).ok_or(ProgramError::NotEnoughAccountKeys)?;
         let token_program = rest.get(3).ok_or(ProgramError::NotEnoughAccountKeys)?;
-        rest = &rest[4..];
+        rest = &rest[TOKEN_ACCOUNTS..];
 
         let token_owner = token_program.key().as_ref();
         if token_owner != &SPL_TOKEN_PROGRAM_ID && token_owner != &SPL_TOKEN_2022_PROGRAM_ID {

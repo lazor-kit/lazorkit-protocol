@@ -173,17 +173,62 @@ export interface V1VaultToken {
   tokenProgram: PublicKey;
   /** A frozen account cannot be transferred from or closed. */
   frozen: boolean;
+  /** Why this account itself cannot move (frozen, withheld fees, …), or null. */
+  blocker: UnmovableReason | null;
 }
 
-/** Why a vault token account cannot be migrated. */
-export type UnmovableReason = 'frozen' | 'transfer-hook' | 'excluded';
+/**
+ * Why a vault token account cannot be migrated. Every one of these, left in
+ * the migration, makes the whole transaction revert — and a stranger can plant
+ * most of them in anyone's vault for the price of a token account's rent.
+ *
+ *  - `frozen`            the account is frozen; it cannot be moved or closed
+ *  - `transfer-hook`     the mint's transfer hook needs extra accounts
+ *  - `non-transferable`  the mint (or account) forbids transfers outright
+ *  - `paused`            the mint is paused
+ *  - `frozen-on-arrival` the mint freezes new accounts, so the destination
+ *                        account would be frozen before the tokens arrive
+ *  - `withheld-fees`     transfer fees are withheld in the account; it cannot close
+ *  - `cpi-guard`         the account refuses transfers made through a program
+ *  - `excluded`          the caller chose to leave it (`excludeTokenAccounts`)
+ */
+export type UnmovableReason =
+  | 'frozen'
+  | 'transfer-hook'
+  | 'non-transferable'
+  | 'paused'
+  | 'frozen-on-arrival'
+  | 'withheld-fees'
+  | 'cpi-guard'
+  | 'excluded';
 
 /** Token-account state byte: 0 uninitialized, 1 initialized, 2 frozen. */
 const TOKEN_STATE_OFFSET = 108;
 const TOKEN_STATE_FROZEN = 2;
 /** Token-2022 TLV: account-type byte at 165, then [type u16][len u16][value]. */
 const TLV_START = 166;
+// spl-token-2022 ExtensionType discriminants.
+const EXT_TRANSFER_FEE_AMOUNT = 2;
+const EXT_DEFAULT_ACCOUNT_STATE = 6;
+const EXT_NON_TRANSFERABLE = 9;
+const EXT_CPI_GUARD = 11;
+const EXT_NON_TRANSFERABLE_ACCOUNT = 13;
 const EXT_TRANSFER_HOOK = 14;
+const EXT_PAUSABLE = 26;
+
+/** The TLV extensions of a Token-2022 mint or account, by type. */
+function tlvExtensions(data: Uint8Array): Map<number, Uint8Array> {
+  const out = new Map<number, Uint8Array>();
+  let off = TLV_START;
+  while (off + 4 <= data.length) {
+    const type = data[off]! | (data[off + 1]! << 8);
+    const len = data[off + 2]! | (data[off + 3]! << 8);
+    if (type === 0 && len === 0) break; // uninitialized tail
+    out.set(type, data.subarray(off + 4, off + 4 + len));
+    off += 4 + len;
+  }
+  return out;
+}
 
 /**
  * The transfer-hook program a Token-2022 mint names, or `null` if it has none.
@@ -191,18 +236,33 @@ const EXT_TRANSFER_HOOK = 14;
  * extra accounts, and the migration has no way to supply them.
  */
 export function mintTransferHook(mintData: Uint8Array): PublicKey | null {
-  let off = TLV_START;
-  while (off + 4 <= mintData.length) {
-    const type = mintData[off] | (mintData[off + 1] << 8);
-    const len = mintData[off + 2] | (mintData[off + 3] << 8);
-    const value = mintData.subarray(off + 4, off + 4 + len);
-    if (type === EXT_TRANSFER_HOOK && value.length >= 64) {
-      const program = value.subarray(32, 64);
-      return program.some((b) => b !== 0) ? new PublicKey(program) : null;
-    }
-    if (type === 0 && len === 0) break; // uninitialized tail
-    off += 4 + len;
-  }
+  const value = tlvExtensions(mintData).get(EXT_TRANSFER_HOOK);
+  if (!value || value.length < 64) return null;
+  const program = value.subarray(32, 64);
+  return program.some((b) => b !== 0) ? new PublicKey(program) : null;
+}
+
+/** Why no account of this Token-2022 mint can be migrated, or `null`. */
+export function mintBlocker(mintData: Uint8Array): UnmovableReason | null {
+  const ext = tlvExtensions(mintData);
+  if (ext.has(EXT_NON_TRANSFERABLE)) return 'non-transferable';
+  if (mintTransferHook(mintData)) return 'transfer-hook';
+  const pausable = ext.get(EXT_PAUSABLE);
+  if (pausable && pausable.length >= 33 && pausable[32] !== 0) return 'paused';
+  const defaultState = ext.get(EXT_DEFAULT_ACCOUNT_STATE);
+  if (defaultState && defaultState[0] === TOKEN_STATE_FROZEN) return 'frozen-on-arrival';
+  return null;
+}
+
+/** Why this token account itself cannot be migrated, or `null`. */
+export function tokenAccountBlocker(accountData: Uint8Array): UnmovableReason | null {
+  if (accountData[TOKEN_STATE_OFFSET] === TOKEN_STATE_FROZEN) return 'frozen';
+  const ext = tlvExtensions(accountData);
+  if (ext.has(EXT_NON_TRANSFERABLE_ACCOUNT)) return 'non-transferable';
+  const fees = ext.get(EXT_TRANSFER_FEE_AMOUNT);
+  if (fees && fees.length >= 8 && fees.subarray(0, 8).some((b) => b !== 0)) return 'withheld-fees';
+  const guard = ext.get(EXT_CPI_GUARD);
+  if (guard && guard[0] !== 0) return 'cpi-guard';
   return null;
 }
 
@@ -229,6 +289,7 @@ export async function enumerateV1VaultTokens(
         amount: data.readBigUInt64LE(64),
         tokenProgram,
         frozen: data[TOKEN_STATE_OFFSET] === TOKEN_STATE_FROZEN,
+        blocker: tokenAccountBlocker(data),
       });
     }
   }
@@ -269,9 +330,9 @@ export async function readV1WalletState(
  * wallet closes — permanently, once the v1 id runs the sunset binary — so the
  * caller must show the user what is being left behind rather than hide it.
  *
- * Unmovable: frozen accounts, and Token-2022 mints with a transfer hook. Left
- * in, either one would make the whole migration revert, and a stranger can
- * plant such an account in anyone's vault for the price of its rent.
+ * Unmovable: see {@link UnmovableReason}. Left in, any of them would make the
+ * whole migration revert, and a stranger can plant most of them in anyone's
+ * vault for the price of a token account's rent.
  */
 export async function classifyV1VaultTokens(
   connection: Connection,
@@ -283,19 +344,21 @@ export async function classifyV1VaultTokens(
       tokens.filter((t) => t.tokenProgram.equals(TOKEN_2022_PROGRAM_ID)).map((t) => t.mint.toBase58()),
     ),
   ];
-  const hooked = new Set<string>();
+  const blockedMints = new Map<string, UnmovableReason>();
   if (t22Mints.length) {
     const infos = await connection.getMultipleAccountsInfo(t22Mints.map((m) => new PublicKey(m)));
     infos.forEach((info, i) => {
-      if (info && mintTransferHook(info.data)) hooked.add(t22Mints[i]);
+      const reason = info ? mintBlocker(info.data) : null;
+      if (reason) blockedMints.set(t22Mints[i], reason);
     });
   }
   const movable: V1VaultToken[] = [];
   const skipped: { token: V1VaultToken; reason: UnmovableReason }[] = [];
   for (const t of tokens) {
-    if (exclude.some((e) => e.equals(t.ata))) skipped.push({ token: t, reason: 'excluded' });
-    else if (t.frozen) skipped.push({ token: t, reason: 'frozen' });
-    else if (hooked.has(t.mint.toBase58())) skipped.push({ token: t, reason: 'transfer-hook' });
+    const reason: UnmovableReason | null | undefined = exclude.some((e) => e.equals(t.ata))
+      ? 'excluded'
+      : (t.blocker ?? (t.frozen ? 'frozen' : null) ?? blockedMints.get(t.mint.toBase58()));
+    if (reason) skipped.push({ token: t, reason });
     else movable.push(t);
   }
   return { movable, skipped };
