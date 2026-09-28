@@ -252,11 +252,16 @@ if (adopt) {
 - `unproven` counts wallets that list this credential with some other public
   key. Someone planted them; they are ignored.
 - `version: 1` is a pre-v2 wallet on the v1 deployment paired with your program
-  id (`includeV1: false` skips it). Among wallets that qualify it comes first —
-  its funds have not been migrated yet. Move them with `migrateV1Wallet`.
-- Order of `needsConfirmation`: signed for first, then v1, then the fuller
-  vault, then the wallet address. The balance order is one anyone can change
-  by funding a vault — it is not a recommendation.
+  id (`includeV1: false` skips it); its funds have not been migrated yet. Move
+  them with `migrateV1Wallet`. It is adopted by the same rule as any other
+  wallet, and has no precedence of its own: when exactly one wallet has been
+  signed for and nothing untrusted can spend from it, that one is adopted, v1 or
+  v2, and `needsConfirmation` is empty — even with a v1 wallet this passkey
+  never signed from.
+- Order of `needsConfirmation`: signed for first, then — among wallets equally
+  signed for, or not — v1 before v2, then the fuller vault, then the wallet
+  address. The balance order is one anyone can change by funding a vault — it is
+  not a recommendation.
 - A wallet whose account no longer exists is left out. Migrating a v1 wallet
   closes it and only the authority that migrated; another passkey's v1
   authority stays behind, and nothing can move funds sent to that vault.
