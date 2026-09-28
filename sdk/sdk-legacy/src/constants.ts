@@ -34,7 +34,7 @@ import { PublicKey } from '@solana/web3.js';
  * is retired, serving only the way out.
  */
 export const PROGRAM_ADDRESS_MAINNET =
-  'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi'; // V2_MAINNET_PENDING
+  'LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8';
 
 /** Protocol v2 program address on devnet. */
 export const PROGRAM_ADDRESS_DEVNET =
@@ -81,7 +81,7 @@ export const PROGRAM_ID_DEVNET_V1 = new PublicKey(PROGRAM_ADDRESS_DEVNET_V1);
  * itself, which is the in-place layout those environments use.
  */
 export function legacyProgramIdFor(programId: PublicKey): PublicKey {
-  if (programId.equals(PROGRAM_ID_MAINNET) && !PROGRAM_ID_MAINNET.equals(PROGRAM_ID_MAINNET_V1)) {
+  if (programId.equals(PROGRAM_ID_MAINNET)) {
     return PROGRAM_ID_MAINNET_V1;
   }
   if (programId.equals(PROGRAM_ID_DEVNET)) return PROGRAM_ID_DEVNET_V1;

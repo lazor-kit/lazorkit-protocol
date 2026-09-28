@@ -45,7 +45,7 @@ unflagged build fails with "pick exactly one cluster feature".
 # v2 on devnet — embeds 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv
 cargo build-sbf --features devnet
 
-# v2 on mainnet — embeds the v2 mainnet id (V2_MAINNET_PENDING: not yet ground)
+# v2 on mainnet — embeds LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8
 cargo build-sbf --features mainnet
 
 # The v1 ids build only as the sunset binary (MigrateWallet, ReclaimDeferred,

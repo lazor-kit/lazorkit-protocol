@@ -26,7 +26,7 @@ today stops working when v2 launches.
 
 | Cluster | v2 program id | v1 program id (retiring) | build |
 |---|---|---|---|
-| mainnet | not yet deployed <!-- V2_MAINNET_PENDING --> | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` | `--features mainnet` / `mainnet-v1` |
+| mainnet | `LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8` (not yet deployed) | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` | `--features mainnet` / `mainnet-v1` |
 | devnet | `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv` | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` | `--features devnet` / `devnet-v1` |
 
 A v1 id is only ever rebuilt as a **sunset binary**: it serves the three

@@ -16,7 +16,7 @@ it is retired.
 
 | cluster | v2 | v1 (retiring) |
 |---|---|---|
-| mainnet | ground `Lazor…` vanity — see the deploy checklist | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` |
+| mainnet | `LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8` (not yet deployed) | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` |
 | devnet | `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv` (deployed) | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` |
 
 **Program**
@@ -81,7 +81,8 @@ it is retired.
   the destination would be derived under a program that can never sign for it.
 
 **SDKs** (`@lazorkit/sdk-legacy` 1.2.0, `@lazorkit/sdk` 1.0.0-rc.3)
-- **Breaking:** `PROGRAM_ID_MAINNET` / `PROGRAM_ID_DEVNET` are the v2 ids.
+- **Breaking:** `PROGRAM_ID_MAINNET` / `PROGRAM_ID_DEVNET` are the v2 ids
+  (`LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8`, `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv`).
 - New: `PROGRAM_ID_MAINNET_V1`, `PROGRAM_ID_DEVNET_V1`, and
   `legacyProgramIdFor(programId)`.
 - `migrateV1Wallet` and `findV1WalletsByOwner` take the v1 program id

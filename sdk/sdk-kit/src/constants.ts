@@ -31,7 +31,7 @@ import { address, type Address } from '@solana/kit';
  * runs a sunset binary that serves only the way out.
  */
 export const PROGRAM_ADDRESS_MAINNET =
-  'LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi'; // V2_MAINNET_PENDING
+  'LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8';
 
 /** Protocol v2 program address on devnet. */
 export const PROGRAM_ADDRESS_DEVNET =
@@ -72,7 +72,7 @@ export const PROGRAM_ID_DEVNET_V1: Address = address(PROGRAM_ADDRESS_DEVNET_V1);
  * layout those environments use.
  */
 export function legacyProgramIdFor(programId: Address): Address {
-  if (programId === PROGRAM_ID_MAINNET && PROGRAM_ID_MAINNET !== PROGRAM_ID_MAINNET_V1) {
+  if (programId === PROGRAM_ID_MAINNET) {
     return PROGRAM_ID_MAINNET_V1;
   }
   if (programId === PROGRAM_ID_DEVNET) return PROGRAM_ID_DEVNET_V1;

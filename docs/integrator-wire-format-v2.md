@@ -8,12 +8,13 @@ suffix and the Secp256r1 challenge. Full struct layouts live in
 [Architecture.md](Architecture.md); the machine-readable instruction list is
 `program/idl.json`.
 
-> **Test against staging first.** A v2 build is live on **devnet** at program id
-> `HQ584adp8ub2FzrTx1fdNmXmrL5yuyVndafPB3x4NYG3` (throwaway slot, ProtocolConfig
-> initialised, fees 5000/5000, 16 treasury shards). Point your direct client at
-> it and reproduce this document before the mainnet swap. Mainnet keeps the
-> vanity id `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi`; the upgrade is
-> in-place.
+> **Test against devnet first.** v2 is live on **devnet** at
+> `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv`, and a staging build at
+> `HQ584adp8ub2FzrTx1fdNmXmrL5yuyVndafPB3x4NYG3` (ProtocolConfig initialised,
+> fees 5000/5000, 16 treasury shards). On mainnet v2 launches at **its own id**,
+> `LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8`; v1 keeps
+> `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` until it is retired to a sunset
+> binary that only lets wallets migrate out. Nothing is upgraded in place.
 
 ## 1. What changed from v1 (map this first)
 
