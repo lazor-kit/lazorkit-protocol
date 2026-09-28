@@ -10,6 +10,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+import { createHash } from 'crypto';
 
 import {
   LazorKitClient,
@@ -24,6 +25,7 @@ import {
   ACCOUNT_DISCRIMINATOR,
   TOKEN_PROGRAM_ID,
   getAssociatedTokenAddress,
+  mintBlocker,
 } from '../../sdk/sdk-legacy/src';
 
 // v2 and v1 at different program ids, as on the real clusters: the migration
@@ -237,6 +239,77 @@ describe('migrateV1Wallet by address', () => {
         userSeed: seed,
       }),
     ).rejects.toThrow('pending deferred execution');
+  });
+
+  // A wallet can carry a victim's (public) credential hash next to an
+  // attacker's public key; only the whole passkey makes it the user's.
+  for (const [label, keyByte, rp, reused] of [
+    ['reuses a v2 wallet that holds exactly this passkey', 0x7c, 'portal.lazor.sh', true],
+    ["does not reuse one listing the credential with someone else's key", 0x7d, 'portal.lazor.sh', false],
+    ['does not reuse one created under another relying party', 0x7c, 'evil.example', false],
+  ] as const) {
+    it(label, async () => {
+      const [planted] = new LazorKitClient(stubConnection(), PROGRAM_ID).findWallet(new Uint8Array(32).fill(0x77));
+      const authority = Buffer.alloc(145);
+      authority[0] = ACCOUNT_DISCRIMINATOR.AUTHORITY;
+      authority[1] = 1;
+      authority[2] = 0;
+      planted.toBuffer().copy(authority, 16);
+      Buffer.from(CREDENTIAL).copy(authority, 48);
+      Buffer.alloc(33, keyByte).copy(authority, 80);
+      createHash('sha256').update(rp).digest().copy(authority, 113);
+      const connection = {
+        ...stubConnection(),
+        getProgramAccounts: async (_id: PublicKey, config: { filters: Array<{ memcmp: { bytes: string } }> }) => {
+          const head = Buffer.from(config.filters[0].memcmp.bytes, 'base64');
+          const isAuthorityScan =
+            head.equals(Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY, 1])) ||
+            head.equals(Buffer.from([ACCOUNT_DISCRIMINATOR.AUTHORITY]));
+          return isAuthorityScan ? [{ pubkey: Keypair.generate().publicKey, account: { data: authority } }] : [];
+        },
+        // The planted wallet exists; the v1 authority is readable (the passkey
+        // path reads its counter).
+        getAccountInfo: async (key: PublicKey) =>
+          key.equals(planted)
+            ? { data: Buffer.alloc(8), lamports: 1 }
+            : key.equals(v1Authority)
+              ? { data: v1AuthorityData(v1Wallet, 0, 1), lamports: 1 }
+              : null,
+      } as unknown as Connection;
+
+      const result = await new LazorKitClient(connection, PROGRAM_ID).migrateV1Wallet({
+        payer: Keypair.generate().publicKey,
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: CREDENTIAL,
+          compressedPubkey: new Uint8Array(33).fill(0x7c),
+          rpId: 'portal.lazor.sh',
+        },
+        v1Wallet,
+      });
+      expect(result.destinationWallet.equals(planted)).toBe(reused);
+    });
+  }
+
+  it("sends the closed accounts' rent where the caller says", async () => {
+    const refund = Keypair.generate().publicKey;
+    const result = await new LazorKitClient(stubConnection(), PROGRAM_ID).migrateV1Wallet({
+      payer: Keypair.generate().publicKey,
+      owner: { type: 'ed25519', publicKey: OWNER_PUBKEY },
+      v1Wallet,
+      refundDestination: refund,
+    });
+    const ix = result.migrate.type === 'ed25519' ? result.migrate.instruction : null;
+    expect(ix!.keys[5].pubkey.toBase58()).toBe(refund.toBase58());
+  });
+
+  it('knows a paused Token-2022 mint cannot move', () => {
+    const data = Buffer.alloc(166 + 4 + 33);
+    data[165] = 1;
+    data.writeUInt16LE(26, 166);
+    data.writeUInt16LE(33, 168);
+    data[170 + 32] = 1;
+    expect(mintBlocker(data)).toBe('paused');
   });
 
   it('refuses to run from a client built at the retired v1 id', async () => {

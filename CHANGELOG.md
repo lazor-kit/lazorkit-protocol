@@ -80,6 +80,29 @@ it is retired.
 - `migrateV1Wallet` throws when the client is built at a retired v1 id, where
   the destination would be derived under a program that can never sign for it.
 
+### Fixed — found in a second review, 2026-09-28
+
+- **Passkey migrations of two or more token accounts always failed.** The
+  signed payload read each source account at a 3-account stride after tokens
+  became 4 accounts, so from the second token on it bound the wrong key and
+  authentication failed (3005). Both loops now index by one `TOKEN_ACCOUNTS`
+  constant; a three-token passkey test fails on the old stride and passes now.
+  The two-id rehearsal's passkey wallet holds two tokens (SPL + Token-2022).
+- **Destination vetting now checks the whole passkey.** `vetMigrationDestination`
+  compared only the credential-id hash, which is public, and `CreateWallet`
+  takes any owner: a wallet with the victim's hash and the attacker's public
+  key passed, and received the migration. It now also requires the stored
+  public key and relying-party hash to match (both SDKs). The signature is
+  `vetMigrationDestination(wallet, owner)`.
+- **More Token-2022 states are recognised as unmovable**: non-transferable
+  mints and accounts, paused mints, mints that freeze new accounts, withheld
+  transfer fees, CPI guard. New helpers `mintBlocker` / `tokenAccountBlocker`.
+- `migrateV1Wallet` takes `refundDestination` (defaults to `payer`) for the
+  rent of the closed v1 accounts.
+- `deploy/kora/kora.mainnet.toml` still *required* the v1 id while allowing
+  only v2, so the relayer would have refused every transaction.
+  `scripts/kora-config-lint.cjs` now checks both files in CI.
+
 **SDKs** (`@lazorkit/sdk-legacy` 1.2.0, `@lazorkit/sdk` 1.0.0-rc.3)
 - **Breaking:** `PROGRAM_ID_MAINNET` / `PROGRAM_ID_DEVNET` are the v2 ids
   (`LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8`, `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv`).

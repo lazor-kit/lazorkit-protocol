@@ -494,8 +494,8 @@ fn build_passkey_migrate(
 
     // signed_payload = destination ‖ v1_wallet ‖ num_tokens ‖ refund_dest ‖
     //                  source_ata[0..num_tokens] — the program's order. refund_dest
-    //                  is accounts[5]; the token triples start at accounts[9], so
-    //                  each source ATA is accounts[9 + i*3].
+    //                  is accounts[5]; the per-token (source, dest, mint, program)
+    //                  groups start at accounts[9], so source ATA i is accounts[9 + i*4].
     let refund_dest = migrate_accounts[5].pubkey;
     let mut signed_payload = Vec::new();
     signed_payload.extend_from_slice(signed_destination.as_ref());
@@ -503,7 +503,7 @@ fn build_passkey_migrate(
     signed_payload.push(num_tokens);
     signed_payload.extend_from_slice(refund_dest.as_ref());
     for i in 0..num_tokens as usize {
-        signed_payload.extend_from_slice(migrate_accounts[9 + i * 3].pubkey.as_ref());
+        signed_payload.extend_from_slice(migrate_accounts[9 + i * 4].pubkey.as_ref());
     }
 
     // challenge_hash = SHA256(disc ‖ prefix14 ‖ signed_payload ‖ payer ‖ counter ‖ program_id)
@@ -614,6 +614,51 @@ fn passkey_migrates_vault_sol_and_token() {
     assert_eq!(token_amount(&context, dest_ata), held);
     assert_eq!(lamports_of(&context, &destination), vault_funds);
     assert_eq!(lamports_of(&context, &pk.vault), 0);
+    assert_eq!(lamports_of(&context, &pk.wallet), 0);
+    assert_eq!(lamports_of(&context, &pk.authority), 0);
+}
+
+/// Several token accounts on the passkey path. The challenge binds each source
+/// account at its own position in the account list; with one token any stride
+/// lands on index 9, so only a vault holding two or more can tell a right one
+/// from a wrong one. Found in review 2026-09-28: the payload read a 3-account
+/// stride after tokens became 4 accounts, and every such migration failed 3005.
+#[test]
+fn passkey_migrates_three_token_accounts() {
+    let mut context = setup_test();
+    let vault_funds = 900_000_000u64;
+    let pk = fabricate_v1_passkey_wallet(&mut context, vault_funds);
+    let destination = Pubkey::new_unique();
+    let refund_dest = Pubkey::new_unique();
+
+    let mut accounts = passkey_prefix(&context, &pk, destination, refund_dest);
+    let mut dests = Vec::new();
+    for (i, held) in [11_000_000u64, 22_000_000, 33_000_000]
+        .into_iter()
+        .enumerate()
+    {
+        let mint = Pubkey::new_unique();
+        create_mint(&mut context.svm, mint, Pubkey::new_unique(), 1_000_000_000);
+        let source_ata = Pubkey::new_unique();
+        create_token_account(&mut context.svm, source_ata, mint, pk.vault, held);
+        let dest_ata = Pubkey::new_unique();
+        create_token_account(&mut context.svm, dest_ata, mint, destination, 0);
+        accounts.push(AccountMeta::new(source_ata, false));
+        accounts.push(AccountMeta::new(dest_ata, false));
+        accounts.push(AccountMeta::new_readonly(mint, false));
+        accounts.push(AccountMeta::new_readonly(spl_token_id(), false));
+        dests.push((i, dest_ata, held));
+    }
+
+    let ixs = build_passkey_migrate(&context, &pk, destination, accounts, 3);
+    let payer = context.payer.insecure_clone();
+    try_send(&mut context.svm, &payer, &ixs, &[&payer])
+        .expect("a passkey migration with three token accounts must succeed");
+
+    for (i, dest_ata, held) in dests {
+        assert_eq!(token_amount(&context, dest_ata), held, "token {i} moved");
+    }
+    assert_eq!(lamports_of(&context, &destination), vault_funds);
     assert_eq!(lamports_of(&context, &pk.wallet), 0);
     assert_eq!(lamports_of(&context, &pk.authority), 0);
 }

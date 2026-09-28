@@ -7,6 +7,7 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js';
 import { randomBytes } from '@noble/hashes/utils';
+import { sha256 } from '@noble/hashes/sha2';
 import {
   ACCOUNT_DISCRIMINATOR,
   PROGRAM_ID_DEVNET,
@@ -1425,12 +1426,19 @@ export class LazorKitClient {
    * authority, a session, or a pending deferred execution — none of which the
    * migration's signature covers. So the bar is: exactly one authority, which
    * is this key at Owner rank, no live session, no unexpired deferred.
+   *
+   * For a passkey, "this key" means all of it: the credential-id hash, the
+   * public key and the relying party. The credential-id hash alone is public —
+   * it sits in every authority account the passkey has — and `CreateWallet`
+   * takes any owner without its consent, so a wallet with the victim's hash
+   * and the attacker's public key would otherwise pass.
    */
   async vetMigrationDestination(
     wallet: PublicKey,
-    credential: Uint8Array,
-    authType: number,
+    owner: CreateWalletOwner,
   ): Promise<string | null> {
+    const { authType, credentialOrPubkey: credential, secp256r1Pubkey, rpId } =
+      resolveOwnerFields(owner);
     const scan = (disc: number, walletOffset: number) =>
       this.connection.getProgramAccounts(this.programId, {
         encoding: 'base64',
@@ -1462,6 +1470,15 @@ export class LazorKitClient {
       !Buffer.from(a.subarray(48, 80)).equals(Buffer.from(credential))
     ) {
       return `wallet ${where} is not owned by this key alone`;
+    }
+    if (
+      authType === AUTH_TYPE_SECP256R1 &&
+      (!Buffer.from(a.subarray(80, 113)).equals(Buffer.from(secp256r1Pubkey!)) ||
+        !Buffer.from(a.subarray(113, 145)).equals(
+          Buffer.from(sha256(Buffer.from(rpId ?? '', 'utf8'))),
+        ))
+    ) {
+      return `wallet ${where} lists this passkey's credential with another public key or relying party`;
     }
     if (sessions.some((x) => x.account.data.readBigUInt64LE(72) > slot)) {
       return `wallet ${where} has a live session`;
@@ -2385,6 +2402,13 @@ export class LazorKitClient {
     v1ProgramId?: PublicKey;
     /** Vault token accounts to leave behind, e.g. ones the user marked as spam. */
     excludeTokenAccounts?: PublicKey[];
+    /**
+     * Where the rent of every closed v1 account goes: the wallet, the authority
+     * and each emptied token account. Defaults to `payer`, which paid for the
+     * setup; pass the new vault to hand it to the user instead. It is part of
+     * what the owner signs, so a relayer cannot change it.
+     */
+    refundDestination?: PublicKey;
   }): Promise<{
     v1: V1Accounts;
     destinationWallet: PublicKey;
@@ -2461,7 +2485,7 @@ export class LazorKitClient {
     if (params.userSeed) {
       [v2Wallet] = this.findWallet(params.userSeed);
       if (await this.connection.getAccountInfo(v2Wallet)) {
-        const problem = await this.vetMigrationDestination(v2Wallet, credentialOrPubkey, authType);
+        const problem = await this.vetMigrationDestination(v2Wallet, params.owner);
         if (problem) throw new Error(`refusing to migrate into the userSeed's v2 wallet: ${problem}`);
       }
     } else {
@@ -2471,7 +2495,7 @@ export class LazorKitClient {
       );
       for (const record of existing) {
         if (record.role !== ROLE_OWNER) continue;
-        if (!(await this.vetMigrationDestination(record.walletPda, credentialOrPubkey, authType))) {
+        if (!(await this.vetMigrationDestination(record.walletPda, params.owner))) {
           v2Wallet = record.walletPda;
           break;
         }
@@ -2526,11 +2550,12 @@ export class LazorKitClient {
     // — without them a relayer could keep the count and swap in dust it created,
     // stranding the user's real tokens when the vault closes. Order must match
     // the program's read order (the migrateTokens order used to build the ix).
+    const refundDestination = params.refundDestination ?? params.payer;
     const signedPayload = concatBytes([
       v2Vault.toBytes(),
       v1.wallet.toBytes(),
       Uint8Array.from([tokens.length]),
-      params.payer.toBytes(),
+      refundDestination.toBytes(),
       ...migrateTokens.map((t) => t.sourceAta.toBytes()),
     ]);
 
@@ -2541,7 +2566,7 @@ export class LazorKitClient {
         v1Authority: v1.authority,
         v1Vault: v1.vault,
         destination: v2Vault,
-        refundDestination: params.payer,
+        refundDestination,
         authSigner: (params.owner as { publicKey: PublicKey }).publicKey,
         authSignerIsSigner: true,
         tokens: migrateTokens,
@@ -2583,7 +2608,7 @@ export class LazorKitClient {
         v1Authority: v1.authority,
         v1Vault: v1.vault,
         destination: v2Vault,
-        refundDestination: params.payer,
+        refundDestination,
         authSigner: params.payer,
         authSignerIsSigner: false,
         tokens: migrateTokens,
