@@ -2134,6 +2134,7 @@ export class LazorKit {
       sessionKey: params.sessionKey,
       expiresAt: params.expiresAt,
       actions: params.actions,
+      unrestricted: params.unrestricted,
     });
     const response = await s.signer.sign(prepared.challenge);
     return this.finalizeCreateSession(prepared, response);
