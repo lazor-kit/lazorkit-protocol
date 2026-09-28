@@ -10,6 +10,8 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SystemProgram,
+  TransactionInstruction,
   type AccountInfo,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
@@ -17,6 +19,7 @@ import * as crypto from 'crypto';
 import {
   LazorKitClient,
   PROGRAM_ID_DEVNET,
+  DISC_EXECUTE,
   DISC_REVOKE_SESSION,
   buildAuthPayload,
   buildAuthPayloadPrefix,
@@ -24,6 +27,7 @@ import {
   buildSecp256r1PrecompileIx,
   type WalletAuthorityRecord,
 } from '../../sdk/sdk-legacy/src';
+import { createExecuteIx } from '../../sdk/sdk-legacy/src/utils/instructions';
 
 const DEVNET_PROGRAM_ID = PROGRAM_ID_DEVNET;
 
@@ -230,6 +234,112 @@ describe('buildSecp256r1Challenge — wallet binding', () => {
       programId: DEVNET_PROGRAM_ID,
     });
     expect(Buffer.from(a.challenge).toString('hex')).toBe(Buffer.from(expected).toString('hex'));
+  });
+});
+
+// ─── The accounts hash uses the runtime's flags ─────────────────────
+
+// The accounts hash binds the signer/writable flags the program reads, and the
+// runtime reports those per key over the whole message: the fee payer is always
+// a writable signer, and a key listed twice has the union of its entries. An
+// inner instruction that repays the payer is the ordinary case that exposes a
+// wrong guess — it failed Execute with InvalidMessageHash (3005) and
+// ExecuteDeferred with DeferredHashMismatch (3015).
+describe('prepareExecute / prepareAuthorize — the accounts hash uses runtime flags', () => {
+  const SLOT = 12_345n;
+  const connection = {
+    // readAuthorityCounter reads counter 0 at offset 8; too short to be a
+    // ProtocolConfig, so no fee is resolved.
+    getAccountInfo: async () =>
+      ({ data: Buffer.alloc(12), owner: DEVNET_PROGRAM_ID, executable: false, lamports: 0, rentEpoch: 0 }) as AccountInfo<Buffer>,
+  };
+  const credentialIdHash = new Uint8Array(32).fill(0xc1);
+
+  /** `key(32) ‖ flags(1)` per account, in the program's walk order. */
+  const accountsHash = (...walk: [PublicKey, number][]) =>
+    new Uint8Array(
+      crypto
+        .createHash('sha256')
+        .update(Buffer.concat(walk.map(([k, f]) => Buffer.concat([k.toBuffer(), Buffer.from([f])]))))
+        .digest(),
+    );
+  const setup = () => {
+    const client = makeClient(connection);
+    const payer = Keypair.generate().publicKey;
+    const walletPda = Keypair.generate().publicKey;
+    const [vaultPda] = client.findVault(walletPda);
+    const secp256r1 = {
+      credentialIdHash,
+      publicKeyBytes: new Uint8Array(33).fill(0x02),
+      authorityPda: client.findAuthority(walletPda, credentialIdHash)[0],
+      slotOverride: SLOT,
+    };
+    const repay = SystemProgram.transfer({ fromPubkey: vaultPda, toPubkey: payer, lamports: 1_000_000 });
+    return { client, payer, walletPda, vaultPda, secp256r1, repay };
+  };
+
+  it('Execute hashes the payer as a writable signer, and declares it so', async () => {
+    const { client, payer, walletPda, vaultPda, secp256r1, repay } = setup();
+    const prepared = await client.prepareExecute({ payer, walletPda, secp256r1, instructions: [repay] });
+
+    const hash = accountsHash([SystemProgram.programId, 0b00], [vaultPda, 0b10], [payer, 0b11]);
+    const expected = buildSecp256r1Challenge({
+      discriminator: new Uint8Array([DISC_EXECUTE]),
+      authPayload: buildAuthPayloadPrefix({
+        slot: SLOT,
+        counter: 1,
+        sysvarIxIndex: prepared._internal.signing._internal.sysvarIxIndex,
+      }),
+      signedPayload: new Uint8Array([...prepared._internal.packed, ...hash]),
+      slot: SLOT,
+      payer,
+      wallet: walletPda,
+      counter: 1,
+      programId: DEVNET_PROGRAM_ID,
+    });
+    expect(Buffer.from(prepared.challenge).toString('hex')).toBe(Buffer.from(expected).toString('hex'));
+
+    const ix = createExecuteIx({
+      payer,
+      walletPda,
+      authorityPda: secp256r1.authorityPda,
+      vaultPda,
+      packedInstructions: prepared._internal.packed,
+      authPayload: new Uint8Array(18),
+      programId: DEVNET_PROGRAM_ID,
+    });
+    expect(ix.keys[0]).toMatchObject({ pubkey: payer, isSigner: true, isWritable: true });
+  });
+
+  it('Authorize hashes the refund slot as the payer it is, and the wallet read-only', async () => {
+    const { client, payer, walletPda, vaultPda, secp256r1, repay } = setup();
+    // A second instruction that reads the wallet: ExecuteDeferred passes it
+    // read-only, so that is what the program hashes.
+    const other = Keypair.generate().publicKey;
+    const readWallet = new TransactionInstruction({
+      programId: other,
+      keys: [{ pubkey: walletPda, isSigner: false, isWritable: false }],
+      data: Buffer.from([1]),
+    });
+    const prepared = await client.prepareAuthorize({
+      payer,
+      walletPda,
+      secp256r1,
+      instructions: [repay, readWallet],
+    });
+
+    expect(Buffer.from(prepared._internal.accountsHash).toString('hex')).toBe(
+      Buffer.from(
+        accountsHash(
+          [SystemProgram.programId, 0b00],
+          [vaultPda, 0b10],
+          // Index 4, the refund destination: the same key as tx2's payer.
+          [payer, 0b11],
+          [other, 0b00],
+          [walletPda, 0b00],
+        ),
+      ).toString('hex'),
+    );
   });
 });
 

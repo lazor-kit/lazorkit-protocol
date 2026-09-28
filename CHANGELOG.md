@@ -49,6 +49,50 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   The validator tests that demonstrated the replay now assert it is refused
   (3005) and that the one wallet signed for is adopted.
 
+### Fixed — a passkey Execute or ExecuteDeferred can repay its payer
+
+An inner instruction that pays the payer back — how a sponsored call settles
+with its paymaster — made a passkey `Execute` fail with `InvalidMessageHash`
+(3005) and `ExecuteDeferred` fail with `DeferredHashMismatch` (3015), then,
+with the hash corrected, with `UnbalancedInstruction`.
+
+**Program**
+- **ExecuteDeferred moves the rent after its CPIs.** It used to credit the
+  DeferredExec rent to the refund destination with direct lamport writes and
+  then run the inner instructions. The runtime syncs a caller's lamport writes
+  into a CPI only for the accounts that CPI is handed, so an inner instruction
+  naming the refund destination carried the credit across without the
+  DeferredExec debit, and the CPI push failed. The authorization is still
+  consumed (its data zeroed) before any CPI, so nothing inside them can replay
+  it; the rent moves last, added to whatever the inner instructions left.
+  `program/tests/deferred_refund_tests.rs` runs Authorize with a real passkey
+  assertion and then an ExecuteDeferred that repays the refund destination —
+  paid by the same key, and by another — and fails on the old order.
+
+**SDKs** (both)
+- **The accounts hash uses the flags the runtime reports.** The program hashes
+  each account's runtime signer/writable flags; those are per key over the
+  whole message, and the SDKs hashed their own declaration instead. `Execute`
+  declared the payer read-only, but as fee payer the runtime reports it
+  writable. Authorize's tx2 layout lists the payer twice — as tx2's payer and
+  as the refund destination, which inner references resolve to — and hashed
+  that second entry as writable only, where the runtime reports the payer's
+  signature there too.
+- `createExecuteIx` declares the payer a writable signer, as the IDL already
+  did; a payer that is not the transaction's fee payer can now be repaid and
+  pay the execution fee. `prepareAuthorize` declares the wallet read-only, as
+  `createExecuteDeferredIx` passes it, and a repeated key's flags are merged
+  before hashing.
+- `prepareAuthorize` assumes the same payer sends tx2, as
+  `executeDeferredFromPayload` does by default; if another key pays for tx2
+  and an inner instruction names the Authorize payer, tx2 fails with 3015. The
+  method documents it.
+- No format change (`test-vectors/accounts-hash.json` is untouched): the bytes
+  differ only where an inner instruction names the payer, or for Authorize the
+  wallet — exactly the cases that failed. Unit tests pin the flags in both
+  SDKs; both validator suites repay the payer from Execute (also with another
+  key paying the fee) and from ExecuteDeferred.
+
 ### Changed — v2 ships at its own program id; v1 is retired, not overwritten
 
 Protocol v2 no longer replaces v1 in place. An in-place upgrade would have frozen

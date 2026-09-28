@@ -389,8 +389,11 @@ function assertSessionActions(
  *  2. assembles the full AccountMeta[] with per-fixed-account flags
  *  3. computes the accounts hash that gets folded into the signed payload
  *
- * Call sites just need to declare the fixed accounts (with their signer/
- * writable flags) and pass the user instructions.
+ * Call sites declare the fixed accounts exactly as the instruction builder
+ * that will carry them does (`createExecuteIx`, `createExecuteDeferredIx`) and
+ * pass the user instructions. The program hashes the flags the runtime
+ * reports, so the metas are read the way the runtime reads them before hashing
+ * (see {@link withRuntimeFlags}).
  */
 function buildCompactLayoutAndHash(
   fixedAccounts: AccountMeta[],
@@ -407,10 +410,7 @@ function buildCompactLayoutAndHash(
     userInstructions,
     fixedKeys[0],
   );
-  const allAccountMetas: AccountMeta[] = [
-    ...fixedAccounts,
-    ...remainingAccounts,
-  ];
+  const allAccountMetas = withRuntimeFlags([...fixedAccounts, ...remainingAccounts]);
   const accountsHash = computeAccountsHash(allAccountMetas, compactInstructions);
   return {
     compactInstructions,
@@ -418,6 +418,32 @@ function buildCompactLayoutAndHash(
     allAccountMetas,
     accountsHash,
   };
+}
+
+/**
+ * The runtime reports an account's privileges per key, not per position: a key
+ * listed twice in a message is a signer, and writable, at every position if it
+ * is so at any one. The accounts hash is over those runtime flags, so a layout
+ * that repeats a key has to hash the union. Authorize's does — the payer is
+ * index 0 (signer) and again the refund destination at index 4 (writable only),
+ * and `buildCompactLayout` maps an inner reference to the payer onto index 4,
+ * where the program reads signer + writable.
+ *
+ * That models this instruction's own list. The rest of the transaction can
+ * only add privileges; the fee payer, always a writable signer, is why the
+ * Execute payer is declared writable.
+ */
+function withRuntimeFlags(metas: AccountMeta[]): AccountMeta[] {
+  const union = new Map<string, { isSigner: boolean; isWritable: boolean }>();
+  for (const m of metas) {
+    const key = m.pubkey.toBase58();
+    const u = union.get(key);
+    union.set(key, {
+      isSigner: m.isSigner || (u?.isSigner ?? false),
+      isWritable: m.isWritable || (u?.isWritable ?? false),
+    });
+  }
+  return metas.map((m) => ({ pubkey: m.pubkey, ...union.get(m.pubkey.toBase58())! }));
 }
 
 /**
@@ -758,10 +784,15 @@ export class LazorKitClient {
     const protocolFee = fee?.accounts;
     const registerIx = fee?.registerIx;
 
+    // As createExecuteIx declares them. The payer is a writable signer there
+    // because the runtime reports it as one anyway when it pays the fee, and
+    // the accounts hash is over what the runtime reports: an inner
+    // instruction that names the payer (repaying a paymaster) is hashed with
+    // those flags on chain.
     const { compactInstructions, remainingAccounts, accountsHash } =
       buildCompactLayoutAndHash(
         [
-          { pubkey: params.payer, isSigner: true, isWritable: false },
+          { pubkey: params.payer, isSigner: true, isWritable: true },
           { pubkey: params.walletPda, isSigner: false, isWritable: false },
           { pubkey: authorityPda, isSigner: false, isWritable: true },
           { pubkey: vaultPda, isSigner: false, isWritable: true },
@@ -1269,6 +1300,17 @@ export class LazorKitClient {
 
   // ── prepareAuthorize / finalizeAuthorize ──
 
+  /**
+   * Tx1 of the deferred flow: the passkey approves `instructions` for a later
+   * `ExecuteDeferred`, and `finalizeAuthorize` returns what tx2 needs.
+   *
+   * The accounts hash it signs assumes `payer` also sends tx2, as
+   * `executeDeferredFromPayload` does by default: it is then a signer of tx2 as
+   * well as its refund destination, and the program reads it that way. If
+   * another key pays for tx2 and an inner instruction names this payer (to
+   * repay it, say), the program reads it as writable only and `ExecuteDeferred`
+   * fails with `DeferredHashMismatch` (3015).
+   */
   async prepareAuthorize(params: {
     payer: PublicKey;
     walletPda: PublicKey;
@@ -1289,12 +1331,14 @@ export class LazorKitClient {
     );
 
     // The compact layout reflects TX2 (ExecuteDeferred) account order, because
-    // that's the set of accounts the on-chain verifier will hash when replaying.
+    // that's the set of accounts the on-chain verifier will hash when replaying,
+    // with the flags createExecuteDeferredIx gives them. The payer is there
+    // twice, as tx2's payer and as the refund destination (see above).
     const { compactInstructions, remainingAccounts, accountsHash } =
       buildCompactLayoutAndHash(
         [
           { pubkey: params.payer, isSigner: true, isWritable: true },
-          { pubkey: params.walletPda, isSigner: false, isWritable: true },
+          { pubkey: params.walletPda, isSigner: false, isWritable: false },
           { pubkey: vaultPda, isSigner: false, isWritable: true },
           { pubkey: deferredExecPda, isSigner: false, isWritable: true },
           { pubkey: params.payer, isSigner: false, isWritable: true },

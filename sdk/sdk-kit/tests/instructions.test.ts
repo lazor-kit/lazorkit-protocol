@@ -376,6 +376,11 @@ describe('createExecute — Secp256r1 with remaining accts + fee', () => {
       programId: PK(PROGRAM),
     });
     expectIxParity(kit, legacy);
+    // The payer is a writable signer: the fee is taken from it, an inner
+    // instruction may repay it, and a passkey's accounts hash binds the flags
+    // the runtime reports for it — which, as fee payer, include writable.
+    expect(kit.accounts![0]!.role).toBe(AccountRole.WRITABLE_SIGNER);
+    expect(legacy.keys[0]!.isWritable).toBe(true);
   });
 });
 

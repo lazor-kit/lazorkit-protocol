@@ -51,6 +51,16 @@ exploit" to "proves rejection" as its fix landed
   `wallet_binding_tests` (both replays refused with 3005, the pre-binding layout
   refused, the SDK fixed vector pinned), and the sunset suite's
   `a_passkey_wallet_migrates_with_the_wallet_bound_challenge`.
+- **LOW — a deferred or passkey Execute could not repay its payer.**
+  `ExecuteDeferred` credited the rent to the refund destination before its
+  CPIs; the runtime syncs a caller's lamport writes only for the accounts a CPI
+  is handed, so an inner instruction naming the refund destination failed with
+  `UnbalancedInstruction`. Fixed: the authorization is still consumed before the
+  CPIs, the rent moves after them. Test: `deferred_refund_tests`. The SDKs also
+  hashed the payer's flags as declared rather than as the runtime reports them
+  (3005 on Execute, 3015 on ExecuteDeferred); no funds were at risk — the
+  transaction failed, and an unexecuted authorization is reclaimable after
+  expiry.
 - **LOW** — `deferred.rs` gained the anti-CPI guard `immediate.rs` had; both SDK
   `computeAccountsHash` builders mask the forward bit off the program-id index;
   stale `entrypoint`/`error` comments describing an abandoned "strict reject"

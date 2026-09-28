@@ -273,17 +273,20 @@ export async function sendTx(
   ctx: TestContext,
   instructions: Instruction[],
   signers: TransactionSigner[] = [],
+  /** Pays the transaction fee: `ctx.payer` unless a test needs another key to. */
+  feePayer: TransactionSigner = ctx.payer,
 ): Promise<string> {
   const { value: latestBlockhash } = await ctx.rpc.getLatestBlockhash().send();
 
   // Inject fee-payer signer at the top of the signer list — kit's
   // signTransactionMessageWithSigners discovers signers from instruction
   // accounts AND from explicit hint signers wired into the message.
-  const allSigners: readonly TransactionSigner[] = [ctx.payer, ...signers];
+  const allSigners: readonly TransactionSigner[] =
+    feePayer === ctx.payer ? [ctx.payer, ...signers] : [feePayer, ctx.payer, ...signers];
 
   const message = pipe(
     createTransactionMessage({ version: 0 }),
-    (m) => setTransactionMessageFeePayerSigner(ctx.payer, m),
+    (m) => setTransactionMessageFeePayerSigner(feePayer, m),
     (m) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
     (m) => appendTransactionMessageInstructions(instructions, m),
     // Attach extra signers as a no-op instruction would be ugly; instead

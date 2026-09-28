@@ -120,18 +120,17 @@ pub fn process(
         return Err(ProgramError::InvalidSeeds);
     }
 
-    // Close the DeferredExec account BEFORE CPI execution.
-    // All validation is complete — hashes verified, expiry checked.
-    // Closing before CPI avoids stale-pointer issues with invoke_signed_unchecked.
-    // If any CPI fails, the entire transaction reverts atomically.
-    let deferred_lamports = unsafe { *deferred_pda.borrow_mut_lamports_unchecked() };
-    let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
-    unsafe {
-        *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
-            .checked_add(deferred_lamports)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-        *deferred_pda.borrow_mut_lamports_unchecked() = 0;
-    }
+    // Consume the authorization before any CPI runs: with its data zeroed it no
+    // longer passes `DeferredExecAccount::check`, so nothing reached from the
+    // inner instructions can replay it. If any CPI fails, the whole transaction
+    // reverts and the authorization is live again.
+    //
+    // The rent moves only after the loop. The runtime syncs a caller's lamport
+    // writes into a CPI solely for the accounts that CPI is handed, so crediting
+    // the refund destination here would carry the credit across the boundary
+    // without the matching DeferredExec debit whenever an inner instruction
+    // names the refund destination — typically the paymaster being repaid — and
+    // the CPI push would fail with UnbalancedInstruction.
     let close_data = unsafe { deferred_pda.borrow_mut_data_unchecked() };
     close_data.fill(0);
 
@@ -205,6 +204,18 @@ pub fn process(
         unsafe {
             invoke_signed_unchecked(&ix, &cpi_accounts, &[signer]);
         }
+    }
+
+    // Close: read both balances only now. An inner instruction may have
+    // credited the refund destination, and that credit must not be overwritten
+    // by a value read before the CPIs.
+    let deferred_lamports = deferred_pda.lamports();
+    unsafe {
+        let refund = refund_dest.borrow_mut_lamports_unchecked();
+        *refund = refund
+            .checked_add(deferred_lamports)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        *deferred_pda.borrow_mut_lamports_unchecked() = 0;
     }
 
     Ok(())

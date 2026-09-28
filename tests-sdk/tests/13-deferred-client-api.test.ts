@@ -204,6 +204,45 @@ describe('Deferred Client API ergonomics', () => {
     expect(balAfter - balBefore).toBe(LAMPORTS_PER_SOL);
   });
 
+  // The payer funds the DeferredExec in tx1 and is its refund destination in
+  // tx2, and it is the account a sponsored flow repays from the vault. Two
+  // things used to stop that: the SDK hashed the refund slot as writable only
+  // where the runtime reports the payer as a signer too (DeferredHashMismatch,
+  // 3015), and the program credited the rent before the CPIs, so a CPI naming
+  // the refund destination saw an unbalanced instruction.
+  it('executes a deferred inner transfer to the payer', async () => {
+    const prepared = await client.prepareAuthorize({
+      payer: ctx.payer.publicKey,
+      walletPda,
+      secp256r1: { credentialIdHash: ownerKey.credentialIdHash, authorityPda },
+      instructions: [
+        SystemProgram.transfer({
+          fromPubkey: vaultPda,
+          toPubkey: ctx.payer.publicKey,
+          lamports: 1_000_000,
+        }),
+      ],
+    });
+    const webauthnResponse = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+    const { instructions: authIxs, deferredPayload } = client.finalizeAuthorize(
+      prepared,
+      webauthnResponse,
+    );
+    await sendTx(ctx, authIxs);
+    const rent = (await ctx.connection.getBalance(deferredPayload.deferredExecPda));
+    expect(rent).toBeGreaterThan(0);
+
+    const tx2 = await client.executeDeferredFromPayload({
+      payer: ctx.payer.publicKey,
+      deferredPayload,
+    });
+    const vaultBefore = await ctx.connection.getBalance(vaultPda);
+    await sendTx(ctx, tx2.instructions);
+
+    expect(vaultBefore - (await ctx.connection.getBalance(vaultPda))).toBe(1_000_000);
+    expect(await ctx.connection.getAccountInfo(deferredPayload.deferredExecPda)).toBeNull();
+  });
+
   // ── deserialize error handling ───────────────────────────────────────
 
   it('deserialize rejects malformed JSON', () => {

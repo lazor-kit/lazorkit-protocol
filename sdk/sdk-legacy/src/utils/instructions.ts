@@ -335,8 +335,11 @@ export function createExecuteIx(params: {
     parts.push(params.authPayload);
   }
 
+  // The payer is writable: the execution fee is a transfer out of it, an inner
+  // instruction may pay it back, and as the fee payer the runtime reports it
+  // writable regardless — which is what a passkey's accounts hash binds.
   const keys = [
-    { pubkey: params.payer, isSigner: true, isWritable: false },
+    { pubkey: params.payer, isSigner: true, isWritable: true },
     { pubkey: params.walletPda, isSigner: false, isWritable: false },
     { pubkey: params.authorityPda, isSigner: false, isWritable: true },
     { pubkey: params.vaultPda, isSigner: false, isWritable: true },

@@ -154,5 +154,51 @@ describe('Execute', () => {
       // Three Secp256r1 transfers above + this one = 4.
       expect(decoded.counter).toBe(4);
     });
+
+    // Repaying the payer from the vault is how a sponsored call settles up,
+    // and it is the one inner account whose flags the SDK has to predict: the
+    // accounts hash binds the flags the runtime reports, and the runtime
+    // reports the fee payer as a writable signer. Declared read-only, this
+    // failed with InvalidMessageHash (3005).
+    async function repayPayer() {
+      const prepared = await client.prepareExecute({
+        payer: ctx.payer.address,
+        walletPda,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
+        instructions: [systemTransferFromPda(vaultPda, ctx.payer.address, 1_000_000n)],
+      });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      return client.finalizeExecute(prepared, response).instructions;
+    }
+
+    it('executes an inner transfer to the payer', async () => {
+      const instructions = await repayPayer();
+      const vaultBefore = await getBalance(ctx, vaultPda);
+      await sendTx(ctx, instructions);
+      expect(vaultBefore - (await getBalance(ctx, vaultPda))).toBe(1_000_000n);
+    });
+
+    // Another key pays the transaction fee. The Execute payer is then a signer
+    // only because the instruction says so, and must still be writable to be
+    // repaid (and to pay the execution fee).
+    it('executes an inner transfer to the payer when another key pays the fee', async () => {
+      const feePayer = await generateKeyPairSigner();
+      await airdrop(ctx, feePayer.address, LAMPORTS_PER_SOL);
+      const instructions = await repayPayer();
+
+      const vaultBefore = await getBalance(ctx, vaultPda);
+      const payerBefore = await getBalance(ctx, ctx.payer.address);
+      await sendTx(ctx, instructions, [], feePayer);
+
+      expect(vaultBefore - (await getBalance(ctx, vaultPda))).toBe(1_000_000n);
+      // Repaid in full, less the execution fee; the signature fee was the fee payer's.
+      const payerDelta = (await getBalance(ctx, ctx.payer.address)) - payerBefore;
+      expect(payerDelta > 0n).toBe(true);
+      expect(payerDelta <= 1_000_000n).toBe(true);
+    });
   });
 });

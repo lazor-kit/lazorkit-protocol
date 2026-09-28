@@ -3,7 +3,9 @@ import {
   Keypair,
   PublicKey,
   SystemProgram,
+  Transaction,
   LAMPORTS_PER_SOL,
+  sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import { setupTest, sendTx, type TestContext } from './common';
@@ -236,6 +238,67 @@ describe('Execute', () => {
       );
       const counter = view.getUint32(8, true);
       expect(counter).toBe(4);
+    });
+
+    // Repaying the payer from the vault is how a sponsored call settles up,
+    // and it is the one inner account whose flags the SDK has to predict: the
+    // accounts hash binds the flags the runtime reports, and the runtime
+    // reports the fee payer as a writable signer. Declared read-only, this
+    // failed with InvalidMessageHash (3005).
+    const repayPayer = async () => {
+      const prepared = await client.prepareExecute({
+        payer: ctx.payer.publicKey,
+        walletPda,
+        secp256r1: {
+          credentialIdHash: ownerKey.credentialIdHash,
+          publicKeyBytes: ownerKey.publicKeyBytes,
+          authorityPda: ownerAuthorityPda,
+        },
+        instructions: [
+          SystemProgram.transfer({
+            fromPubkey: vaultPda,
+            toPubkey: ctx.payer.publicKey,
+            lamports: 1_000_000,
+          }),
+        ],
+      });
+      const response = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+      return client.finalizeExecute(prepared, response).instructions;
+    };
+
+    it('executes an inner transfer to the payer', async () => {
+      const instructions = await repayPayer();
+
+      const vaultBefore = await ctx.connection.getBalance(vaultPda);
+      await sendTx(ctx, instructions);
+      const vaultAfter = await ctx.connection.getBalance(vaultPda);
+
+      expect(vaultBefore - vaultAfter).toBe(1_000_000);
+    });
+
+    // Another key pays the transaction fee. The Execute payer is then a signer
+    // only because the instruction says so, and must still be writable to be
+    // repaid (and to pay the execution fee).
+    it('executes an inner transfer to the payer when another key pays the fee', async () => {
+      const feePayer = Keypair.generate();
+      const sig = await ctx.connection.requestAirdrop(feePayer.publicKey, LAMPORTS_PER_SOL);
+      await ctx.connection.confirmTransaction(sig, 'confirmed');
+      const instructions = await repayPayer();
+
+      const vaultBefore = await ctx.connection.getBalance(vaultPda);
+      const payerBefore = await ctx.connection.getBalance(ctx.payer.publicKey);
+      const tx = new Transaction();
+      for (const ix of instructions) tx.add(ix);
+      tx.feePayer = feePayer.publicKey;
+      await sendAndConfirmTransaction(ctx.connection, tx, [feePayer, ctx.payer], {
+        commitment: 'confirmed',
+      });
+
+      expect(vaultBefore - (await ctx.connection.getBalance(vaultPda))).toBe(1_000_000);
+      // Repaid in full, less the execution fee; the signature fee was the fee payer's.
+      const payerDelta = (await ctx.connection.getBalance(ctx.payer.publicKey)) - payerBefore;
+      expect(payerDelta).toBeGreaterThan(0);
+      expect(payerDelta).toBeLessThanOrEqual(1_000_000);
     });
   });
 });
