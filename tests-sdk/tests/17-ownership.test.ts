@@ -1516,6 +1516,24 @@ describe('passkey wallet ownership (validator)', () => {
     await sendTx(ctx, [SystemProgram.transfer({ fromPubkey: ctx.payer.publicKey, toPubkey: sink, lamports: 1_000_000 })]);
   });
 
+  it('a passkey opens an unrestricted session when it says so', async () => {
+    // createSession used to drop `unrestricted` on the passkey path, so this threw.
+    const key = await generateMockSecp256r1Key(RP_ID);
+    const { walletPda } = await createPasskeyWallet(key);
+    const { instructions } = await client.createSession({
+      payer: ctx.payer.publicKey,
+      walletPda,
+      adminSigner: secp256r1(createMockRawSigner(key)),
+      sessionKey: Keypair.generate().publicKey,
+      expiresAt: (await getSlot(ctx)) + 9_000n,
+      unrestricted: true,
+    });
+    await sendTx(ctx, instructions);
+    const candidates = await client.findPasskeyWalletCandidates({ credentialIdHash: key.credentialIdHash, rpId: RP_ID });
+    const [facts] = await client.describeWalletCandidates(candidates);
+    expect(facts.liveSessions).toHaveLength(1);
+  });
+
   describe('one passkey wallet, as others gain a way to spend from it', () => {
     let key: MockSecp256r1Key;
     let walletPda: PublicKey;
