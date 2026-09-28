@@ -119,8 +119,9 @@ files. Nothing below deploys a path that a later build could overwrite.
 
 - [ ] Build from the pinned release commit, **each into its own directory**:
       ```bash
-      ( cd program && cargo build-sbf --features mainnet    --tools-version v1.53 --sbf-out-dir ../target/artifacts/v2 )
-      ( cd program && cargo build-sbf --features mainnet-v1 --tools-version v1.53 --sbf-out-dir ../target/artifacts/sunset )
+      T=$(mktemp -d)   # a fresh target dir: see the --tools-version note below
+      ( cd program && CARGO_TARGET_DIR=$T command cargo build-sbf --features mainnet    --tools-version v1.53 --sbf-out-dir ../target/artifacts/v2 )
+      ( cd program && CARGO_TARGET_DIR=$T command cargo build-sbf --features mainnet-v1 --tools-version v1.53 --sbf-out-dir ../target/artifacts/sunset )
       solana program dump LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi target/artifacts/v1-live.so --url <mainnet-rpc>
       shasum -a 256 target/artifacts/v2/lazorkit_program.so target/artifacts/sunset/lazorkit_program.so target/artifacts/v1-live.so
       ```
@@ -131,6 +132,17 @@ files. Nothing below deploys a path that a later build could overwrite.
       build (150 KB) while the sunset build (45 KB) sat in the shared dir.
       Deployed to `LazorjRF…`, it would have refused every instruction with 4017
       — `MigrateWallet` included — until someone noticed.
+      ⚠️ **`--tools-version` does not invalidate cargo's cache.** Platform-tools
+      v1.53 and v1.54 both report `rustc 1.89.0-dev`, so after a v1.54 build of
+      the same source a v1.53 build finishes without compiling anything, and
+      `cargo-build-sbf` skips the copy when the out-dir file is not older than
+      its own output. On 2026-09-28 that left a 146528-byte v1.54 build where a
+      clean v1.53 build of the same source is 150752. Build the release
+      artifacts in a fresh target dir —
+      `CARGO_TARGET_DIR=$(mktemp -d) command cargo build-sbf …` (`command`
+      skips the wrapper) — and check the sizes against the table under
+      [Two-id rehearsal](#two-id-rehearsal). Two fresh target dirs give the
+      same hashes.
 - [ ] **Sanity-check sizes before anything else.** Sunset ≈ 45 KB, full v2
       ≈ 150 KB, the v1 dump 137904 bytes (`8ad5abf5…` on 2026-09-27). A "sunset"
       artifact over 100 KB is the wrong file; stop.
@@ -279,14 +291,36 @@ still a breaking change for whoever is left on v1, so announce it.
 The rollout this checklist describes, run end to end by
 `scripts/rehearse/two-id-rehearsal.mjs`.
 
-**2026-09-27, local validator (Agave 4.2.2, SIMD-0500 deactivated to match
-mainnet), at the devnet ids**, with the review fixes in:
+**Latest: 2026-09-28, re-run after the wallet binding** — the passkey challenge
+now hashes the authority's wallet after the payer, and ExecuteDeferred moves
+its rent after its CPIs — on a local validator (Agave 4.2.2, SIMD-0500
+deactivated to match mainnet), at both pairs of ids, with artifacts built by
+the §2 commands (cargo-build-sbf 4.1.0, platform-tools v1.53, a fresh target
+dir; a second fresh target dir gave the same hashes). The passkey leg signs
+the new challenge through sdk-legacy on the default pairing, so a v1 passkey
+wallet migrating through the sunset binary is covered end to end.
+
+At the **devnet ids** (`legacyProgramIdFor(57bTNW…) = 4h3XoNRe…`), the v1 dump
+preloaded at `4h3XoNRe…`, v2 at `57bTNW…`, then `4h3XoNRe…` upgraded to the
+sunset build — **18/18**:
 
 | artifact | id | size | SHA-256 |
 |---|---|---|---|
 | v1 — the live mainnet program, `solana program dump` | `4h3XoNRe…` (devnet v1) | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
-| sunset — `--features devnet-v1`, platform-tools v1.53 | `4h3XoNRe…` | 45760 | `6a816c4af90d7f7a237de8e66aeb117a583dea592ae305589c7adf5de6a9401f` |
-| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 150656 | `8c3952a5a2464a19ced58854342a2868e7094863522ad5f423babf851135a01a` |
+| sunset — `--features devnet-v1`, platform-tools v1.53 | `4h3XoNRe…` | 45856 | `2cf15c89ad3ad194e5aebcab608dc4bc75270cb7d094d342a31ecdd3306f1240` |
+| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 150776 | `3584aec70e494e27521bf3e717ccc63bda295bb9d312cdcd4f9a007db249b470` |
+
+At the **mainnet ids** (`legacyProgramIdFor(LazorFroi…) = LazorjRF…`), the v1
+dump preloaded at `LazorjRF…`, v2 at `LazorFroi…`, then `LazorjRF…` upgraded to
+the sunset build — **18/18**. The phase B rollback was then rehearsed on the
+same validator: `LazorjRF…` upgraded back to `v1-live.so`, and its programdata
+dumped with the dump's exact bytes.
+
+| artifact | id | size | SHA-256 (this machine — the release commit re-records) |
+|---|---|---|---|
+| v1 — `solana program dump` of the live program | `LazorjRF…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
+| sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45856 | `6080da9f28d194e36efbfbd6cf6d74389f2a68e232d4c323d153761c532a58a6` |
+| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 150776 | `4cb8030466d269efa867f0ab2bc989cccd1857c2a753e67578267e4a6b144b12` |
 
 ```
 ok    the sunset binary refuses CreateWallet with 4018 RetiredDeployment
@@ -298,45 +332,38 @@ ok    the token is in the v2 vault   777000
 ok    the destination wallet belongs to the v2 program
 passkey migration (default pairing)
 ok    the passkey wallet is found from its credential alone
+ok    the plan harvests the withheld fees in the migration transaction
 ok    the passkey migrate goes to the v1 program
 ok    a relayer swapping the system program is refused
 ok    the passkey wallet and authority are closed, the vault empty
 ok    its SOL is in its own v2 vault   0.020000 SOL
-ok    its token is in its own v2 vault   555000
+ok    its SPL token is in its own v2 vault   555000
+ok    the fee-bearing token had withheld fees before   3330
+ok    its fee-bearing Token-2022 token is in its own v2 vault, less the transfer fee   326373 of 329670
+ok    its old fee-bearing account is closed
 ok    the v1 session is closed
-14/14 checks passed
+18/18 checks passed
 ```
 
-Devnet's v2 (`57bTNW…`) was upgraded to this same v2 artifact afterwards
-(`24qPWFCY…`, slot 504832702), so devnet matches the SDKs in this release.
+**Devnet is behind this branch.** Devnet's v2 (`57bTNW…`) still runs the
+2026-09-27 artifact (`8c3952a5…`, upgraded in `24qPWFCY…`, slot 504832702),
+which predates the wallet binding: SDKs built from this branch fail every
+passkey signature against it with 3005, and SDKs from before it fail against
+the artifact above. Upgrade devnet's v2 to the devnet artifact above together
+with the SDK release, not before.
 
-The devnet ids pair by default (`legacyProgramIdFor(57bTNW…) = 4h3XoNRe…`), so
-the passkey leg is exactly what an integrator's app will do. On devnet itself,
-the same script ran earlier the same day against the rehearsal slot
-(`3AN3Wn…`) and proved the 4018 refusal on chain before a flaky public RPC cut
-it short; the local run replaces it as the record. §3 repeats it with the
-mainnet artifacts at the mainnet ids.
-
-**2026-09-28, the same run at the mainnet ids**, with the §2 commands on this
-branch — the mainnet v2 id had just been ground. Re-run the same day after a
-review found the migration's signed payload read a 3-account stride while each
-token had become 4 accounts: every passkey migration of two or more token
-accounts failed, and the earlier runs moved one token per wallet, so they could
-not see it. The passkey wallet now holds an SPL token and a Token-2022 token
-with a 1% transfer fee, received by transfer so its account holds withheld
-fees (which block closing it until harvested — the SDK now harvests them in
-the migration transaction). The run is **18/18** with the artifacts below. The v1 dump preloaded at
-`LazorjRF…`, v2 at `LazorFroi…`, then `LazorjRF…` upgraded to the sunset build:
-**14/14**, the passkey leg again on the default pairing
-(`legacyProgramIdFor(LazorFroi…) = LazorjRF…`). The phase B rollback was then
-rehearsed on the same validator: `LazorjRF…` upgraded back to `v1-live.so`, and
-its programdata dumped with the dump's exact bytes.
-
-| artifact | id | size | SHA-256 (this machine — the release commit re-records) |
-|---|---|---|---|
-| v1 — `solana program dump` of the live program | `LazorjRF…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
-| sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45760 | `03231e46bffe519340842c02127dacb34c2509b92803f2848bb35df647657b97` |
-| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 150656 | `83913449bba893e2a3fe85144583b5783e138ce94a53c899b2ffc6257bbaf833` |
+Earlier runs, superseded by the one above: on 2026-09-27 at the devnet ids
+(14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain devnet run
+against the rehearsal slot (`3AN3Wn…`) proved the 4018 refusal before a flaky
+public RPC cut it short; and on 2026-09-28 at the mainnet ids (18/18, v2
+`83913449…`, sunset `03231e46…`), re-run that day after a review found the
+migration's signed payload read a 3-account stride while each token had become
+4 accounts — every passkey migration of two or more token accounts failed, and
+the earlier runs moved one token per wallet, so they could not see it. Since
+then the passkey wallet holds an SPL token and a Token-2022 token with a 1%
+transfer fee, received by transfer so its account holds withheld fees (which
+block closing it until harvested — the SDK harvests them in the migration
+transaction).
 
 §3 still has to be run at deploy time: the artifacts that ship are the ones
 built from the merged release commit, and those are the ones to rehearse.
