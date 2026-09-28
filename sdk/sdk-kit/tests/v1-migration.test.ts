@@ -19,6 +19,7 @@ import {
   LazorKit,
   PROGRAM_ID_DEVNET,
   PROGRAM_ID_DEVNET_V1,
+  findVaultPda,
   V1_DISC_AUTHORITY,
   V1_DISC_WALLET,
   findV1AuthorityPda,
@@ -32,6 +33,7 @@ import {
 } from '../src/index.js';
 import { ACCOUNT_DISCRIMINATOR } from '../src/constants.js';
 import {
+  SYSTEM_PROGRAM_ADDRESS,
   TOKEN_2022_PROGRAM_ADDRESS,
   TOKEN_PROGRAM_ADDRESS,
 } from '../src/instructions/system.js';
@@ -77,8 +79,31 @@ function v1WalletData(): Uint8Array {
   return data;
 }
 
+/** A v2 wallet account, as the v2 program keeps it. */
+function v2WalletData(): Uint8Array {
+  return new Uint8Array([ACCOUNT_DISCRIMINATOR.WALLET, 0, 0, 0, 1, 0, 0, 0]);
+}
+
+/** The v1 wallet's owner as a passkey: the same id seed, key 0x7c.., created under portal.lazor.sh. */
+const PASSKEY_OWNER = {
+  type: 'secp256r1' as const,
+  credentialIdHash: CREDENTIAL,
+  compressedPubkey: new Uint8Array(33).fill(0x7c),
+  rpId: 'portal.lazor.sh',
+};
+const ED25519_OWNER = { type: 'ed25519' as const, publicKey: OWNER };
+
 function account(data: Uint8Array, lamports = 1n, owner?: Address) {
   return { data: [b64(data), 'base64'] as const, lamports, executable: false, ...(owner ? { owner } : {}) };
+}
+
+/** The slot every stubbed read is answered at (and getSlot returns). */
+const STUB_SLOT = 1_000n;
+
+/** A getProgramAccounts answer: wrapped with its context slot when the call asked `withContext`. */
+async function programAccounts(config: { withContext?: boolean }, rows: () => Promise<unknown[]>) {
+  const value = await rows();
+  return config.withContext ? { context: { slot: STUB_SLOT }, value } : value;
 }
 
 describe('findV1WalletsByOwner', () => {
@@ -138,8 +163,45 @@ describe('findV1WalletsByOwner', () => {
   });
 });
 
-/** How an attacker can keep a hand on a v2 wallet that still lists the owner. */
-type Hostile = 'second-authority' | 'spender-rank' | 'session' | 'deferred';
+/**
+ * How an attacker can keep a hand on a v2 wallet that still lists the owner —
+ * each with what vetMigrationDestination says about it. The vault ones are
+ * left by an Owner without a policy (System Assign/Allocate on the vault, SPL
+ * Approve/SetAuthority on its token accounts) before it hands the wallet to
+ * the victim with TransferOwnership.
+ */
+const HOSTILE = {
+  'second-authority': '2 authorities',
+  'spender-rank': 'not owned by this key alone',
+  session: 'live session',
+  deferred: 'pending deferred execution',
+  // The program refuses a session or deferred only once the slot is past its
+  // expiry, so one expiring at the current slot still works.
+  'session-expiring-now': 'live session',
+  'deferred-expiring-now': 'pending deferred execution',
+  'unreadable-session': 'live session',
+  'vault-assigned': 'is owned by program Vote111111111111111111111111111111111111111, not the System Program',
+  'vault-allocated': 'carries data',
+  'token-delegate': 'has a delegate, Vote111111111111111111111111111111111111111',
+  'token-close-authority': 'has a close authority other than the vault, Vote111111111111111111111111111111111111111',
+  'token2022-delegate': 'has a delegate',
+  'wsol-account-handed-over': 'belongs to Vote111111111111111111111111111111111111111',
+  'unreadable-token-account': 'cannot be read',
+} as const;
+type Hostile = keyof typeof HOSTILE;
+
+/** Vault states that look odd but leave nobody else a way in. */
+type Harmless = 'expired-session' | 'vault-missing' | 'close-authority-is-vault';
+
+const WSOL = address('So11111111111111111111111111111111111111112');
+
+/** Sets an SPL token account's COption<Pubkey> at `offset` (72 delegate, 129 close authority). */
+function withAuthority(data: Uint8Array, offset: 72 | 129, key: Address): Uint8Array {
+  const out = data.slice();
+  new DataView(out.buffer).setUint32(offset, 1, true);
+  out.set(bytesOf(key), offset + 4);
+  return out;
+}
 
 /** A token account: mint | owner | amount | .. | state at 108. */
 function tokenAccountData(mint: Address, owner: Address, amount: bigint, frozen = false) {
@@ -162,16 +224,29 @@ function hookedMintData(): Uint8Array {
 }
 
 describe('migrateV1Wallet by address', () => {
-  /** Stub RPC holding one v1 wallet, its authority and a funded vault. */
+  /**
+   * Stub RPC holding one v1 wallet, its authority and a funded vault — and,
+   * with `v2Wallet`, a v2 wallet whose one authority is this owner: an Ed25519
+   * key unless `ownerType` says passkey, which has signed for the wallet
+   * `counter` times (default 1).
+   */
   async function fixture(
     options: {
       v2Wallet?: Address;
       hostile?: Hostile;
+      harmless?: Harmless;
       token?: boolean;
       frozenToken?: boolean;
       hookedToken?: boolean;
+      ownerType?: 'ed25519' | 'secp256r1';
+      counter?: number;
+      /** More authority accounts the lookup by this owner's credential finds (on other wallets). */
+      alsoListed?: Uint8Array[];
     } = {},
   ) {
+    const authType = options.ownerType === 'secp256r1' ? 1 : 0;
+    const v2Vault = options.v2Wallet ? (await findVaultPda(options.v2Wallet, PROGRAM_ID))[0] : null;
+    const v2Wsol = v2Vault ? await getAssociatedTokenAddress(WSOL, v2Vault, TOKEN_PROGRAM_ADDRESS) : null;
     const [v1Wallet] = await findV1WalletPda(new Uint8Array(32).fill(0x5a), V1_PROGRAM_ID);
     const [v1Authority] = await findV1AuthorityPda(v1Wallet, CREDENTIAL, V1_PROGRAM_ID);
     const [v1Vault] = await findV1VaultPda(v1Wallet, V1_PROGRAM_ID);
@@ -188,12 +263,26 @@ describe('migrateV1Wallet by address', () => {
     const rpc = {
       getMultipleAccounts: (keys: Address[]) => ({
         send: async () => ({
+          context: { slot: STUB_SLOT },
           value: keys.map((key) => {
             if (key === v1Wallet) return account(v1WalletData(), 890_880n);
             if (key === v1Authority) return account(v1AuthorityData(v1Wallet));
             if (key === HOOKED_MINT) return account(hookedMintData(), 1n, TOKEN_2022_PROGRAM_ADDRESS);
             if (key === MINT) return account(new Uint8Array(82), 1n, TOKEN_PROGRAM_ADDRESS);
-            return account(new Uint8Array(0), 50_000_000n);
+            if (options.v2Wallet && key === options.v2Wallet) return account(v2WalletData(), 1_000_000n, PROGRAM_ID);
+            if (key === v2Vault) {
+              if (options.harmless === 'vault-missing') return null;
+              if (options.hostile === 'vault-assigned') return account(new Uint8Array(0), 5_000_000n, STRANGER);
+              if (options.hostile === 'vault-allocated') {
+                return account(new Uint8Array(8), 5_000_000n, SYSTEM_PROGRAM_ADDRESS);
+              }
+            }
+            if (key === v2Wsol && options.hostile === 'wsol-account-handed-over') {
+              return account(tokenAccountData(WSOL, STRANGER, 0n), 2_039_280n, TOKEN_PROGRAM_ADDRESS);
+            }
+            // Anything else — the v1 vault, a v2 vault, an address that only
+            // holds lamports — is a plain system account.
+            return account(new Uint8Array(0), 50_000_000n, SYSTEM_PROGRAM_ADDRESS);
           }),
         }),
       }),
@@ -203,46 +292,86 @@ describe('migrateV1Wallet by address', () => {
         send: async () => {
           if (key === v1Authority) return { value: account(v1AuthorityData(v1Wallet, 0, 1)) };
           if (options.v2Wallet && key === options.v2Wallet) {
-            return { value: account(new Uint8Array(8)) };
+            return { value: account(v2WalletData(), 1_000_000n, PROGRAM_ID) };
           }
           return { value: null };
         },
       }),
       // The v2 scans: which wallets list this owner, then — for the one the
       // SDK wants to reuse — its authorities, sessions and deferred executions.
-      getProgramAccounts: (_programId: Address, config: { filters: unknown }) => ({
-        send: async () => {
+      getProgramAccounts: (_programId: Address, config: { filters: unknown; withContext?: boolean }) => ({
+        send: () => programAccounts(config, async () => {
           const [head] = (config.filters as Array<{ memcmp: { bytes: string } }>).map(
             (f) => f.memcmp.bytes,
           );
           const tag = (...b: number[]) => bs58(new Uint8Array(b));
           const v2 = options.v2Wallet;
           if (!v2) return [];
-          const owner = { pubkey: v1Authority, account: account(v1AuthorityData(v2)) };
-          const live = new Uint8Array(176);
-          new DataView(live.buffer).setBigUint64(72, 5_000n, true);
-          new DataView(live.buffer).setBigUint64(168, 5_000n, true);
+          /** This owner's authority on the v2 wallet, with its replay counter at 8. */
+          const authorityData = (role: number) => {
+            const d = v1AuthorityData(v2, role, authType);
+            d[0] = ACCOUNT_DISCRIMINATOR.AUTHORITY;
+            new DataView(d.buffer).setUint32(8, options.counter ?? 1, true);
+            return d;
+          };
+          const owner = { pubkey: v1Authority, account: account(authorityData(0)) };
+          const expiring = (at: bigint) => {
+            const d = new Uint8Array(176);
+            new DataView(d.buffer).setBigUint64(72, at, true);
+            new DataView(d.buffer).setBigUint64(168, at, true);
+            return [{ pubkey: STRANGER, account: account(d) }];
+          };
           switch (head) {
-            case tag(ACCOUNT_DISCRIMINATOR.AUTHORITY, 0):
-              return [owner];
+            // The lookup by this owner's key (findWalletsByAuthority).
+            case tag(ACCOUNT_DISCRIMINATOR.AUTHORITY, authType):
+              return [owner, ...(options.alsoListed ?? []).map((d) => ({ pubkey: STRANGER, account: account(d) }))];
             case tag(ACCOUNT_DISCRIMINATOR.AUTHORITY):
               if (options.hostile === 'spender-rank') {
-                return [{ pubkey: v1Authority, account: account(v1AuthorityData(v2, 2)) }];
+                return [{ pubkey: v1Authority, account: account(authorityData(2)) }];
               }
               return options.hostile === 'second-authority'
                 ? [owner, { pubkey: STRANGER, account: account(v1AuthorityData(v2)) }]
                 : [owner];
+            // The slot is 1_000.
             case tag(ACCOUNT_DISCRIMINATOR.SESSION):
-              return options.hostile === 'session' ? [{ pubkey: STRANGER, account: account(live) }] : [];
+              if (options.hostile === 'session') return expiring(5_000n);
+              if (options.hostile === 'session-expiring-now') return expiring(1_000n);
+              if (options.harmless === 'expired-session') return expiring(999n);
+              if (options.hostile === 'unreadable-session') {
+                return [{ pubkey: STRANGER, account: account(new Uint8Array(40)) }];
+              }
+              return [];
             case tag(ACCOUNT_DISCRIMINATOR.DEFERRED_EXEC):
-              return options.hostile === 'deferred' ? [{ pubkey: STRANGER, account: account(live) }] : [];
+              if (options.hostile === 'deferred') return expiring(5_000n);
+              if (options.hostile === 'deferred-expiring-now') return expiring(1_000n);
+              return [];
             default:
               return [];
           }
-        },
+        }),
       }),
-      getTokenAccountsByOwner: (_owner: Address, filter: { programId: Address }) => ({
+      getTokenAccountsByOwner: (owner: Address, filter: { programId: Address }) => ({
         send: async () => {
+          const context = { slot: STUB_SLOT };
+          if (owner === v2Vault) {
+            // What an earlier owner of the v2 wallet left on its vault's tokens.
+            const own = tokenAccountData(MINT, v2Vault, 0n);
+            const rows: Record<string, [Address, Uint8Array] | undefined> = {
+              'token-delegate': [TOKEN_PROGRAM_ADDRESS, withAuthority(own, 72, STRANGER)],
+              'token-close-authority': [TOKEN_PROGRAM_ADDRESS, withAuthority(own, 129, STRANGER)],
+              'token2022-delegate': [TOKEN_2022_PROGRAM_ADDRESS, withAuthority(own, 72, STRANGER)],
+              'unreadable-token-account': [TOKEN_PROGRAM_ADDRESS, new Uint8Array(100)],
+              'close-authority-is-vault': [TOKEN_PROGRAM_ADDRESS, withAuthority(own, 129, v2Vault)],
+            };
+            const row = rows[options.hostile ?? options.harmless ?? ''];
+            return {
+              context,
+              value:
+                row && row[0] === filter.programId
+                  ? [{ pubkey: frozenAta, account: account(row[1], 2_039_280n, row[0]) }]
+                  : [],
+            };
+          }
           const value = [];
           if (filter.programId === TOKEN_PROGRAM_ADDRESS) {
             if (options.token) value.push({ pubkey: sourceAta, account: account(tokenAccount, 2_039_280n) });
@@ -259,10 +388,10 @@ describe('migrateV1Wallet by address', () => {
               account: account(tokenAccountData(HOOKED_MINT, v1Vault, 7n), 2_074_080n),
             });
           }
-          return { value };
+          return { context, value };
         },
       }),
-      getSlot: () => ({ send: async () => 1_000n }),
+      getSlot: () => ({ send: async () => STUB_SLOT }),
     } as never;
 
     return { rpc, v1Wallet, v1Authority, v1Vault, sourceAta, frozenAta, hookedAta };
@@ -305,15 +434,15 @@ describe('migrateV1Wallet by address', () => {
     expect(result.v2Vault).toBe((await lk.findVault(result.destinationWallet))[0]);
   });
 
-  it('reuses the v2 wallet this owner already has instead of minting a seed', async () => {
+  it('reuses a v2 wallet this passkey has already signed for instead of minting a seed', async () => {
     const existing = (await new LazorKit({} as never, PROGRAM_ID).findWallet(
       new Uint8Array(32).fill(0x11),
     ))[0];
-    const { rpc, v1Wallet } = await fixture({ v2Wallet: existing });
+    const { rpc, v1Wallet } = await fixture({ v2Wallet: existing, ownerType: 'secp256r1' });
 
     const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
       payer: PAYER,
-      owner: { type: 'ed25519', publicKey: OWNER },
+      owner: PASSKEY_OWNER,
       v1Wallet,
     });
 
@@ -322,18 +451,114 @@ describe('migrateV1Wallet by address', () => {
     expect(result.setupInstructions).toHaveLength(0);
   });
 
+  // Anyone can hand a wallet to this owner (TransferOwnership asks it
+  // nothing), and vetting cannot see everything its earlier holder left on the
+  // vault — an SPL Token account for an unwatched mint, moved to them. So a
+  // wallet found by itself is reused only if the passkey signed for it.
+  it('does not reuse a clean wallet this passkey has never signed for — it mints a fresh one', async () => {
+    const lk0 = new LazorKit({} as never, PROGRAM_ID);
+    const [handed] = await lk0.findWallet(new Uint8Array(32).fill(0x14));
+    const { rpc, v1Wallet } = await fixture({ v2Wallet: handed, ownerType: 'secp256r1', counter: 0 });
+    const lk = new LazorKit(rpc, PROGRAM_ID);
+    // It would pass vetting.
+    expect(await lk.vetMigrationDestination(handed, PASSKEY_OWNER)).toBeNull();
+
+    const result = await lk.migrateV1Wallet({ payer: PAYER, owner: PASSKEY_OWNER, v1Wallet });
+    expect(result.destinationWallet).not.toBe(handed);
+    expect(result.destinationWallet).toBe((await lk0.findWallet(result.destinationUserSeed!))[0]);
+    expect(result.setupInstructions.length).toBeGreaterThan(0);
+  });
+
+  /** This owner's passkey authority on some other wallet: `counter` signatures, at `role`; its key byte and rpId can differ. */
+  function listedElsewhere(o: { role?: number; counter: number; keyByte?: number; rpId?: string }): Uint8Array {
+    const data = v1AuthorityData(STRANGER, o.role ?? 0, 1);
+    data[0] = ACCOUNT_DISCRIMINATOR.AUTHORITY;
+    new DataView(data.buffer).setUint32(8, o.counter, true);
+    if (o.keyByte !== undefined) data.set(new Uint8Array(33).fill(o.keyByte), 80);
+    if (o.rpId) data.set(sha256(new TextEncoder().encode(o.rpId)), 113);
+    return data;
+  }
+
+  // The program's passkey challenge does not name the wallet for
+  // CreateSession, AddAuthority, TransferOwnership or Authorize: a signature
+  // this passkey made on one authority can be submitted again on another at
+  // the same counter, through the same fee payer. With two signed on, either
+  // wallet's count may be the copy — including one copied from an Admin seat.
+  for (const [label, role] of [
+    ['as an Owner of another wallet', 0],
+    ['at Admin rank on another wallet', 1],
+  ] as const) {
+    it(`does not reuse the wallet it signed for when it has also signed ${label} — it mints a fresh one`, async () => {
+      const lk0 = new LazorKit({} as never, PROGRAM_ID);
+      const [mine] = await lk0.findWallet(new Uint8Array(32).fill(0x1b));
+      const { rpc, v1Wallet } = await fixture({
+        v2Wallet: mine,
+        ownerType: 'secp256r1',
+        alsoListed: [listedElsewhere({ role, counter: 2 })],
+      });
+      const lk = new LazorKit(rpc, PROGRAM_ID);
+      expect(await lk.vetMigrationDestination(mine, PASSKEY_OWNER)).toBeNull();
+      const result = await lk.migrateV1Wallet({ payer: PAYER, owner: PASSKEY_OWNER, v1Wallet });
+      expect(result.destinationWallet).not.toBe(mine);
+      expect(result.destinationWallet).toBe((await lk0.findWallet(result.destinationUserSeed!))[0]);
+    });
+  }
+
+  it('still reuses it beside authorities this passkey never signed on, or that hold another key or relying party', async () => {
+    const [mine] = await new LazorKit({} as never, PROGRAM_ID).findWallet(new Uint8Array(32).fill(0x1c));
+    const { rpc, v1Wallet } = await fixture({
+      v2Wallet: mine,
+      ownerType: 'secp256r1',
+      alsoListed: [
+        listedElsewhere({ role: 1, counter: 0 }),
+        // Only this passkey's own key advances a counter it can be blamed for.
+        listedElsewhere({ counter: 5, keyByte: 0x7d }),
+        listedElsewhere({ counter: 5, rpId: 'evil.example' }),
+      ],
+    });
+    const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({ payer: PAYER, owner: PASSKEY_OWNER, v1Wallet });
+    expect(result.destinationWallet).toBe(mine);
+    expect(result.setupInstructions).toHaveLength(0);
+  });
+
+  it("never reuses an Ed25519 owner's wallet by itself (it records no signatures); destinationUserSeed can name it", async () => {
+    const seed = new Uint8Array(32).fill(0x16);
+    const [existing] = await new LazorKit({} as never, PROGRAM_ID).findWallet(seed);
+    // Even with a counter on it: Ed25519 authentication never moves it, so
+    // nothing but an earlier holder could have put it there.
+    const { rpc, v1Wallet } = await fixture({ v2Wallet: existing, counter: 5 });
+    const lk = new LazorKit(rpc, PROGRAM_ID);
+    expect(await lk.vetMigrationDestination(existing, ED25519_OWNER)).toBeNull();
+
+    const found = await lk.migrateV1Wallet({ payer: PAYER, owner: ED25519_OWNER, v1Wallet });
+    expect(found.destinationWallet).not.toBe(existing);
+    expect(found.destinationUserSeed).toHaveLength(32);
+
+    const named = await lk.migrateV1Wallet({
+      payer: PAYER,
+      owner: ED25519_OWNER,
+      v1Wallet,
+      destinationUserSeed: seed,
+    });
+    expect(named.destinationWallet).toBe(existing);
+    expect(named.setupInstructions).toHaveLength(0);
+  });
+
   // Being listed on a wallet is not owning it. Each of these leaves someone
-  // else able to spend what lands in the vault, so the SDK must not reuse it.
-  for (const hostile of ['second-authority', 'spender-rank', 'session', 'deferred'] as const) {
+  // else able to spend what lands in the vault, so the SDK must not reuse it —
+  // even one the passkey has signed for. TransferOwnership hands a wallet over
+  // without undoing any of the vault or token ones, which its earlier Owner
+  // set up through Execute.
+  for (const hostile of Object.keys(HOSTILE) as Hostile[]) {
     it(`does not deliver into a wallet with a ${hostile} — it mints a fresh one`, async () => {
       const planted = (await new LazorKit({} as never, PROGRAM_ID).findWallet(
         new Uint8Array(32).fill(0x66),
       ))[0];
-      const { rpc, v1Wallet } = await fixture({ v2Wallet: planted, hostile });
+      const { rpc, v1Wallet } = await fixture({ v2Wallet: planted, hostile, ownerType: 'secp256r1' });
 
       const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
         payer: PAYER,
-        owner: { type: 'ed25519', publicKey: OWNER },
+        owner: PASSKEY_OWNER,
         v1Wallet,
       });
 
@@ -345,18 +570,358 @@ describe('migrateV1Wallet by address', () => {
     });
   }
 
-  it("refuses the userSeed's own v2 wallet when someone else can spend from it", async () => {
-    const seed = new Uint8Array(32).fill(0x5a);
-    const seedWallet = (await new LazorKit({} as never, PROGRAM_ID).findWallet(seed))[0];
-    const { rpc } = await fixture({ v2Wallet: seedWallet, hostile: 'session' });
+  for (const harmless of ['expired-session', 'vault-missing', 'close-authority-is-vault'] as const) {
+    it(`still reuses a wallet with ${harmless}`, async () => {
+      const existing = (await new LazorKit({} as never, PROGRAM_ID).findWallet(
+        new Uint8Array(32).fill(0x12),
+      ))[0];
+      const { rpc, v1Wallet } = await fixture({ v2Wallet: existing, harmless, ownerType: 'secp256r1' });
 
+      const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+        payer: PAYER,
+        owner: PASSKEY_OWNER,
+        v1Wallet,
+      });
+
+      expect(result.destinationWallet).toBe(existing);
+      expect(result.destinationUserSeed).toBeUndefined();
+    });
+  }
+
+  it("delivers into the userSeed's own v2 wallet once vetted, signed for or not (a retry after its setup landed)", async () => {
+    const seed = new Uint8Array(32).fill(0x5a);
+    const [seedWallet] = await new LazorKit({} as never, PROGRAM_ID).findWallet(seed);
+    const { rpc } = await fixture({ v2Wallet: seedWallet, ownerType: 'secp256r1', counter: 0 });
+    const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+      payer: PAYER,
+      owner: PASSKEY_OWNER,
+      userSeed: seed,
+    });
+    expect(result.destinationWallet).toBe(seedWallet);
+    expect(result.destinationUserSeed).toBeUndefined();
+    expect(result.setupInstructions).toHaveLength(0);
+  });
+
+  // Only a v2 wallet account makes an address a wallet. A plain system account
+  // (lamports alone) is created over; anything else cannot be, and is refused.
+  it('refuses a userSeed address some other program owns: no wallet can be created there', async () => {
+    const seed = new Uint8Array(32).fill(0x5a);
+    const [target] = await new LazorKit({} as never, PROGRAM_ID).findWallet(seed);
+    const base = await fixture();
+    const inner = base.rpc as unknown as {
+      getAccountInfo: (k: Address) => { send: () => Promise<unknown> };
+      getMultipleAccounts: (k: Address[], c?: unknown) => { send: () => Promise<{ context: unknown; value: unknown[] }> };
+    };
+    const foreign = () => account(new Uint8Array(8), 1_000_000n, STRANGER);
+    const rpc = {
+      ...(base.rpc as object),
+      getAccountInfo: (key: Address) => ({
+        send: async () => (key === target ? { value: foreign() } : inner.getAccountInfo(key).send()),
+      }),
+      getMultipleAccounts: (keys: Address[], config: unknown) => ({
+        send: async () => {
+          const answer = await inner.getMultipleAccounts(keys, config).send();
+          return { ...answer, value: keys.map((k, i) => (k === target ? foreign() : answer.value[i])) };
+        },
+      }),
+    } as never;
+    const lk = new LazorKit(rpc, PROGRAM_ID);
     await expect(
-      new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+      lk.migrateV1Wallet({ payer: PAYER, owner: ED25519_OWNER, userSeed: seed }),
+    ).rejects.toThrow(`refusing to migrate into the userSeed's v2 wallet: ${target} is not a wallet of program ${PROGRAM_ID}`);
+    expect(await lk.vetMigrationDestination(target, ED25519_OWNER)).toBe(
+      `${target} is not a wallet of program ${PROGRAM_ID}`,
+    );
+    // An address holding only lamports is no wallet either: the vet says so,
+    // and migrateV1Wallet creates one there (below).
+    const [lamportsOnly] = await new LazorKit({} as never, PROGRAM_ID).findWallet(new Uint8Array(32).fill(0x19));
+    expect(await lk.vetMigrationDestination(lamportsOnly, ED25519_OWNER)).toBe(
+      `${lamportsOnly} is not a wallet of program ${PROGRAM_ID}`,
+    );
+  });
+
+  for (const [hostile, reason] of Object.entries(HOSTILE) as [Hostile, string][]) {
+    it(`refuses the userSeed's own v2 wallet with a ${hostile}, and says why`, async () => {
+      const seed = new Uint8Array(32).fill(0x5a);
+      const seedWallet = (await new LazorKit({} as never, PROGRAM_ID).findWallet(seed))[0];
+      const { rpc } = await fixture({ v2Wallet: seedWallet, hostile });
+
+      await expect(
+        new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+          payer: PAYER,
+          owner: { type: 'ed25519', publicKey: OWNER },
+          userSeed: seed,
+        }),
+      ).rejects.toThrow(reason);
+    });
+  }
+
+  // A destinationUserSeed can be known to others: derived by the integrator,
+  // or read out of an earlier setup transaction that landed and failed —
+  // retried with the seed the caller was told to persist. Whoever creates the
+  // wallet there first chooses its owner, so what sits there is vetted too.
+  describe('the wallet at destinationUserSeed', () => {
+    const seed = new Uint8Array(32).fill(0x78);
+    const lk0 = new LazorKit({} as never, PROGRAM_ID);
+
+    for (const [hostile, reason] of Object.entries(HOSTILE) as [Hostile, string][]) {
+      it(`is refused when it exists with a ${hostile}, and the call says why`, async () => {
+        const [planted] = await lk0.findWallet(seed);
+        const { rpc, v1Wallet } = await fixture({ v2Wallet: planted, hostile });
+        const failure = await new LazorKit(rpc, PROGRAM_ID)
+          .migrateV1Wallet({
+            payer: PAYER,
+            owner: { type: 'ed25519', publicKey: OWNER },
+            v1Wallet,
+            destinationUserSeed: seed,
+          })
+          .catch((e: Error) => e);
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toContain("refusing to migrate into the destinationUserSeed's v2 wallet: ");
+        expect((failure as Error).message).toContain(reason);
+      });
+    }
+
+    it("is refused when an attacker created it under their own key — one that never lists this owner", async () => {
+      const [planted] = await lk0.findWallet(seed);
+      const base = await fixture({ v2Wallet: planted });
+      const attackerAuthority = v1AuthorityData(planted);
+      attackerAuthority.set(bytesOf(STRANGER), 48);
+      const rpc = {
+        ...(base.rpc as object),
+        getProgramAccounts: (_id: Address, config: { filters: Array<{ memcmp: { bytes: string } }>; withContext?: boolean }) => ({
+          send: () =>
+            programAccounts(config, async () => {
+              const head = config.filters[0]!.memcmp.bytes;
+              const tag = (...b: number[]) => bs58(new Uint8Array(b));
+              // The lookup by this owner's key finds nothing to reuse…
+              if (head === tag(ACCOUNT_DISCRIMINATOR.AUTHORITY, 0)) return [];
+              // …while the wallet at the seed is the attacker's.
+              if (head === tag(ACCOUNT_DISCRIMINATOR.AUTHORITY)) {
+                return [{ pubkey: STRANGER, account: account(attackerAuthority) }];
+              }
+              return [];
+            }),
+        }),
+      } as never;
+      await expect(
+        new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+          payer: PAYER,
+          owner: { type: 'ed25519', publicKey: OWNER },
+          v1Wallet: base.v1Wallet,
+          destinationUserSeed: seed,
+        }),
+      ).rejects.toThrow(`wallet ${planted} is not owned by this key alone`);
+    });
+
+    // CreateWallet builds over lamports someone sent to the wallet address
+    // (it tops them up to rent). Skipping it would pay the migration into
+    // the vault of a wallet that does not exist, for whoever creates it.
+    it('holding only lamports, is created — never skipped', async () => {
+      const [pda] = await lk0.findWallet(seed);
+      const base = await fixture();
+      const inner = base.rpc as unknown as { getAccountInfo: (k: Address) => { send: () => Promise<unknown> } };
+      const rpc = {
+        ...(base.rpc as object),
+        getAccountInfo: (key: Address) => ({
+          send: async () =>
+            key === pda
+              ? { value: account(new Uint8Array(0), 1n, SYSTEM_PROGRAM_ADDRESS) }
+              : inner.getAccountInfo(key).send(),
+        }),
+      } as never;
+      const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
         payer: PAYER,
         owner: { type: 'ed25519', publicKey: OWNER },
+        v1Wallet: base.v1Wallet,
+        destinationUserSeed: seed,
+      });
+      expect(result.destinationWallet).toBe(pda);
+      expect(result.destinationUserSeed).toEqual(seed);
+      const created = await new LazorKit(rpc, PROGRAM_ID).createWallet({
+        payer: PAYER,
         userSeed: seed,
+        owner: { type: 'ed25519', publicKey: OWNER },
+      });
+      expect(result.setupInstructions).toEqual(created.instructions);
+    });
+
+    it("the userSeed's wallet holding only lamports is created too, not refused", async () => {
+      const userSeed = new Uint8Array(32).fill(0x5a);
+      const [pda] = await lk0.findWallet(userSeed);
+      const base = await fixture();
+      const inner = base.rpc as unknown as { getAccountInfo: (k: Address) => { send: () => Promise<unknown> } };
+      const rpc = {
+        ...(base.rpc as object),
+        getAccountInfo: (key: Address) => ({
+          send: async () =>
+            key === pda
+              ? { value: account(new Uint8Array(0), 5_000n, SYSTEM_PROGRAM_ADDRESS) }
+              : inner.getAccountInfo(key).send(),
+        }),
+      } as never;
+      const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+        payer: PAYER,
+        owner: { type: 'ed25519', publicKey: OWNER },
+        userSeed,
+      });
+      expect(result.destinationWallet).toBe(pda);
+      expect(result.destinationUserSeed).toBeUndefined(); // the caller has it
+      expect(result.setupInstructions.length).toBeGreaterThan(0);
+    });
+
+    it('a reused wallet is not read again after its vet: a lagging node cannot fail the migration', async () => {
+      // No v2 instruction closes a wallet; the vet's pinned read already found it.
+      const existing = (await lk0.findWallet(new Uint8Array(32).fill(0x11)))[0];
+      const base = await fixture({ v2Wallet: existing, ownerType: 'secp256r1' });
+      const inner = base.rpc as unknown as { getAccountInfo: (k: Address) => { send: () => Promise<unknown> } };
+      const asked: Address[] = [];
+      const rpc = {
+        ...(base.rpc as object),
+        getAccountInfo: (key: Address) => ({
+          send: async () => {
+            asked.push(key);
+            return key === existing ? { value: null } : inner.getAccountInfo(key).send();
+          },
+        }),
+      } as never;
+      const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+        payer: PAYER,
+        owner: PASSKEY_OWNER,
+        v1Wallet: base.v1Wallet,
+      });
+      expect(result.destinationWallet).toBe(existing);
+      expect(result.setupInstructions).toHaveLength(0);
+      expect(asked).not.toContain(existing);
+    });
+  });
+
+  // A vet reads the wallet at some slot; a node behind it could still show a
+  // destination token account as it was before someone rigged it. So the
+  // migration's own read of those accounts asks for state no older than the
+  // vet's newest read — whichever way the vetted wallet was named.
+  for (const label of ['a reused wallet', "the userSeed's wallet", "the destinationUserSeed's wallet"] as const) {
+    it(`reads ${label}'s destination token accounts no older than its vet did`, async () => {
+      const seed = new Uint8Array(32).fill(label === "the userSeed's wallet" ? 0x5a : 0x14);
+      const existing = (await new LazorKit({} as never, PROGRAM_ID).findWallet(seed))[0];
+      const [v2Vault] = await findVaultPda(existing, PROGRAM_ID);
+      const destAta = await getAssociatedTokenAddress(MINT, v2Vault, TOKEN_PROGRAM_ADDRESS);
+      const reused = label === 'a reused wallet';
+      const base = await fixture({ v2Wallet: existing, token: true, ownerType: reused ? 'secp256r1' : 'ed25519' });
+      const inner = base.rpc as unknown as {
+        getMultipleAccounts: (k: Address[], c?: unknown) => { send: () => Promise<unknown> };
+      };
+      const asked: { keys: Address[]; minContextSlot?: bigint }[] = [];
+      const rpc = {
+        ...(base.rpc as object),
+        getMultipleAccounts: (keys: Address[], config: { minContextSlot?: bigint }) => {
+          asked.push({ keys, minContextSlot: config?.minContextSlot });
+          return inner.getMultipleAccounts(keys, config);
+        },
+      } as never;
+      const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+        payer: PAYER,
+        owner: reused ? PASSKEY_OWNER : ED25519_OWNER,
+        ...(label === "the userSeed's wallet"
+          ? { userSeed: seed }
+          : { v1Wallet: base.v1Wallet, ...(reused ? {} : { destinationUserSeed: seed }) }),
+      });
+      expect(result.destinationWallet).toBe(existing);
+      expect(result.tokens.map((t) => t.ata)).toEqual([base.sourceAta]);
+      // MINT is USDC, a watched mint, so the vet reads this account too; the
+      // migration's own read of it comes last.
+      const destReads = asked.filter((a) => a.keys.includes(destAta));
+      expect(destReads.length).toBeGreaterThan(1);
+      expect(destReads.map((a) => a.minContextSlot)).toEqual(destReads.map(() => STUB_SLOT));
+    });
+  }
+
+  it('reads a fresh destination without a floor: nothing was vetted there', async () => {
+    const base = await fixture({ token: true });
+    const inner = base.rpc as unknown as {
+      getMultipleAccounts: (k: Address[], c?: unknown) => { send: () => Promise<unknown> };
+    };
+    const asked: { keys: Address[]; minContextSlot?: bigint }[] = [];
+    const rpc = {
+      ...(base.rpc as object),
+      getMultipleAccounts: (keys: Address[], config: { minContextSlot?: bigint }) => {
+        asked.push({ keys, minContextSlot: config?.minContextSlot });
+        return inner.getMultipleAccounts(keys, config);
+      },
+    } as never;
+    const plan = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
+      payer: PAYER,
+      owner: ED25519_OWNER,
+      v1Wallet: base.v1Wallet,
+    });
+    expect(plan.setupInstructions.length).toBeGreaterThan(0);
+    const destAta = await getAssociatedTokenAddress(MINT, plan.v2Vault, TOKEN_PROGRAM_ADDRESS);
+    const destReads = asked.filter((a) => a.keys.includes(destAta));
+    expect(destReads).toHaveLength(1);
+    expect(destReads[0]!.minContextSlot).toBeUndefined();
+  });
+
+  it('vetMigrationDestination checks the canonical account of each mint in watchMints too', async () => {
+    const wallet = (await new LazorKit({} as never, PROGRAM_ID).findWallet(new Uint8Array(32).fill(0x15)))[0];
+    const [vault] = await findVaultPda(wallet, PROGRAM_ID);
+    // Not one of the always-watched mints (MINT here is USDC, which is).
+    const BONK = address('DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263');
+    const bonkAta = await getAssociatedTokenAddress(BONK, vault, TOKEN_PROGRAM_ADDRESS);
+    const base = await fixture({ v2Wallet: wallet, ownerType: 'secp256r1' });
+    const inner = base.rpc as unknown as {
+      getMultipleAccounts: (k: Address[], c?: unknown) => { send: () => Promise<{ context: unknown; value: unknown[] }> };
+    };
+    const rpc = {
+      ...(base.rpc as object),
+      getMultipleAccounts: (keys: Address[], config: unknown) => ({
+        send: async () => {
+          const answer = await inner.getMultipleAccounts(keys, config).send();
+          return {
+            ...answer,
+            value: keys.map((k, i) =>
+              k === bonkAta ? account(tokenAccountData(BONK, STRANGER, 0n), 2_039_280n, TOKEN_PROGRAM_ADDRESS) : answer.value[i],
+            ),
+          };
+        },
       }),
-    ).rejects.toThrow('live session');
+    } as never;
+    const owner = PASSKEY_OWNER;
+    const lk = new LazorKit(rpc, PROGRAM_ID);
+    // Not a watched mint: the handed-over account cannot be seen.
+    expect(await lk.vetMigrationDestination(wallet, owner)).toBeNull();
+    expect(await lk.vetMigrationDestination(wallet, owner, { watchMints: [BONK] })).toBe(
+      `wallet ${wallet}'s vault token account ${bonkAta} (the vault's own account for mint ${BONK}) belongs to ${STRANGER}`,
+    );
+    // …and migrateV1Wallet passes watchMints to the vet of a wallet it would reuse.
+    const reused = await lk.migrateV1Wallet({ payer: PAYER, owner, v1Wallet: base.v1Wallet });
+    expect(reused.destinationWallet).toBe(wallet);
+    const fresh = await lk.migrateV1Wallet({ payer: PAYER, owner, v1Wallet: base.v1Wallet, watchMints: [BONK] });
+    expect(fresh.destinationWallet).not.toBe(wallet);
+  });
+
+  it('vetMigrationDestination names the vault and the token account it refuses', async () => {
+    const wallet = (await new LazorKit({} as never, PROGRAM_ID).findWallet(new Uint8Array(32).fill(0x13)))[0];
+    const [vault] = await findVaultPda(wallet, PROGRAM_ID);
+    const owner = { type: 'ed25519', publicKey: OWNER } as const;
+
+    const assigned = await fixture({ v2Wallet: wallet, hostile: 'vault-assigned' });
+    expect(await new LazorKit(assigned.rpc, PROGRAM_ID).vetMigrationDestination(wallet, owner)).toBe(
+      `wallet ${wallet}'s vault ${vault} is owned by program ${STRANGER}, not the System Program`,
+    );
+
+    const delegated = await fixture({ v2Wallet: wallet, hostile: 'token-delegate' });
+    expect(await new LazorKit(delegated.rpc, PROGRAM_ID).vetMigrationDestination(wallet, owner)).toBe(
+      `wallet ${wallet}'s vault token account ${delegated.frozenAta} has a delegate, ${STRANGER}`,
+    );
+
+    const handed = await fixture({ v2Wallet: wallet, hostile: 'wsol-account-handed-over' });
+    const wsolAta = await getAssociatedTokenAddress(WSOL, vault, TOKEN_PROGRAM_ADDRESS);
+    expect(await new LazorKit(handed.rpc, PROGRAM_ID).vetMigrationDestination(wallet, owner)).toBe(
+      `wallet ${wallet}'s vault token account ${wsolAta} (the vault's own account for mint ${WSOL}) belongs to ${STRANGER}`,
+    );
+
+    const clean = await fixture({ v2Wallet: wallet });
+    expect(await new LazorKit(clean.rpc, PROGRAM_ID).vetMigrationDestination(wallet, owner)).toBeNull();
   });
 
   it('refuses to run from a client built at the retired v1 id', async () => {
@@ -411,6 +976,7 @@ describe('migrateV1Wallet by address', () => {
       d[0] = ACCOUNT_DISCRIMINATOR.AUTHORITY;
       d[1] = 1; // secp256r1
       d[2] = 0; // Owner
+      new DataView(d.buffer).setUint32(8, 4, true); // signed for four times
       d.set(bytesOf(wallet), 16);
       d.set(CREDENTIAL, 48);
       d.set(new Uint8Array(33).fill(keyByte), 80);
@@ -419,25 +985,22 @@ describe('migrateV1Wallet by address', () => {
     };
     async function planAgainst(keyByte: number, rp = RP) {
       const planted = (await new LazorKit({} as never, PROGRAM_ID).findWallet(new Uint8Array(32).fill(0x77)))[0];
-      const base = await fixture();
-      const inner = base.rpc as unknown as {
-        getAccountInfo: (k: Address) => { send: () => Promise<unknown> };
-      };
+      // The planted wallet's account exists; its authority is replaced below.
+      const base = await fixture({ v2Wallet: planted });
       const rpc = {
         ...(base.rpc as object),
-        getAccountInfo: (key: Address) => ({
-          send: async () =>
-            key === planted ? { value: account(new Uint8Array(8)) } : inner.getAccountInfo(key).send(),
-        }),
-        getProgramAccounts: (_id: Address, config: { filters: Array<{ memcmp: { bytes: string } }> }) => ({
-          send: async () => {
+        getProgramAccounts: (
+          _id: Address,
+          config: { filters: Array<{ memcmp: { bytes: string } }>; withContext?: boolean },
+        ) => ({
+          send: () => programAccounts(config, async () => {
             const head = config.filters[0]!.memcmp.bytes;
             const tag = (...b: number[]) => bs58(new Uint8Array(b));
             if (head === tag(ACCOUNT_DISCRIMINATOR.AUTHORITY, 1) || head === tag(ACCOUNT_DISCRIMINATOR.AUTHORITY)) {
               return [{ pubkey: STRANGER, account: account(passkeyAuthority(planted, keyByte, rp)) }];
             }
             return [];
-          },
+          }),
         }),
       } as never;
       const result = await new LazorKit(rpc, PROGRAM_ID).migrateV1Wallet({
@@ -500,10 +1063,12 @@ describe('migrateV1Wallet by address', () => {
       return d;
     };
     type Held = { ata: Address; mint: Address; program: Address; data: Uint8Array };
+    /** What sits at a destination address: SPL Token account data, or any owner's. */
+    type Dest = Uint8Array | { owner: Address; data: Uint8Array };
     async function planWith(
       held: (vault: Address) => Promise<Held[]>,
       mints: Record<string, { owner: Address; data: Uint8Array } | null>,
-      dests: (v2Vault: Address) => Promise<Record<string, Uint8Array>> = async () => ({}),
+      dests: (v2Vault: Address) => Promise<Record<string, Dest>> = async () => ({}),
       pages: number[] = [],
     ) {
       const base = await fixture();
@@ -511,12 +1076,13 @@ describe('migrateV1Wallet by address', () => {
         getMultipleAccounts: (k: Address[]) => { send: () => Promise<{ value: unknown[] }> };
       };
       const lk = new LazorKit({} as never, PROGRAM_ID);
-      let destData: Record<string, Uint8Array> = {};
+      let destData: Record<string, Dest> = {};
       const accounts = await held(base.v1Vault);
       const rpc = {
         ...(base.rpc as object),
         getTokenAccountsByOwner: (_o: Address, f: { programId: Address }) => ({
           send: async () => ({
+            context: { slot: STUB_SLOT },
             value: accounts
               .filter((h) => h.program === f.programId)
               .map((h) => ({ pubkey: h.ata, account: account(h.data, 2_039_280n, h.program) })),
@@ -527,14 +1093,17 @@ describe('migrateV1Wallet by address', () => {
             pages.push(keys.length);
             if (keys.some((k) => k in mints || k in destData)) {
               return {
+                context: { slot: STUB_SLOT },
                 value: keys.map((k) =>
                   k in destData
-                    ? account(destData[k]!, 2_039_280n, TOKEN_PROGRAM_ADDRESS)
+                    ? destData[k] instanceof Uint8Array
+                      ? account(destData[k], 2_039_280n, TOKEN_PROGRAM_ADDRESS)
+                      : account(destData[k]!.data, 2_039_280n, destData[k]!.owner)
                     : mints[k]
                       ? account(mints[k]!.data, 1n, mints[k]!.owner)
                       : k in mints
                         ? null
-                        : account(new Uint8Array(0), 1n),
+                        : account(new Uint8Array(0), 1n, SYSTEM_PROGRAM_ADDRESS),
                 ),
               };
             }
@@ -623,9 +1192,103 @@ describe('migrateV1Wallet by address', () => {
           { ata: await getAssociatedTokenAddress(mint, vault, T22), mint, program: T22, data: tokenData(mint, vault, 5n) },
         ],
         { [mint]: { owner: T22, data: defaultFrozen } },
-        async (v2Vault) => ({ [await getAssociatedTokenAddress(mint, v2Vault, T22)]: tokenData(mint, v2Vault, 0n) }),
+        async (v2Vault) => ({
+          [await getAssociatedTokenAddress(mint, v2Vault, T22)]: { owner: T22, data: tokenData(mint, v2Vault, 0n) },
+        }),
       );
       expect(plan.tokens).toHaveLength(1);
+    });
+
+    // A wallet can be handed to this owner (TransferOwnership asks the new
+    // owner nothing) with its vault's token accounts rigged by the owner
+    // before. The program checks a destination's owner and mint, not who else
+    // may move or close it, so every existing account the plan delivers into
+    // is checked here.
+    describe('an existing destination token account', () => {
+      /** Plan one SPL token whose destination address already holds `dest(v2Vault)`. */
+      async function planInto(dest: (v2Vault: Address) => Dest) {
+        let destAta: Address = PAYER;
+        const plan = planWith(
+          async (vault) => [
+            {
+              ata: await getAssociatedTokenAddress(MINT, vault, TOKEN_PROGRAM_ADDRESS),
+              mint: MINT,
+              program: TOKEN_PROGRAM_ADDRESS,
+              data: tokenData(MINT, vault, 5n),
+            },
+          ],
+          { [MINT]: { owner: TOKEN_PROGRAM_ADDRESS, data: new Uint8Array(82) } },
+          async (v2Vault) => {
+            destAta = await getAssociatedTokenAddress(MINT, v2Vault, TOKEN_PROGRAM_ADDRESS);
+            return { [destAta]: dest(v2Vault) };
+          },
+        );
+        return { plan: await plan.catch((e: Error) => e), destAta };
+      }
+      const rejected = async (dest: (v2Vault: Address) => Dest) => {
+        const { plan, destAta } = await planInto(dest);
+        expect(plan).toBeInstanceOf(Error);
+        return { message: (plan as Error).message, destAta };
+      };
+
+      it('with a delegate: refused, naming the account', async () => {
+        const { message, destAta } = await rejected((v) => withAuthority(tokenData(MINT, v, 0n), 72, STRANGER));
+        expect(message).toContain(`destination token account ${destAta} (mint ${MINT}) has a delegate, ${STRANGER}`);
+      });
+
+      it('with a close authority other than the vault: refused', async () => {
+        const { message, destAta } = await rejected((v) => withAuthority(tokenData(MINT, v, 0n), 129, STRANGER));
+        expect(message).toContain(`${destAta} (mint ${MINT}) has a close authority other than the vault, ${STRANGER}`);
+      });
+
+      it('handed to another owner: refused', async () => {
+        const { message, destAta } = await rejected(() => tokenData(MINT, STRANGER, 0n));
+        expect(message).toContain(`${destAta} (mint ${MINT}) belongs to ${STRANGER}, not the v2 vault`);
+      });
+
+      it('too short to read, or owned by another program: refused', async () => {
+        expect((await rejected(() => new Uint8Array(100))).message).toContain('cannot be read as a token account');
+        const foreign = await rejected((v) => ({ owner: STRANGER, data: tokenData(MINT, v, 0n) }));
+        expect(foreign.message).toContain(`is owned by program ${STRANGER}, not ${TOKEN_PROGRAM_ADDRESS}`);
+      });
+
+      it("the vault's own, with no delegate and the vault as close authority: delivered into", async () => {
+        const { plan } = await planInto((v) => withAuthority(tokenData(MINT, v, 0n), 129, v));
+        expect(plan).not.toBeInstanceOf(Error);
+        expect((plan as Awaited<ReturnType<typeof planWith>>).tokens).toHaveLength(1);
+      });
+
+      it('frozen, even with a delegate: skipped rather than refused — nothing is delivered into it', async () => {
+        const { plan } = await planInto((v) => withAuthority(tokenData(MINT, v, 0n, [], 2), 72, STRANGER));
+        expect(plan).not.toBeInstanceOf(Error);
+        const p = plan as Awaited<ReturnType<typeof planWith>>;
+        expect(p.tokens).toHaveLength(0);
+        expect(p.skippedTokens.map((s) => s.reason)).toEqual(['destination-frozen']);
+      });
+
+      it('lamports alone at the address are no account: a fresh destination', async () => {
+        const lamportsOnly = () => ({ owner: SYSTEM_PROGRAM_ADDRESS, data: new Uint8Array(0) });
+        const { plan } = await planInto(lamportsOnly);
+        expect((plan as Awaited<ReturnType<typeof planWith>>).tokens).toHaveLength(1);
+
+        // So a mint that freezes new accounts still freezes this one: anyone
+        // can send lamports there, and they must not pass for a thawed account.
+        const mint = address('Ek5JdE3pHMjWMQAhxtBXPH3Z1SutAkZjZ7ARjfFkXFui');
+        const defaultFrozen = new Uint8Array(166 + 4 + 1);
+        defaultFrozen[165] = 1;
+        new DataView(defaultFrozen.buffer).setUint16(166, 6, true);
+        new DataView(defaultFrozen.buffer).setUint16(168, 1, true);
+        defaultFrozen[170] = 2;
+        const frozenOnArrival = await planWith(
+          async (vault) => [
+            { ata: await getAssociatedTokenAddress(mint, vault, T22), mint, program: T22, data: tokenData(mint, vault, 5n) },
+          ],
+          { [mint]: { owner: T22, data: defaultFrozen } },
+          async (v2Vault) => ({ [await getAssociatedTokenAddress(mint, v2Vault, T22)]: lamportsOnly() }),
+        );
+        expect(frozenOnArrival.tokens).toHaveLength(0);
+        expect(frozenOnArrival.skippedTokens.map((s) => s.reason)).toEqual(['frozen-on-arrival']);
+      });
     });
 
     it('reads mints in pages of at most 100', async () => {

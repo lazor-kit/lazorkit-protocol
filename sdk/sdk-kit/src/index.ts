@@ -8,4 +8,6 @@ export * from './instructions/index.js';
 export * from './secp256r1/index.js';
 export * from './transactions/index.js';
 export * from './types.js';
+// Which wallet a returning passkey user owns: proof and the adoption rule.
+export * from './ownership.js';
 export * from './client.js';

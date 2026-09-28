@@ -8,7 +8,7 @@ Provides:
 - `LazorKitClient` — high-level API that auto-derives PDAs, fetches slots, reads counters, packs compact instructions, and handles protocol fees
 - Two-phase passkey signing (`prepare*` / `finalize*`) for async WebAuthn flows
 - `DeferredPayload` serialization for TX1-on-device / TX2-on-relayer flows
-- Wallet lookup by credential hash (no need to track `walletPda` yourself)
+- Finding a returning passkey user's own wallet from one assertion (`findOwnPasskeyWallet`) — no need to track `walletPda` yourself
 
 ## Install
 
@@ -39,7 +39,8 @@ bundling for the browser and comparing every output byte for byte against Node.
 
 On React Native, add `react-native-get-random-values` once at app start. That
 is the same polyfill `@solana/web3.js` already needs for `Keypair.generate()`,
-and the SDK uses `crypto.getRandomValues` for treasury shard selection.
+and the SDK uses `crypto.getRandomValues` for treasury shard selection and
+ownership challenges.
 
 ## Quick start
 
@@ -109,8 +110,8 @@ const { instructions, walletPda, vaultPda, authorityPda } = await client.createW
 });
 await sendAndConfirmTransaction(connection, new Transaction().add(...instructions), [payer]);
 
-// Later: find the same wallet back from just the credential hash
-const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
+// When the user comes back, find this wallet with findOwnPasskeyWallet — see
+// "Finding a returning user's wallet" below. Not by credential hash alone.
 ```
 
 **Ed25519 owner** (regular Solana keypair — bots, backends, programmatic signing):
@@ -127,9 +128,179 @@ const { instructions, walletPda, vaultPda, authorityPda } = await client.createW
 });
 await sendAndConfirmTransaction(connection, new Transaction().add(...instructions), [payer]);
 
-// Lookup — pass 'ed25519' as the second arg
-const [wallet] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+// Lookup — pass 'ed25519' as the second arg. It lists every wallet the key is
+// on, including any a stranger added it to: check `role` and the wallet's other
+// authorities (findAuthoritiesByWallet) before using one.
+const records = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
 ```
+
+### Finding a returning user's wallet
+
+A returning user signs in with their passkey, and you need their wallet. Do not
+take the first wallet that lists the passkey's credential-id hash. The hash is
+public — it sits in every authority account the passkey has — and
+`CreateWallet` / `AddAuthority` take any key without its consent. Anyone can
+create a wallet listing a user's credential next to their own public key, or
+add the user's real passkey to a wallet they control, and a lookup by hash
+returns both.
+
+`findOwnPasskeyWallet` takes one assertion over a challenge you generated, and
+adopts a wallet only when
+
+- the passkey is an **Owner** on it, created under your `rpId`, and the public
+  key stored there is the one that just signed; and
+- nothing untrusted can spend from it: no other authority, no live session, no
+  pending deferred execution, no delegate or foreign close authority on the
+  vault's token accounts (nor its wSOL/USDC/USDT account handed to someone
+  else), and a vault that is still a plain system account — apart from
+  Ed25519 keys you list in `trustedKeys` (a backend admin, session keys you
+  issued, your own delegate); and
+- it is the **one** wallet the passkey has **signed for** (`signatureCount > 0`,
+  the replay counter on its authority, which only a signature by the key it
+  stores advances).
+
+A pending deferred execution always counts, even one that names this passkey's
+own authority: the program does not tie it to the key that signed it, and that
+authority address can have held someone else's key when it was queued. So does
+a vault that is no longer a plain system account (`vaultIsSystemAccount:
+false`), whatever you trust: an earlier Owner's `Execute` can `Assign` the
+vault to another program, which from then on decides what leaves it.
+
+The last condition is there because not everything an earlier holder of a
+wallet did can be read back. `TransferOwnership` hands a wallet to a passkey
+without asking it (its public key is on chain), and before that its Owner could
+move the vault's SPL Token account for any mint to themselves with
+`SetAuthority`. That account stops listing as the vault's, nothing on chain
+leads back to it, and every later payment of that mint to the vault's address
+lands in it. The SDK checks the canonical account for wSOL, USDC, USDT and
+devnet USDC, plus every mint you pass as `watchMints` — pass the mints your
+app receives. For any other mint such a wallet looks spotless, and a lamport
+more in its vault would outrank the user's own. A passkey signs only for
+a wallet its user chose, so a wallet it has never signed for is never adopted —
+not even the only one, and not with `trustedKeys`. That includes the user's
+own wallet before its first transaction: they confirm it once. A wallet your
+app has just created or migrated into, you already know; keep its address
+rather than looking it up.
+
+Why "the one": a signature can be copied onto another wallet. The program's
+passkey challenge covers the payer, the counter and the instruction's own
+arguments, but not the wallet, for `CreateSession`, `AddAuthority`,
+`TransferOwnership` and `Authorize`. Whoever planted a wallet for the passkey
+can take the signature from the user's first such transaction and submit it
+again on theirs, within about 150 slots, through the same fee payer (a relayer
+signs for anyone), and its counter goes up too. So when two wallets have been
+signed for, neither is adopted; the user chooses, and both rows look used. A
+copy of a signature the passkey made where it is not an Owner (an Admin seat
+on someone else's wallet), or on an authority since removed, cannot be told
+apart this way; binding the wallet into the challenge, in the program, is the
+fix for that.
+
+```typescript
+import { createOwnershipChallenge, selectWalletByAddress } from '@lazorkit/sdk-legacy';
+
+const rpId = 'your-app.com';
+const challenge = createOwnershipChallenge(); // fresh for every sign-in, never reused
+
+const credential = (await navigator.credentials.get({
+  publicKey: { challenge, rpId, userVerification: 'preferred' },
+})) as PublicKeyCredential;
+const response = credential.response as AuthenticatorAssertionResponse;
+const credentialIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', credential.rawId));
+
+const { adopt, needsConfirmation, unproven } = await client.findOwnPasskeyWallet({
+  credentialIdHash,
+  rpId,
+  proof: {
+    challenge,
+    signature: new Uint8Array(response.signature), // DER, as the browser returns it
+    authenticatorData: new Uint8Array(response.authenticatorData),
+    clientDataJson: new Uint8Array(response.clientDataJSON),
+  },
+  trustedKeys: [backendAdmin.publicKey], // optional: your own Ed25519 keys on users' wallets
+  watchMints: [yourAppsMint], // optional: SPL Token mints your app receives (see below)
+});
+
+let wallet;
+if (adopt) {
+  // This passkey has used it, and only it (and your trusted keys) can spend from it.
+  wallet = adopt;
+} else if (needsConfirmation.length > 0) {
+  // The passkey owns these, but has never signed for them (`signatureCount: 0`
+  // — say it gently: "This wallet has not been used with your passkey yet.
+  // Continue only if you created it."), or has signed for more than one, or
+  // something else can spend from them too. Show each vault address, its balance (`lamports`) and who else
+  // controls it (`otherAuthorities`, `liveSessions`, `pendingDeferred`,
+  // `tokenGrants`, `vaultIsSystemAccount`), and let the user choose.
+  // Pre-select nothing. "None of these" means stop — not create.
+  const chosen = await askUserToChoose(needsConfirmation); // a vault address, or null
+  if (!chosen) throw new Error('No wallet confirmed');
+  wallet = selectWalletByAddress(needsConfirmation, chosen); // vault or wallet address
+} else {
+  // This passkey provably owns no wallet: create one. The public key comes from
+  // the passkey's registration (navigator.credentials.create) — an assertion
+  // carries none.
+  const created = await client.createWallet({
+    payer: payer.publicKey,
+    userSeed: crypto.getRandomValues(new Uint8Array(32)),
+    owner: { type: 'secp256r1', credentialIdHash, compressedPubkey, rpId },
+  });
+  // ...send created.instructions
+}
+// wallet: { walletPda, vaultPda, authorityPda, publicKey, version, lamports, ... }
+```
+
+- `unproven` counts wallets that list this credential with some other public
+  key. Someone planted them; they are ignored.
+- `version: 1` is a pre-v2 wallet on the v1 deployment paired with your program
+  id (`includeV1: false` skips it). Among wallets that qualify it comes first —
+  its funds have not been migrated yet. Move them with `migrateV1Wallet`.
+- Order of `needsConfirmation`: signed for first, then v1, then the fuller
+  vault, then the wallet address. The balance order is one anyone can change
+  by funding a vault — it is not a recommendation.
+- A wallet whose account no longer exists is left out. Migrating a v1 wallet
+  closes it and only the authority that migrated; another passkey's v1
+  authority stays behind, and nothing can move funds sent to that vault.
+- `tokenGrants` covers SPL Token and Token-2022 accounts the vault owns (any
+  mint), plus the vault's SPL Token account for wSOL, USDC, USDT and devnet
+  USDC, which `SetAuthority` can hand to another owner while senders keep
+  paying into it — and for every mint in `watchMints`. For other mints only
+  accounts the vault still owns are seen, so on a wallet never signed for, a
+  clean `tokenGrants` proves nothing about them. When the user confirms such
+  a wallet, that is the risk they take. Token-2022 associated accounts are
+  created with an immutable owner and cannot be moved this way.
+- The steps are public on their own — `findPasskeyWalletCandidates`,
+  `verifyOwnershipProof`, `describeWalletCandidates`, `pickOwnWallet` — for a
+  flow that collects the assertion somewhere else and decides here.
+- Every wallet described costs three `getProgramAccounts` calls (authorities,
+  sessions, deferred executions), two `getTokenAccountsByOwner`, and six
+  accounts (one more per `watchMints` entry) read together; use an RPC
+  endpoint that allows them. They are read in the order power flows — the
+  authorities; then sessions and deferred executions; then the wallet, vault
+  and token accounts — and each step asks for state at least as new as the one
+  before (`minContextSlot`), so a transaction landing mid-read (a co-owner
+  opening a session and removing itself, say) cannot be half-seen, even
+  behind a load-balanced RPC. A node that has not caught up is asked again, up
+  to five times. A failed read throws rather than guess.
+- `migrateV1Wallet` holds a reused v2 destination to the same standard, and
+  stricter: only this passkey as an authority, nothing live, a plain system
+  vault and no grants on its token accounts
+  (`vetMigrationDestination(wallet, owner, { watchMints })`, read in the same
+  order; `migrateV1Wallet` takes `watchMints` too). A wallet it finds by itself
+  is reused only if the passkey has signed for it and on no other authority of
+  the program, at any rank (a signature from an Admin seat can be replayed onto
+  an Owner's); an Ed25519 owner's never is (name it with
+  `destinationUserSeed`). A wallet at `userSeed` or
+  `destinationUserSeed` is vetted too, and refused with the reason if it
+  fails, but cannot be held to the signed-for bar — the userSeed is public in
+  the v1 `CreateWallet` instruction, so anyone could have created and handed
+  over a wallet there; pass `v1Wallet` without `userSeed` for a fresh
+  destination when one exists that your app did not create. An address that
+  only holds lamports gets a wallet created. It also refuses to deliver into an
+  existing destination token account that is not the vault's alone, naming it.
+  Send `setupInstructions` and the migrate in one transaction where they fit;
+  otherwise send the migrate only after the setup transaction is confirmed
+  successful — if someone else's `CreateWallet` at that seed lands first, a
+  migrate sent anyway pays into their vault.
 
 ### Add more authorities
 
@@ -404,16 +575,21 @@ If TX2 never gets submitted and the expiry passes, the original payer can reclai
 ### Wallet lookup
 
 ```typescript
-// All wallets the credential can access
+// A returning passkey user's own wallet — see "Finding a returning user's wallet"
+const { adopt, needsConfirmation, unproven } =
+  await client.findOwnPasskeyWallet({ credentialIdHash, rpId, proof, trustedKeys });
+
+// Raw lookup: every wallet that lists the credential, at any rank, including
+// wallets a stranger created with it or added it to. It proves nothing.
 const wallets = await client.findWalletsByAuthority(credentialIdHash);
-
-// Ed25519 authority lookup
 const ed25519Wallets = await client.findWalletsByAuthority(pubkeyBytes, 'ed25519');
-
 // Each: { walletPda, authorityPda, vaultPda, role, authorityType }
 ```
 
-Uses `getProgramAccounts` with discriminator + authority_type + credential filters.
+Both use `getProgramAccounts` with discriminator + authority_type + credential
+filters; `findOwnPasskeyWallet` also filters on the relying party and reads each
+proven wallet's account, authorities, sessions, deferred executions and vault
+token accounts.
 
 ### PDA helpers
 

@@ -9,7 +9,7 @@ A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r
   lost first one.
 - **Session keys with policies** — ephemeral signers restricted by per-tx / per-window / lifetime SOL + token caps, and program whitelists.
 - **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps).
-- **Wallet lookup** — find wallets by credential hash or public key; no need to store `walletPda` locally.
+- **Returning users, found safely** — `findOwnPasskeyWallet` finds a passkey user's own wallet from one assertion, with no `walletPda` stored: it adopts a wallet only if the passkey proves the key stored there, it is the one wallet the passkey has signed for, and nothing untrusted can spend from it; anything else goes to the user to confirm. (`findWalletsByAuthority` is a raw lookup by credential hash or public key — the hash is public, and anyone can plant a wallet that lists it.)
 - **Parallel execution** — different authorities on the same wallet never block each other.
 
 ## Install
@@ -33,7 +33,11 @@ A v1 id is only ever rebuilt as a **sunset binary**: it serves the three
 instructions a v1 wallet needs to leave (`MigrateWallet`, `ReclaimDeferred`,
 `CloseExpiredSession`) and refuses everything else with `RetiredDeployment`
 (4018). `migrateV1Wallet` executes against the v1 id and delivers to a v2 vault
-at the v2 id.
+at the v2 id. It reuses an existing v2 wallet only if it is the one authority
+the passkey has signed on and `vetMigrationDestination` finds no one else able
+to spend from it, and otherwise creates one; send its setup and migrate in one
+transaction. See
+[docs/migration-ui-flow.md](docs/migration-ui-flow.md).
 
 ## Quick start
 
@@ -61,8 +65,10 @@ const { instructions, walletPda, vaultPda, authorityPda } = await client.createW
     rpId: 'your-app.com',
   },
 });
-// Returning user: find the wallet again from just the credential hash
-const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
+// Returning user: find this wallet with client.findOwnPasskeyWallet — see
+// "Finding a returning user's wallet" in sdk/sdk-legacy/README.md. Not by
+// credential hash alone: the hash is public, and anyone can plant a wallet
+// that lists it.
 ```
 
 **Ed25519 owner** (bot / backend / programmatic signing):
@@ -77,8 +83,10 @@ const { instructions, walletPda, vaultPda, authorityPda } = await client.createW
     publicKey: ownerKp.publicKey,
   },
 });
-// Lookup works for Ed25519 too
-const [wallet] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+// Lookup works for Ed25519 too. It lists every wallet the key is on, including
+// any a stranger added it to: check `role` and the wallet's other authorities
+// (findAuthoritiesByWallet) before using one.
+const records = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
 ```
 
 ### Add another authority to the same wallet

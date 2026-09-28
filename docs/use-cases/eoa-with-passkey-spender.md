@@ -212,8 +212,27 @@ await sendAndConfirmTransaction(
 ```
 
 `spenderAuthPda` is the PDA that represents the passkey on this wallet. Save
-it — the Spender flow uses it on every Execute. You can also recover it later
-from just the `credentialIdHash` via `client.findWalletsByAuthority(...)`.
+it — the Spender flow uses it on every Execute. It can be derived again from
+the wallet you already know: `client.findAuthority(walletPda, passkey.credentialIdHash)[0]`.
+
+Do not recover the *wallet* from the passkey's `credentialIdHash`
+(`client.findWalletsByAuthority(...)`). The hash is public, and `AddAuthority`
+takes any key without its consent: anyone can add this passkey to a wallet
+they control, and a lookup by hash returns that wallet too. Find the wallet
+the way you created it: from the `userSeed` (`client.findWallet(userSeed)[0]`)
+or the `walletPda` you stored. For a wallet the passkey *owns*, use
+`client.findOwnPasskeyWallet(...)`, which proves the passkey and checks who
+else can spend (see the SDK README, "Finding a returning user's wallet").
+
+One more reason to store the wallet rather than look it up. The program's
+passkey challenge does not name the wallet for `CreateSession`, `AddAuthority`
+or `Authorize`, so a signature this passkey makes here as an Admin can be
+submitted again, within about 150 slots and through the same fee payer, on a
+wallet someone planted for it — raising the counter that `findOwnPasskeyWallet`
+reads as "the user has signed for this wallet". That lookup only sees Owner
+seats, so if the same passkey (same `rpId`) owns no wallet of its own, the
+planted one can be the only signed-for candidate and be adopted. Until the
+program binds the wallet into the challenge, persist the wallet address.
 
 ### 3. Passkey executes a transaction
 

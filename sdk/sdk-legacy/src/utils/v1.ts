@@ -19,6 +19,8 @@ export const V1_SEED_AUTHORITY = 'authority';
 /** v1 account discriminators. v2 uses `0x2N`. */
 export const V1_DISC_WALLET = 1;
 export const V1_DISC_AUTHORITY = 2;
+export const V1_DISC_SESSION = 3;
+export const V1_DISC_DEFERRED_EXEC = 4;
 
 export function findV1WalletPda(
   userSeed: Uint8Array,
