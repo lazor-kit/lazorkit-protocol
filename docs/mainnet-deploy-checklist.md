@@ -137,7 +137,8 @@ files. Nothing below deploys a path that a later build could overwrite.
       the same source a v1.53 build finishes without compiling anything, and
       `cargo-build-sbf` skips the copy when the out-dir file is not older than
       its own output. On 2026-09-28 that left a 146528-byte v1.54 build where a
-      clean v1.53 build of the same source is 150752. Build the release
+      clean v1.53 build of that day's source was 150752 bytes (the source has
+      changed since; the current sizes are the table's). Build the release
       artifacts in a fresh target dir —
       `CARGO_TARGET_DIR=$(mktemp -d) command cargo build-sbf …` (`command`
       skips the wrapper) — and check the sizes against the table under
@@ -299,6 +300,14 @@ the §2 commands (cargo-build-sbf 4.1.0, platform-tools v1.53, a fresh target
 dir; a second fresh target dir gave the same hashes). The passkey leg signs
 the new challenge through sdk-legacy on the default pairing, so a v1 passkey
 wallet migrating through the sunset binary is covered end to end.
+
+Re-run the same day after the review of the wallet binding, which changed the
+SDKs (`executor` and `feePayer` in the accounts hash), the docs and one program
+comment (same line count): the four artifacts, rebuilt by the §2 commands in
+another fresh target dir, are byte-identical to the tables below, and the
+rehearsal at the **mainnet ids** passed **18/18** again on them, with both SDKs
+built from the reviewed source, followed by the phase B rollback (the
+programdata dumped with `v1-live.so`'s exact bytes).
 
 At the **devnet ids** (`legacyProgramIdFor(57bTNW…) = 4h3XoNRe…`), the v1 dump
 preloaded at `4h3XoNRe…`, v2 at `57bTNW…`, then `4h3XoNRe…` upgraded to the
