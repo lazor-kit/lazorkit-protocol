@@ -169,7 +169,7 @@ files. Nothing below deploys a path that a later build could overwrite.
       V1_PRELOADED=1 SUNSET_SO=target/artifacts/sunset/lazorkit_program.so \
         node scripts/rehearse/two-id-rehearsal.mjs
       ```
-      It must end `15/15 checks passed`. At the real ids this is the whole
+      It must end `18/18 checks passed`. At the real ids this is the whole
       rollout with the files that will ship: the v1 wallets are made by the
       live v1 binary; the sunset upgrade refuses CreateWallet with 4018; an
       Ed25519 wallet leaves through the kit SDK; a passkey wallet leaves through
@@ -322,8 +322,10 @@ branch — the mainnet v2 id had just been ground. Re-run the same day after a
 review found the migration's signed payload read a 3-account stride while each
 token had become 4 accounts: every passkey migration of two or more token
 accounts failed, and the earlier runs moved one token per wallet, so they could
-not see it. The passkey wallet now holds an SPL and a Token-2022 token, and the
-run is **15/15** with the fixed artifacts below. The v1 dump preloaded at
+not see it. The passkey wallet now holds an SPL token and a Token-2022 token
+with a 1% transfer fee, received by transfer so its account holds withheld
+fees (which block closing it until harvested — the SDK now harvests them in
+the migration transaction). The run is **18/18** with the artifacts below. The v1 dump preloaded at
 `LazorjRF…`, v2 at `LazorFroi…`, then `LazorjRF…` upgraded to the sunset build:
 **14/14**, the passkey leg again on the default pairing
 (`legacyProgramIdFor(LazorFroi…) = LazorjRF…`). The phase B rollback was then

@@ -16,39 +16,58 @@ const FILES = {
   devnet: { v2: '57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv', v1: '4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS' },
 };
 
-/** The uncommented string entries of a TOML array `key = [ ... ]`. */
+/**
+ * The string entries of a TOML array `key = [ ... ]`, comments ignored. Scans
+ * character by character so an inline array, an indented `]`, or a `]`
+ * inside a comment cannot make it read into the next table.
+ */
 function arrayEntries(toml, key) {
-  const m = toml.match(new RegExp(`^${key}\\s*=\\s*\\[([\\s\\S]*?)^\\]`, 'm'));
-  if (!m) return null;
-  return m[1]
-    .split('\n')
-    .map((l) => l.replace(/#.*$/, ''))
-    .flatMap((l) => [...l.matchAll(/"([^"]+)"/g)].map((x) => x[1]));
+  const start = toml.search(new RegExp(`^\\s*${key}\\s*=\\s*\\[`, 'm'));
+  if (start < 0) return null;
+  const entries = [];
+  let i = toml.indexOf('[', start) + 1;
+  while (i < toml.length) {
+    const c = toml[i];
+    if (c === '#') i = toml.indexOf('\n', i) < 0 ? toml.length : toml.indexOf('\n', i);
+    else if (c === '"') {
+      const end = toml.indexOf('"', i + 1);
+      entries.push(toml.slice(i + 1, end));
+      i = end + 1;
+    } else if (c === ']') return entries;
+    else i++;
+  }
+  return null;
 }
 
 let failed = 0;
 for (const [cluster, ids] of Object.entries(FILES)) {
   const file = path.join(__dirname, '..', 'deploy', 'kora', `kora.${cluster}.toml`);
   const toml = fs.readFileSync(file, 'utf8');
-  for (const key of ['allowed_programs', 'require_one_of_programs']) {
-    const entries = arrayEntries(toml, key);
-    const fail = (why) => {
-      failed++;
-      console.log(`FAIL  ${cluster} ${key}: ${why}`);
-    };
-    if (!entries) {
-      fail('missing');
-      continue;
-    }
-    if (!entries.includes(ids.v2)) fail(`does not list the v2 program ${ids.v2}`);
+  const phaseB = /PHASE_B_SUNSET_LIVE/.test(toml);
+  const fail = (why) => {
+    failed++;
+    console.log(`FAIL  ${cluster}: ${why}`);
+  };
+  const allowed = arrayEntries(toml, 'allowed_programs');
+  const required = arrayEntries(toml, 'require_one_of_programs');
+  if (!allowed) fail('allowed_programs missing');
+  if (!required) fail('require_one_of_programs missing');
+  if (!allowed || !required) continue;
+
+  for (const [name, list] of [['allowed_programs', allowed], ['require_one_of_programs', required]]) {
+    if (!list.includes(ids.v2)) fail(`${name} does not list the v2 program ${ids.v2}`);
     // The v1 id belongs here only once it runs the sunset binary (H-3); that
     // is a deliberate edit at phase B, so it fails until the file says so.
-    if (entries.includes(ids.v1) && !/PHASE_B_SUNSET_LIVE/.test(toml)) {
-      fail(`lists the v1 program ${ids.v1} before phase B`);
-    }
-    if (entries.includes(ids.v2) && !(entries.includes(ids.v1) && !/PHASE_B_SUNSET_LIVE/.test(toml))) {
-      console.log(`ok    ${cluster} ${key}`);
-    }
+    if (list.includes(ids.v1) && !phaseB) fail(`${name} lists the v1 program ${ids.v1} before phase B`);
   }
+  // A required program the relayer does not allow refuses every transaction
+  // that needs it; the two lists have to move together.
+  for (const id of required) {
+    if (!allowed.includes(id)) fail(`require_one_of_programs lists ${id}, which allowed_programs does not`);
+  }
+  if (allowed.includes(ids.v1) !== required.includes(ids.v1)) {
+    fail(`the v1 program ${ids.v1} is in one list but not the other`);
+  }
+  if (!failed) console.log(`ok    ${cluster}`);
 }
 process.exit(failed ? 1 : 0);

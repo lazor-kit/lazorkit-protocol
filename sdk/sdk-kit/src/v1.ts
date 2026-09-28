@@ -5,6 +5,7 @@
 // v1's. These bare-seed derivations reach the *old* addresses and live apart
 // from `pdas.ts` deliberately, so the two are never confused.
 import {
+  AccountRole,
   getAddressDecoder,
   getAddressEncoder,
   getBase64Encoder,
@@ -16,6 +17,7 @@ import {
   type GetMultipleAccountsApi,
   type GetProgramAccountsApi,
   type GetTokenAccountsByOwnerApi,
+  type Instruction,
   type ProgramDerivedAddress,
   type Rpc,
 } from '@solana/kit';
@@ -222,8 +224,10 @@ export interface V1VaultToken {
   tokenProgram: Address;
   /** A frozen account cannot be transferred from or closed. */
   frozen: boolean;
-  /** Why this account itself cannot move (frozen, withheld fees, …), or null. */
+  /** Why this account itself cannot move (frozen, non-transferable, …), or null. */
   blocker: UnmovableReason | null;
+  /** Token-2022 fees withheld here, to harvest before the account can close. */
+  withheldFees: boolean;
 }
 
 /**
@@ -237,9 +241,15 @@ export interface V1VaultToken {
  *  - `paused`            the mint is paused
  *  - `frozen-on-arrival` the mint freezes new accounts, so the destination
  *                        account would be frozen before the tokens arrive
- *  - `withheld-fees`     transfer fees are withheld in the account; it cannot close
  *  - `cpi-guard`         the account refuses transfers made through a program
+ *  - `mint-missing`      the mint is gone (closed) or not owned by the account's
+ *                        token program, so no transfer can name it
+ *  - `destination-frozen` the destination token account exists and is frozen
  *  - `excluded`          the caller chose to leave it (`excludeTokenAccounts`)
+ *
+ * Withheld transfer fees are not on the list: they only stop the source from
+ * closing, and anyone may harvest them to the mint — `migrateV1Wallet` does,
+ * in the same transaction (see `harvestWithheldIx`).
  */
 export type UnmovableReason =
   | 'frozen'
@@ -247,8 +257,9 @@ export type UnmovableReason =
   | 'non-transferable'
   | 'paused'
   | 'frozen-on-arrival'
-  | 'withheld-fees'
   | 'cpi-guard'
+  | 'mint-missing'
+  | 'destination-frozen'
   | 'excluded';
 
 /** Token-account state byte: 0 uninitialized, 1 initialized, 2 frozen. */
@@ -303,13 +314,26 @@ export function mintBlocker(mintData: Uint8Array): UnmovableReason | null {
   return null;
 }
 
+/**
+ * Whether a Token-2022 account holds withheld transfer fees. Such an account
+ * cannot be closed until they are harvested to the mint — which needs no
+ * signer, so the migration does it first rather than leaving the account.
+ */
+export function tokenAccountWithheldFees(accountData: Uint8Array): boolean {
+  const fees = tlvExtensions(accountData).get(EXT_TRANSFER_FEE_AMOUNT);
+  return !!fees && fees.length >= 8 && fees.subarray(0, 8).some((b) => b !== 0);
+}
+
+/** Whether a token account is frozen (state byte 2). */
+export function tokenAccountFrozen(accountData: Uint8Array): boolean {
+  return accountData.length > TOKEN_STATE_OFFSET && accountData[TOKEN_STATE_OFFSET] === TOKEN_STATE_FROZEN;
+}
+
 /** Why this token account itself cannot be migrated, or `null`. */
 export function tokenAccountBlocker(accountData: Uint8Array): UnmovableReason | null {
   if (accountData[TOKEN_STATE_OFFSET] === TOKEN_STATE_FROZEN) return 'frozen';
   const ext = tlvExtensions(accountData);
   if (ext.has(EXT_NON_TRANSFERABLE_ACCOUNT)) return 'non-transferable';
-  const fees = ext.get(EXT_TRANSFER_FEE_AMOUNT);
-  if (fees && fees.length >= 8 && fees.subarray(0, 8).some((b) => b !== 0)) return 'withheld-fees';
   const guard = ext.get(EXT_CPI_GUARD);
   if (guard && guard[0] !== 0) return 'cpi-guard';
   return null;
@@ -341,6 +365,7 @@ export async function enumerateV1VaultTokens(
         tokenProgram,
         frozen: data[TOKEN_STATE_OFFSET] === TOKEN_STATE_FROZEN,
         blocker: tokenAccountBlocker(data),
+        withheldFees: tokenAccountWithheldFees(data),
       });
     }
   }
@@ -366,25 +391,49 @@ export async function classifyV1VaultTokens(
   tokens: V1VaultToken[],
   exclude: ReadonlyArray<Address> = [],
 ): Promise<{ movable: V1VaultToken[]; skipped: { token: V1VaultToken; reason: UnmovableReason }[] }> {
-  const t22Mints = [
-    ...new Set(tokens.filter((t) => t.tokenProgram === TOKEN_2022_PROGRAM_ADDRESS).map((t) => t.mint)),
-  ];
-  const blockedMints = new Map<string, UnmovableReason>();
-  if (t22Mints.length) {
-    const { value } = await rpc.getMultipleAccounts(t22Mints, { encoding: 'base64' }).send();
-    value.forEach((info, i) => {
-      const reason = info ? mintBlocker(decodeBase64(info.data[0])) : null;
-      if (reason) blockedMints.set(t22Mints[i]!, reason);
-    });
-  }
   const movable: V1VaultToken[] = [];
   const skipped: { token: V1VaultToken; reason: UnmovableReason }[] = [];
+  const candidates: V1VaultToken[] = [];
   for (const t of tokens) {
-    const reason: UnmovableReason | null | undefined = exclude.includes(t.ata)
-      ? 'excluded'
-      : (t.blocker ?? (t.frozen ? 'frozen' : null) ?? blockedMints.get(t.mint));
+    if (exclude.includes(t.ata)) skipped.push({ token: t, reason: 'excluded' });
+    else candidates.push(t);
+  }
+  // Every mint, in pages of 100 (the RPC's limit): a mint that is gone, or is
+  // owned by another token program, can never be named in a transfer.
+  const mints = [...new Set(candidates.map((t) => t.mint))];
+  const mintInfo = new Map<string, { owner: Address; data: Uint8Array } | null>();
+  for (let i = 0; i < mints.length; i += 100) {
+    const page = mints.slice(i, i + 100);
+    const { value } = await rpc.getMultipleAccounts(page, { encoding: 'base64' }).send();
+    value.forEach((info, j) =>
+      mintInfo.set(page[j]!, info ? { owner: info.owner, data: decodeBase64(info.data[0]) } : null),
+    );
+  }
+  for (const t of candidates) {
+    const mint = mintInfo.get(t.mint);
+    const reason: UnmovableReason | null =
+      t.blocker ??
+      (t.frozen ? 'frozen' : null) ??
+      (!mint || mint.owner !== t.tokenProgram ? 'mint-missing' : null) ??
+      (mint && t.tokenProgram === TOKEN_2022_PROGRAM_ADDRESS ? mintBlocker(mint.data) : null);
     if (reason) skipped.push({ token: t, reason });
     else movable.push(t);
   }
   return { movable, skipped };
+}
+
+/**
+ * Token-2022 `HarvestWithheldTokensToMint` for these accounts of one mint.
+ * Needs no signer: it only moves withheld fees from the accounts to the mint,
+ * after which the accounts can close.
+ */
+export function harvestWithheldIx(mint: Address, sources: Address[]): Instruction {
+  return {
+    programAddress: TOKEN_2022_PROGRAM_ADDRESS,
+    accounts: [
+      { address: mint, role: AccountRole.WRITABLE },
+      ...sources.map((address) => ({ address, role: AccountRole.WRITABLE })),
+    ],
+    data: new Uint8Array([26, 4]), // TransferFeeExtension, HarvestWithheldTokensToMint
+  };
 }

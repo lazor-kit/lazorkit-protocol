@@ -43,6 +43,10 @@ function v1AuthorityData(wallet: PublicKey, role = 0, authType = 0): Buffer {
   data[2] = role;
   Buffer.from(wallet.toBytes()).copy(data, 16);
   Buffer.from(CREDENTIAL).copy(data, 48);
+  if (authType === 1) {
+    Buffer.alloc(33, 0x7c).copy(data, 80); // compressed pubkey
+    createHash('sha256').update('portal.lazor.sh').digest().copy(data, 113); // rpIdHash
+  }
   return data;
 }
 
@@ -107,7 +111,8 @@ describe('migrateV1Wallet by address', () => {
         keys.map((key) => {
           if (key.equals(v1Wallet)) return { data: v1WalletData(), lamports: 890880 };
           if (key.equals(v1Authority)) return { data: v1AuthorityData(v1Wallet), lamports: 1 };
-          return { data: Buffer.alloc(0), lamports: 50_000_000 };
+          // Anything else here is a mint (owned by SPL Token) or a destination.
+          return { data: Buffer.alloc(82), lamports: 50_000_000, owner: TOKEN_PROGRAM_ID };
         }),
       // No v2 wallet yet, and no protocol config.
       getAccountInfo: async () => null,
@@ -310,6 +315,65 @@ describe('migrateV1Wallet by address', () => {
     data.writeUInt16LE(33, 168);
     data[170 + 32] = 1;
     expect(mintBlocker(data)).toBe('paused');
+  });
+
+  it('harvests withheld Token-2022 fees in the migration transaction and moves the account', async () => {
+    const mint = Keypair.generate().publicKey;
+    const ata = Keypair.generate().publicKey;
+    const T22 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+    const data = Buffer.alloc(166 + 4 + 8);
+    mint.toBuffer().copy(data, 0);
+    v1Vault.toBuffer().copy(data, 32);
+    data.writeBigUInt64LE(990n, 64);
+    data[108] = 1;
+    data[165] = 2; // AccountType::Account
+    data.writeUInt16LE(2, 166); // TransferFeeAmount
+    data.writeUInt16LE(8, 168);
+    data.writeBigUInt64LE(7n, 170); // withheld
+    const base = stubConnection() as unknown as { getMultipleAccountsInfo: (k: PublicKey[]) => Promise<unknown[]> };
+    const connection = {
+      ...stubConnection(),
+      getTokenAccountsByOwner: async (_o: PublicKey, f: { programId: PublicKey }) => ({
+        value: f.programId.equals(T22) ? [{ pubkey: ata, account: { data, owner: T22 } }] : [],
+      }),
+      getMultipleAccountsInfo: async (keys: PublicKey[]) =>
+        keys.some((k) => k.equals(mint))
+          ? keys.map((k) => (k.equals(mint) ? { data: Buffer.alloc(82), owner: T22, lamports: 1 } : null))
+          : base.getMultipleAccountsInfo(keys),
+    } as unknown as Connection;
+
+    const plan = await new LazorKitClient(connection, PROGRAM_ID).migrateV1Wallet({
+      payer: Keypair.generate().publicKey,
+      owner: { type: 'ed25519', publicKey: OWNER_PUBKEY },
+      v1Wallet,
+    });
+    expect(plan.tokens.map((x) => x.ata.toBase58())).toEqual([ata.toBase58()]);
+    if (plan.migrate.type !== 'ed25519') throw new Error('ed25519 expected');
+    const [harvest, migrate] = plan.migrate.instructions;
+    expect(harvest.programId.toBase58()).toBe(T22.toBase58());
+    expect(Array.from(harvest.data)).toEqual([26, 4]);
+    expect(harvest.keys.map((k) => k.pubkey.toBase58())).toEqual([mint.toBase58(), ata.toBase58()]);
+    expect(migrate).toBe(plan.migrate.instruction);
+  });
+
+  it("refuses a passkey owner whose relying party is not the v1 wallet's", async () => {
+    const connection = {
+      ...stubConnection(),
+      getAccountInfo: async (key: PublicKey) =>
+        key.equals(v1Authority) ? { data: v1AuthorityData(v1Wallet, 0, 1), lamports: 1 } : null,
+    } as unknown as Connection;
+    await expect(
+      new LazorKitClient(connection, PROGRAM_ID).migrateV1Wallet({
+        payer: Keypair.generate().publicKey,
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: CREDENTIAL,
+          compressedPubkey: new Uint8Array(33).fill(0x7c),
+          rpId: 'lazor.sh',
+        },
+        v1Wallet,
+      }),
+    ).rejects.toThrow('relying party');
   });
 
   it('refuses to run from a client built at the retired v1 id', async () => {
