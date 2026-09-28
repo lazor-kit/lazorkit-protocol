@@ -32,6 +32,7 @@ use solana_sdk::{
 
 const ERR_RETIRED_DEPLOYMENT: u32 = 4018;
 const ERR_SESSION_NOT_EXPIRED: u32 = 3036;
+const ERR_INVALID_MESSAGE_HASH: u32 = 3005;
 
 const V1_DISC_WALLET: u8 = 1;
 const V1_DISC_AUTHORITY: u8 = 2;
@@ -196,6 +197,153 @@ fn migrate_moves_a_v1_wallet_to_a_vault_the_owner_names_anywhere() {
     );
     assert_eq!(lamports_of(&context, &vault), 0, "the v1 vault is empty");
     assert_eq!(lamports_of(&context, &wallet), 0, "the v1 wallet is closed");
+    assert_eq!(
+        lamports_of(&context, &authority),
+        0,
+        "the v1 authority is closed"
+    );
+}
+
+/// The passkey path, which most v1 wallets take. The sunset binary checks the
+/// same challenge v2 does, wallet included, and reads that wallet from the v1
+/// authority's header — where v1 also kept it, at offset 16. If it did not,
+/// every passkey migration would fail, and on a binary that serves nothing else
+/// those funds would have no way out.
+#[test]
+fn a_passkey_wallet_migrates_with_the_wallet_bound_challenge() {
+    use p256::ecdsa::{SigningKey, VerifyingKey};
+    use sha2::Digest;
+
+    let mut context = setup_uninitialized();
+    let program_id = context.program_id;
+    let signing_key = SigningKey::random(&mut rand::thread_rng());
+    let rp_id = "lazorkit.mainnet";
+    let credential_id_hash = rand::random::<[u8; 32]>();
+    let user_seed = rand::random::<[u8; 32]>();
+
+    let (wallet, wallet_bump) = Pubkey::find_program_address(&[b"wallet", &user_seed], &program_id);
+    let (vault, _) = Pubkey::find_program_address(&[b"vault", wallet.as_ref()], &program_id);
+    let (authority, auth_bump) = Pubkey::find_program_address(
+        &[b"authority", wallet.as_ref(), &credential_id_hash],
+        &program_id,
+    );
+
+    let mut wdata = vec![0u8; 8];
+    wdata[0] = V1_DISC_WALLET;
+    wdata[1] = wallet_bump;
+    wdata[2] = 1;
+    set_program_account(&mut context, wallet, wdata, 1_000_000);
+
+    // v1 secp authority: header(48) ‖ credential_hash(32) ‖ pubkey(33) ‖ rpIdHash(32).
+    let mut adata = vec![0u8; 145];
+    adata[0] = V1_DISC_AUTHORITY;
+    adata[1] = 1; // Secp256r1
+    adata[2] = 0; // Owner
+    adata[3] = auth_bump;
+    adata[4] = 1;
+    adata[16..48].copy_from_slice(wallet.as_ref());
+    adata[48..80].copy_from_slice(&credential_id_hash);
+    adata[80..113].copy_from_slice(
+        VerifyingKey::from(&signing_key)
+            .to_encoded_point(true)
+            .as_bytes(),
+    );
+    adata[113..145].copy_from_slice(&sha2::Sha256::digest(rp_id.as_bytes()));
+    set_program_account(&mut context, authority, adata, 2_000_000);
+
+    let funds = 750_000_000u64;
+    context
+        .svm
+        .set_account(
+            vault,
+            Account {
+                lamports: funds,
+                data: vec![],
+                owner: solana_sdk::system_program::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+
+    let destination = Pubkey::new_unique();
+    let payer = context.payer.insecure_clone();
+    let accounts = vec![
+        AccountMeta::new(payer.pubkey(), true),
+        AccountMeta::new(wallet, false),
+        AccountMeta::new(authority, false),
+        AccountMeta::new(vault, false),
+        AccountMeta::new(destination, false),
+        AccountMeta::new(payer.pubkey(), false),
+        AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+        AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
+        // Ed25519 signer slot, unused by a passkey.
+        AccountMeta::new_readonly(payer.pubkey(), false),
+    ];
+
+    // destination ‖ wallet ‖ num_tokens ‖ refund_dest — MigrateWallet's order.
+    let mut signed_payload = Vec::new();
+    signed_payload.extend_from_slice(destination.as_ref());
+    signed_payload.extend_from_slice(wallet.as_ref());
+    signed_payload.push(0);
+    signed_payload.extend_from_slice(payer.pubkey().as_ref());
+
+    let counter = 1u32;
+    let prefix = secp256r1_prefix(slot(&context), counter, 7);
+    let migrate = |auth_payload: &[u8]| {
+        let mut data = vec![17, 0];
+        data.extend_from_slice(auth_payload);
+        Instruction {
+            program_id,
+            accounts: accounts.clone(),
+            data,
+        }
+    };
+
+    // A client still on the pre-binding layout is refused, and nothing moves.
+    let mut h = sha2::Sha256::new();
+    h.update([17u8]);
+    h.update(&prefix);
+    h.update(&signed_payload);
+    h.update(payer.pubkey().as_ref());
+    h.update(counter.to_le_bytes());
+    h.update(program_id.as_ref());
+    let old_challenge: [u8; 32] = h.finalize().into();
+    let (precompile, auth_payload) =
+        passkey_assertion(&signing_key, rp_id, &prefix, &old_challenge);
+    assert_custom_error(
+        send(
+            &mut context,
+            &[precompile, migrate(&auth_payload)],
+            &[&payer],
+        ),
+        ERR_INVALID_MESSAGE_HASH,
+        "the pre-binding challenge must not verify on the sunset binary",
+    );
+    assert_eq!(lamports_of(&context, &vault), funds, "nothing moved");
+
+    let challenge = secp256r1_challenge(
+        17,
+        &prefix,
+        &signed_payload,
+        &payer.pubkey(),
+        &wallet,
+        counter,
+        &program_id,
+    );
+    let (precompile, auth_payload) = passkey_assertion(&signing_key, rp_id, &prefix, &challenge);
+    send(
+        &mut context,
+        &[precompile, migrate(&auth_payload)],
+        &[&payer],
+    )
+    .expect("passkey migrate on the sunset binary");
+
+    assert_eq!(
+        lamports_of(&context, &destination),
+        funds,
+        "every lamport arrives"
+    );
     assert_eq!(
         lamports_of(&context, &authority),
         0,
