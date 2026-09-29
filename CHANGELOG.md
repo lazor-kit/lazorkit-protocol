@@ -6,6 +6,46 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — a passkey's public key, recovered from two assertions
+
+**SDKs** (`@lazorkit/sdk-legacy` 1.3.0, `@lazorkit/sdk` 1.0.0-rc.4)
+
+A returning user who signs in with an existing passkey that has no wallet yet —
+every passkey, on a v2 program id that is new — could not get one unless the
+app already held that passkey's public key. A WebAuthn assertion carries none,
+and a key reported from somewhere else (a portal's local storage, which falls
+back to another passkey's key; a deep link) is not proven to be this
+passkey's. Creating the wallet with it anyway makes one the passkey can never
+sign for, so whatever is sent to its vault is stuck; checking it first, as the
+wallet adapter does, refused the connect. Reproduced on devnet with
+`@lazorkit/wallet` 3.0.2 and the live portal.
+
+- **`recoverPasskeyPublicKeys(proof, rpId)`**: every 33-byte compressed key an
+  `OwnershipProof` verifies against — the signer's among them, almost always
+  two in all (recovery ids 0..3; 2 and 3 only when r + n < p). Pure, never
+  throws; `[]` unless the proof passes exactly the checks of
+  `verifyOwnershipProof` (JSON clientData, `webauthn.get`, the challenge,
+  at least 16 bytes of it, the rpId hash, the user-present flag). DER or
+  64-byte r||s, high-S as authenticators return it half the time; every key
+  returned is re-verified against the proof.
+- **`resolvePasskeyPublicKey(proofs, rpId)`**: the one key common to every
+  proof, or `null` — with fewer than two proofs, any two over the same
+  challenge, one that fails a check, or proofs from different passkeys. Ask the
+  passkey for a second assertion over a fresh challenge, pinned to the first
+  one's credential, resolve, then `createWallet` with the key. It is the
+  passkey's own by construction: only its holder can sign challenges the app
+  just chose, under its `rpId`.
+- `verifyOwnershipProof` now shares its checks with the recovery (one helper
+  computes the signed digest or refuses); its behaviour is unchanged.
+- README, "Finding a returning user's wallet": what to do when the passkey has
+  no wallet and you do not hold its key.
+- Tests: unit (both packages, plus a parity check of the two implementations,
+  and a constructed signature with r + n < p that only recovery ids 2 and 3
+  reach), and on a local validator in both suites: a fresh passkey's key
+  recovered from two browser-shaped assertions (one high-S), a wallet created
+  with it, and a passkey `Execute` signed for it that lands — the key the
+  program verifies against is the recovered one.
+
 ### Fixed — the passkey challenge names the wallet
 
 **Program**
