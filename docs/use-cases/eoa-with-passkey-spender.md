@@ -301,12 +301,14 @@ instead of Spender:
 
 | Need | Required rank |
 |---|---|
-| Transfer SOL/tokens, swap on Jupiter (under 574 B), CPI to your program | Delegate |
+| Transfer SOL/tokens, CPI to your program, anything whose inner instructions fit in about 345 B¹ | Delegate |
 | Spend without a cap | Admin or Owner |
 | Create session keys for sub-second UX | Admin |
-| Use deferred execution (Jupiter swaps over 574 B, bridges, multi-step) | Admin |
+| Use deferred execution (larger payloads: most Jupiter swaps, bridges, multi-step) | Admin |
 | Add a second device's passkey as a backup | Admin (Delegate) or Owner (Owner) |
 | Take over as Owner if the EOA is lost | Owner — see Recovery |
+
+¹ A passkey Execute takes about 887 of a v0 transaction's 1232 bytes before any inner instruction (portal clientDataJSON, no ALT); a compute-unit limit costs about 40 more and Chrome's padded clientDataJSON 109. A single-hop SOL→USDC Jupiter route from the portal is 1245 bytes even with Jupiter's ALTs (and a compute-unit limit), so in practice a Jupiter swap needs deferred execution, and so Admin. Measured 2026-09-29 with sdk-legacy 1.2.0.
 
 Switching rank means passing `ROLE_ADMIN` instead of `ROLE_SPENDER` in step 2,
 and dropping the `policy` — Admin and Owner may carry one but are not required

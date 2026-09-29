@@ -246,12 +246,22 @@ Two consequences for the app:
   rent. In a sponsored/relayer model the app's payer covers this.
 - **Transaction size:** the setup step scales with the token count. One
   transaction with the setup and the migrate is the safe shape; for a vault
-  with many token accounts, use a v0 transaction with an address lookup table,
-  exclude the dust, or split `setupInstructions` across transactions and send
-  the migrate only once every one of them is confirmed successful. The migrate
-  itself is one instruction, but each token adds four accounts: past about ten
-  tokens on the Ed25519 path, or five on the passkey path, it needs the lookup
-  table on its own.
+  with more token accounts than fit, use a v0 transaction with an address
+  lookup table, exclude the dust, or split `setupInstructions` across
+  transactions and send the migrate only once every one of them is confirmed
+  successful. The migrate itself is one instruction, but each token adds four
+  accounts and about 100 bytes, so past the counts below it needs the lookup
+  table on its own. Measured 2026-09-29 with sdk-legacy 1.2.0: v0, no lookup
+  table, no ComputeBudget instruction; the passkey rows use the migrate app's
+  clientDataJSON, which carries `topOrigin`.
+
+  | Shape | Bytes | Tokens that fit in 1232 |
+  |---|---|---|
+  | Passkey, migrate only | 823 with none, 955 with one, +100 each | 3 (4 when clientDataJSON has no `topOrigin`, 2 when Chrome pads it) |
+  | Passkey, ATA setup + migrate, v2 wallet exists | 997 with one, +110 each | 3 |
+  | Passkey, new v2 wallet + ATA setup + migrate | 1182 with none, 1356 with one | 0: SOL only |
+  | Ed25519, migrate only | 470 with none, 602 with one, +100 each | 7 |
+  | Setup only: new v2 wallet + ATAs | 559 with none, 697 with one, +74 each | 8 |
 - **Prioritise the active, high-value wallets** — value is concentrated, so
   reaching a handful of users covers most of it. Dormant wallets migrate whenever
   their owner returns; their funds wait safely in v1 until then.
