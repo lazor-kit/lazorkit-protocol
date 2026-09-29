@@ -638,6 +638,7 @@ pub fn load_fixture_program(svm: &mut LiteSVM, crate_name: &str) -> Pubkey {
 
     for path in &candidates {
         if std::path::Path::new(path).exists() {
+            assert_sbpf_v0(std::path::Path::new(path));
             let program_id = Pubkey::new_unique();
             svm.add_program_from_file(program_id, path)
                 .unwrap_or_else(|e| panic!("Failed to load fixture {path}: {e:?}"));
@@ -760,7 +761,36 @@ fn sbf_artifact() -> std::path::PathBuf {
         );
     }
 
+    assert_sbpf_v0(&artifact);
     artifact
+}
+
+/// Refuse an artifact built for an SBPF version litesvm 0.6 cannot load.
+///
+/// `cargo-build-sbf` 4.4.0 (on crates.io since 2026-09-22, and what the Agave
+/// `stable` installer puts on CI) changed its default `--arch` from v0 to v3.
+/// litesvm 0.6's loader rejects a v3 ELF, and `add_program` unwraps that error,
+/// so every test died inside litesvm (`lib.rs:700`, `InvalidAccountData`) with
+/// nothing pointing at the build. The deployed binaries are SBPFv0
+/// (docs/mainnet-deploy-checklist.md §2), so that is what the suites load:
+/// build with `--arch v0`, as `scripts/build-repro-fixtures.sh` does.
+fn assert_sbpf_v0(path: &std::path::Path) {
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    // ELF64: e_flags is the u32 at 0x30. SBPF records its version there.
+    let e_flags = bytes
+        .get(0x30..0x34)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .unwrap_or_else(|| panic!("{} is not an ELF file", path.display()));
+    assert_eq!(
+        e_flags,
+        0,
+        "{} is not an SBPF v0 binary (ELF e_flags {e_flags:#x}; a v3 build has 0x3). \
+         litesvm 0.6 loads only v0, which is what this program deploys as.\n\
+         rebuild with: cargo build-sbf --features devnet --arch v0 \
+         (or ./scripts/build-repro-fixtures.sh)",
+        path.display()
+    );
 }
 
 /// Initialise the protocol as `PROTOCOL_INIT_AUTHORITY`.

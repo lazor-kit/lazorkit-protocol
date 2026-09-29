@@ -11,9 +11,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TOOLS="${SBF_TOOLS_VERSION:-v1.53}"
+# v0 explicitly: cargo-build-sbf 4.4.0 defaults to v3, which litesvm 0.6 cannot
+# load (see scripts/build-repro-fixtures.sh).
 
 build() {
-  ( cd program && cargo build-sbf --features "$1" --tools-version "$TOOLS" >/dev/null )
+  ( cd program && cargo build-sbf --features "$1" --tools-version "$TOOLS" --arch v0 >/dev/null )
   # build-sbf may write to a shared target dir; the harness reads target/deploy.
   local shared=".git/shared-target/deploy/lazorkit_program.so"
   if [ -f "$shared" ] && [ "$shared" -nt target/deploy/lazorkit_program.so ]; then

@@ -89,7 +89,8 @@ jobs:
           key: sbf-tests-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       # Builds both the program and the malicious-cpi wrapper that
-      # repro_h1_cpi_bypass loads as a second .so.
+      # repro_h1_cpi_bypass loads as a second .so, both as SBPF v0 (the
+      # script passes --arch v0; see its header).
       - name: Build SBF artifacts
         run: ./scripts/build-repro-fixtures.sh
 
@@ -99,9 +100,11 @@ jobs:
       # The sunset binary is a different build — the program id is compiled in
       # and it refuses all but three instructions — so its suite needs its own
       # artifact. Built last: nothing after this step reads the devnet one.
+      # `--arch v0` as in build-repro-fixtures.sh: the stable installer brings
+      # cargo-build-sbf 4.4.0, whose v3 default litesvm 0.6 cannot load.
       - name: Build sunset artifact (rehearsal-v1)
         working-directory: program
-        run: cargo build-sbf --features rehearsal-v1
+        run: cargo build-sbf --features rehearsal-v1 --arch v0
 
       - name: cargo test (sunset binary)
         run: cargo test --features rehearsal-v1 -p lazorkit-program --test sunset_tests
