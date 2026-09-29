@@ -11,6 +11,11 @@
 #
 # Requires the Solana toolchain (`cargo build-sbf`). Install with:
 #   sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+#
+# `--arch v0` is explicit because cargo-build-sbf 4.4.0 changed the default to
+# v3, and litesvm 0.6 cannot load a v3 binary: every test that loads the
+# program then panics inside litesvm (lib.rs:700, InvalidAccountData). v0 is
+# also what the program deploys as (docs/mainnet-deploy-checklist.md §2).
 
 set -euo pipefail
 
@@ -23,10 +28,10 @@ if ! command -v cargo-build-sbf >/dev/null 2>&1; then
 fi
 
 echo "==> building lazorkit-program (devnet)"
-( cd "$repo_root" && cargo build-sbf --features devnet )
+( cd "$repo_root" && cargo build-sbf --features devnet --arch v0 )
 
 echo "==> building malicious-cpi fixture"
-( cd "$repo_root/test-fixtures/malicious-cpi" && cargo build-sbf )
+( cd "$repo_root/test-fixtures/malicious-cpi" && cargo build-sbf --arch v0 )
 
 echo
 echo "artifacts:"
