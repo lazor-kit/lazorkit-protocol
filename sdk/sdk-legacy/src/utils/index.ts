@@ -46,6 +46,8 @@ export * from './transactions';
 export {
   createOwnershipChallenge,
   verifyOwnershipProof,
+  recoverPasskeyPublicKeys,
+  resolvePasskeyPublicKey,
   pickOwnWallet,
   selectWalletByAddress,
   type PasskeyWalletCandidate,

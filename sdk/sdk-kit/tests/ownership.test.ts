@@ -39,12 +39,18 @@ import {
   findVaultPda,
   getAssociatedTokenAddress,
   pickOwnWallet,
+  recoverPasskeyPublicKeys,
+  resolvePasskeyPublicKey,
   selectWalletByAddress,
   verifyOwnershipProof,
   type OwnershipProof,
   type PasskeyWalletCandidate,
   type WalletFacts,
 } from '../src/index.js';
+import {
+  recoverPasskeyPublicKeys as legacyRecoverPasskeyPublicKeys,
+  resolvePasskeyPublicKey as legacyResolvePasskeyPublicKey,
+} from '../../sdk-legacy/src/utils/index';
 import { ACCOUNT_DISCRIMINATOR } from '../src/constants.js';
 
 const RP_ID = 'portal.lazor.sh';
@@ -113,6 +119,54 @@ function makeProof(
     authenticatorData,
     clientDataJson,
   };
+}
+
+/** What the assertion's signature covers: sha256(authenticatorData || sha256(clientDataJSON)). */
+function digestOf(proof: OwnershipProof): Uint8Array {
+  return sha256(new Uint8Array([...proof.authenticatorData, ...sha256(proof.clientDataJson)]));
+}
+
+/**
+ * A signature whose R has x >= n, so r = x - n and only recovery ids 2 and 3
+ * reach its key, and the key it verifies against. Built without a private key:
+ * pick R, s; then Q = r^-1 (sR - hG) makes (r, s) verify for Q.
+ */
+function largeRSignature(): { proof: OwnershipProof; publicKey: Uint8Array; r: bigint; s: bigint } {
+  const n = CURVE_N;
+  let R: ReturnType<typeof p256.Point.fromBytes> | null = null;
+  let t = 1n;
+  for (; R === null; t++) {
+    const x = n + t;
+    const bytes = new Uint8Array(33);
+    bytes[0] = 0x02;
+    bytes.set(Buffer.from(x.toString(16).padStart(64, '0'), 'hex'), 1);
+    try {
+      R = p256.Point.fromBytes(bytes);
+    } catch {
+      // no point with this x
+    }
+  }
+  const r = R.x - n;
+  expect(r + n < p256.CURVE.p).toBe(true);
+  const unsigned = makeProof(newPasskey().secretKey);
+  const digest = digestOf(unsigned);
+  const h = BigInt('0x' + Buffer.from(digest).toString('hex')) % n;
+  const s = (BigInt('0x' + Buffer.from(createOwnershipChallenge()).toString('hex')) % (n - 1n)) + 1n;
+  const rInv = modPow(r, n - 2n, n);
+  const Q = R.multiply(s).subtract(p256.Point.BASE.multiply(h)).multiply(rInv);
+  const signature = new p256.Signature(r, s).toCompactRawBytes();
+  return { proof: { ...unsigned, signature }, publicKey: Q.toBytes(true), r, s };
+}
+
+function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
+  let result = 1n;
+  base %= mod;
+  while (exp > 0n) {
+    if (exp & 1n) result = (result * base) % mod;
+    base = (base * base) % mod;
+    exp >>= 1n;
+  }
+  return result;
 }
 
 // ─── Account fixtures ────────────────────────────────────────────────
@@ -499,6 +553,196 @@ describe('verifyOwnershipProof', () => {
     const badKey = [{ id: 'bad', publicKey: new Uint8Array(33).fill(7) }];
     expect(verifyOwnershipProof(badKey, makeProof(mine.secretKey), RP_ID)).toEqual([]);
     expect(verifyOwnershipProof(candidates, {} as OwnershipProof, RP_ID)).toEqual([]);
+  });
+});
+
+describe('recoverPasskeyPublicKeys', () => {
+  const hex = (b: Uint8Array) => Buffer.from(b).toString('hex');
+  const shapes = [
+    { format: 'der', highS: false },
+    { format: 'der', highS: true },
+    { format: 'compact', highS: false },
+    { format: 'compact', highS: true },
+  ] as const;
+
+  it('finds the signer among at most four keys, from DER or r||s, low-S or high-S', () => {
+    for (let i = 0; i < 8; i++) {
+      const passkey = newPasskey();
+      for (const shape of shapes) {
+        const proof = makeProof(passkey.secretKey, shape);
+        const parsed = p256.Signature.fromBytes(proof.signature, shape.format);
+        expect(parsed.hasHighS()).toBe(shape.highS);
+        const keys = recoverPasskeyPublicKeys(proof, RP_ID);
+        expect(keys.length).toBeGreaterThanOrEqual(1);
+        expect(keys.length).toBeLessThanOrEqual(4);
+        expect(keys.map(hex)).toContain(hex(passkey.publicKey));
+        expect(new Set(keys.map(hex)).size).toBe(keys.length);
+        for (const key of keys) {
+          expect(key).toHaveLength(33);
+          // Each is a key the proof verifies against, as verifyOwnershipProof sees it.
+          expect(verifyOwnershipProof([{ publicKey: key }], proof, RP_ID)).toHaveLength(1);
+        }
+      }
+    }
+  });
+
+  it('almost always leaves two keys, and one assertion cannot say which is the signer', () => {
+    const passkey = newPasskey();
+    const keys = recoverPasskeyPublicKeys(makeProof(passkey.secretKey), RP_ID);
+    expect(keys).toHaveLength(2);
+    const [a, b] = keys.map((k) => p256.Point.fromBytes(k));
+    // Both verify; neither is marked as the signer.
+    expect(a!.equals(b!)).toBe(false);
+  });
+
+  it('gives the same keys whichever S the authenticator chose', () => {
+    const passkey = newPasskey();
+    const challenge = createOwnershipChallenge();
+    const low = recoverPasskeyPublicKeys(makeProof(passkey.secretKey, { challenge }), RP_ID);
+    const high = recoverPasskeyPublicKeys(makeProof(passkey.secretKey, { challenge, highS: true }), RP_ID);
+    expect(high.map(hex).sort()).toEqual(low.map(hex).sort());
+  });
+
+  it('rejects what verifyOwnershipProof rejects', () => {
+    const { secretKey } = newPasskey();
+    // An assertion over another challenge than the one presented.
+    expect(recoverPasskeyPublicKeys(makeProof(secretKey, { signedChallenge: createOwnershipChallenge() }), RP_ID)).toEqual([]);
+    // Another relying party, either way round.
+    expect(recoverPasskeyPublicKeys(makeProof(secretKey, { rpId: 'evil.example' }), RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys(makeProof(secretKey), 'evil.example')).toEqual([]);
+    // A registration, not an assertion.
+    expect(recoverPasskeyPublicKeys(makeProof(secretKey, { type: 'webauthn.create' }), RP_ID)).toEqual([]);
+    // No user-present flag.
+    expect(recoverPasskeyPublicKeys(makeProof(secretKey, { flags: 0x04 }), RP_ID)).toEqual([]);
+    // A challenge shorter than 16 bytes; 16 is enough.
+    expect(recoverPasskeyPublicKeys(makeProof(secretKey, { challenge: new Uint8Array(15).fill(9) }), RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys(makeProof(secretKey, { challenge: new Uint8Array(16).fill(9) }), RP_ID).length).toBeGreaterThan(0);
+  });
+
+  it('returns [] rather than throwing on garbage', () => {
+    const { secretKey } = newPasskey();
+    const good = makeProof(secretKey);
+    expect(recoverPasskeyPublicKeys({ ...good, clientDataJson: utf8.encode('{not json') }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({ ...good, clientDataJson: utf8.encode('null') }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({ ...good, authenticatorData: new Uint8Array(36) }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({ ...good, signature: new Uint8Array([1, 2, 3]) }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({ ...good, signature: new Uint8Array(64) }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({} as OwnershipProof, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys(null as unknown as OwnershipProof, RP_ID)).toEqual([]);
+  });
+
+  it('uses recovery ids 2 and 3 when r + n < p', () => {
+    // Nobody can sign with an r that small (the chance is about 2^-128), but a
+    // signature and a key it verifies against can be built from a point
+    // R with x >= n, without any private key: Q = r^-1 (sR - hG).
+    const { proof, publicKey, r, s } = largeRSignature();
+    expect(p256.verify(proof.signature, digestOf(proof), publicKey, { lowS: false, prehash: false })).toBe(true);
+    const keys = recoverPasskeyPublicKeys(proof, RP_ID);
+    expect(keys.map(hex)).toContain(hex(publicKey));
+    // Recovery ids 0 and 1 do not reach it: only r + n does.
+    const low = [0, 1].flatMap((id) => {
+      try {
+        return [hex(new p256.Signature(r, s).addRecoveryBit(id).recoverPublicKey(digestOf(proof)).toBytes(true))];
+      } catch {
+        return [];
+      }
+    });
+    expect(low).not.toContain(hex(publicKey));
+    expect(legacyRecoverPasskeyPublicKeys(proof, RP_ID).map(hex)).toEqual(keys.map(hex));
+  });
+
+  it('matches sdk-legacy key for key', () => {
+    for (const shape of shapes) {
+      const proof = makeProof(newPasskey().secretKey, shape);
+      expect(legacyRecoverPasskeyPublicKeys(proof, RP_ID).map(hex)).toEqual(
+        recoverPasskeyPublicKeys(proof, RP_ID).map(hex),
+      );
+    }
+    const bad = makeProof(newPasskey().secretKey, { flags: 0x04 });
+    expect(legacyRecoverPasskeyPublicKeys(bad, RP_ID)).toEqual([]);
+  });
+});
+
+describe('resolvePasskeyPublicKey', () => {
+  const hex = (b: Uint8Array | null) => (b ? Buffer.from(b).toString('hex') : null);
+
+  it('two assertions over different challenges pin exactly the signer', () => {
+    for (let i = 0; i < 16; i++) {
+      const passkey = newPasskey();
+      const proofs = [
+        makeProof(passkey.secretKey, { format: i % 2 ? 'der' : 'compact', highS: i % 4 < 2 }),
+        makeProof(passkey.secretKey, { format: i % 3 ? 'der' : 'compact', highS: i % 3 === 0 }),
+      ];
+      const key = resolvePasskeyPublicKey(proofs, RP_ID);
+      expect(hex(key)).toBe(hex(passkey.publicKey));
+      // The key verifyOwnershipProof then accepts for both.
+      for (const proof of proofs) {
+        expect(verifyOwnershipProof([{ publicKey: key! }], proof, RP_ID)).toHaveLength(1);
+      }
+      expect(hex(legacyResolvePasskeyPublicKey(proofs, RP_ID))).toBe(hex(key));
+    }
+  });
+
+  it('takes more than two, all from the one passkey', () => {
+    const passkey = newPasskey();
+    const proofs = [0, 1, 2].map(() => makeProof(passkey.secretKey));
+    expect(hex(resolvePasskeyPublicKey(proofs, RP_ID))).toBe(hex(passkey.publicKey));
+  });
+
+  it('needs two: one assertion, or none, gives null', () => {
+    const passkey = newPasskey();
+    expect(resolvePasskeyPublicKey([makeProof(passkey.secretKey)], RP_ID)).toBeNull();
+    expect(resolvePasskeyPublicKey([], RP_ID)).toBeNull();
+  });
+
+  it('the same challenge twice gives null, even with two different signatures over it', () => {
+    const passkey = newPasskey();
+    const first = makeProof(passkey.secretKey);
+    // Another nonce, so another r: by the keys alone these two would pin the
+    // signer. The rule is what refuses them.
+    const second = {
+      ...first,
+      signature: p256.sign(digestOf(first), passkey.secretKey, { prehash: false, extraEntropy: true }).toDERRawBytes(),
+    };
+    expect(Buffer.from(second.signature).equals(Buffer.from(first.signature))).toBe(false);
+    const secondKeys = recoverPasskeyPublicKeys(second, RP_ID).map(hex);
+    expect(recoverPasskeyPublicKeys(first, RP_ID).map(hex).filter((k) => secondKeys.includes(k))).toEqual([
+      hex(passkey.publicKey),
+    ]);
+    const twice = [first, second];
+    expect(resolvePasskeyPublicKey(twice, RP_ID)).toBeNull();
+    // A third, fresh one does not make up for the repeat.
+    expect(resolvePasskeyPublicKey([...twice, makeProof(passkey.secretKey)], RP_ID)).toBeNull();
+    expect(legacyResolvePasskeyPublicKey(twice, RP_ID)).toBeNull();
+  });
+
+  it('assertions from two different passkeys give null', () => {
+    const a = newPasskey();
+    const b = newPasskey();
+    const proofs = [makeProof(a.secretKey), makeProof(b.secretKey)];
+    expect(resolvePasskeyPublicKey(proofs, RP_ID)).toBeNull();
+    expect(legacyResolvePasskeyPublicKey(proofs, RP_ID)).toBeNull();
+  });
+
+  it('one assertion that fails the checks gives null', () => {
+    const passkey = newPasskey();
+    const good = makeProof(passkey.secretKey);
+    for (const bad of [
+      makeProof(passkey.secretKey, { rpId: 'evil.example' }),
+      makeProof(passkey.secretKey, { type: 'webauthn.create' }),
+      makeProof(passkey.secretKey, { flags: 0x04 }),
+      makeProof(passkey.secretKey, { signedChallenge: createOwnershipChallenge() }),
+    ]) {
+      expect(resolvePasskeyPublicKey([good, bad], RP_ID)).toBeNull();
+    }
+    expect(resolvePasskeyPublicKey([good, makeProof(passkey.secretKey)], 'evil.example')).toBeNull();
+  });
+
+  it('returns null rather than throwing on garbage', () => {
+    const good = makeProof(newPasskey().secretKey);
+    expect(resolvePasskeyPublicKey([good, {} as OwnershipProof], RP_ID)).toBeNull();
+    expect(resolvePasskeyPublicKey(null as unknown as OwnershipProof[], RP_ID)).toBeNull();
+    expect(resolvePasskeyPublicKey([null, null] as unknown as OwnershipProof[], RP_ID)).toBeNull();
   });
 });
 
