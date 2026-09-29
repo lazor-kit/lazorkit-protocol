@@ -11,6 +11,12 @@
  * challenge named the wallet may be a signature replayed from another wallet).
  * Against the validator: that replay is now refused.
  *
+ * A passkey with no wallet, whose key the app does not hold (registered on
+ * another device), gets it back from two assertions over fresh challenges:
+ * each leaves a few candidate keys, and only the signer's is common to both.
+ * Against the validator: a wallet created with that key is one the passkey
+ * can sign for.
+ *
  * The first half runs without a validator (pure functions and a stubbed
  * Connection); the second half runs against the one at RPC_URL.
  */
@@ -42,6 +48,8 @@ import {
   Actions,
   createOwnershipChallenge,
   verifyOwnershipProof,
+  recoverPasskeyPublicKeys,
+  resolvePasskeyPublicKey,
   pickOwnWallet,
   selectWalletByAddress,
   findVaultPda,
@@ -96,6 +104,8 @@ function assertion(
     type?: string;
     flags?: number;
     encoding?: 'der' | 'compact';
+    /** Force s into the high or low half of n. Unset, it is whichever the signer drew, as from an authenticator. */
+    s?: 'high' | 'low';
     clientDataJson?: Uint8Array;
   } = {},
 ): OwnershipProof {
@@ -115,11 +125,46 @@ function assertion(
       ),
     );
   const signed = Buffer.concat([authenticatorData, sha256(clientDataJson)]);
-  const signature = crypto.sign('sha256', signed, {
-    key: passkey.privateKey,
-    dsaEncoding: opts.encoding === 'compact' ? 'ieee-p1363' : 'der',
-  });
-  return { challenge, signature: new Uint8Array(signature), authenticatorData, clientDataJson };
+  let signature: Uint8Array = new Uint8Array(
+    crypto.sign('sha256', signed, {
+      key: passkey.privateKey,
+      dsaEncoding: opts.encoding === 'compact' || opts.s ? 'ieee-p1363' : 'der',
+    }),
+  );
+  if (opts.s) {
+    const rs = withS(signature, opts.s);
+    signature = opts.encoding === 'compact' ? rs : derOf(rs);
+  }
+  return { challenge, signature, authenticatorData, clientDataJson };
+}
+
+const P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+const bigOf = (bytes: Uint8Array) => BigInt('0x' + Buffer.from(bytes).toString('hex'));
+
+/** Whether a 64-byte r||s signature's s is in the high half of n. */
+const isHighS = (rs: Uint8Array) => bigOf(rs.subarray(32)) > P256_N / 2n;
+
+/** The same signature, with s moved to the `half` asked for (s and n - s both verify). */
+function withS(rs: Uint8Array, half: 'high' | 'low'): Uint8Array {
+  const s = bigOf(rs.subarray(32));
+  const flipped = isHighS(rs) === (half === 'high') ? s : P256_N - s;
+  const out = new Uint8Array(64);
+  out.set(rs.subarray(0, 32), 0);
+  out.set(Buffer.from(flipped.toString(16).padStart(64, '0'), 'hex'), 32);
+  return out;
+}
+
+/** A 64-byte r||s signature, DER-encoded as a browser returns it. */
+function derOf(rs: Uint8Array): Uint8Array {
+  const integer = (bytes: Uint8Array) => {
+    let i = 0;
+    while (i < bytes.length - 1 && bytes[i] === 0) i++;
+    let v = Buffer.from(bytes.subarray(i));
+    if (v[0] & 0x80) v = Buffer.concat([Buffer.of(0), v]);
+    return Buffer.concat([Buffer.of(0x02, v.length), v]);
+  };
+  const body = Buffer.concat([integer(rs.subarray(0, 32)), integer(rs.subarray(32))]);
+  return new Uint8Array(Buffer.concat([Buffer.of(0x30, body.length), body]));
 }
 
 // ─── verifyOwnershipProof ────────────────────────────────────────────────
@@ -196,6 +241,155 @@ describe('verifyOwnershipProof', () => {
     expect(verifyOwnershipProof([{ publicKey: new Uint8Array(33) }], good, RP_ID)).toEqual([]);
     expect(verifyOwnershipProof(candidates, { ...good, authenticatorData: new Uint8Array(36) }, RP_ID)).toEqual([]);
     expect(verifyOwnershipProof(candidates, {} as OwnershipProof, RP_ID)).toEqual([]);
+  });
+});
+
+// ─── recoverPasskeyPublicKeys / resolvePasskeyPublicKey ──────────────────
+
+const hexOf = (bytes: Uint8Array | null) => (bytes ? Buffer.from(bytes).toString('hex') : null);
+
+const SHAPES = [
+  { encoding: 'der', s: 'low' },
+  { encoding: 'der', s: 'high' },
+  { encoding: 'compact', s: 'low' },
+  { encoding: 'compact', s: 'high' },
+] as const;
+
+describe('recoverPasskeyPublicKeys', () => {
+  it('finds the signer among at most four keys: DER or r||s, high-S (as authenticators return half the time) or low-S', () => {
+    for (let i = 0; i < 6; i++) {
+      const passkey = newPasskey();
+      for (const shape of SHAPES) {
+        const proof = assertion(passkey, createOwnershipChallenge(), shape);
+        if (shape.encoding === 'compact') {
+          expect(proof.signature.length).toBe(64);
+          expect(isHighS(proof.signature)).toBe(shape.s === 'high');
+        } else {
+          expect(proof.signature[0]).toBe(0x30);
+        }
+        const keys = recoverPasskeyPublicKeys(proof, RP_ID);
+        expect(keys.length).toBeGreaterThanOrEqual(2); // r and -r's points; more only when r + n < p
+        expect(keys.length).toBeLessThanOrEqual(4);
+        expect(keys.map(hexOf)).toContain(hexOf(passkey.publicKey));
+        expect(new Set(keys.map(hexOf)).size).toBe(keys.length);
+        for (const key of keys) {
+          expect(key.length).toBe(33);
+          // Every one is a key the proof verifies against, as verifyOwnershipProof sees it.
+          expect(verifyOwnershipProof([{ publicKey: key }], proof, RP_ID)).toHaveLength(1);
+        }
+      }
+    }
+  });
+
+  it("gives the same keys for a signature and its high-S twin: the authenticator's choice of s changes nothing", () => {
+    const passkey = newPasskey();
+    const low = assertion(passkey, createOwnershipChallenge(), { encoding: 'compact', s: 'low' });
+    const high = { ...low, signature: withS(low.signature, 'high') };
+    expect(isHighS(high.signature)).toBe(true);
+    const lowKeys = recoverPasskeyPublicKeys(low, RP_ID).map(hexOf).sort();
+    expect(recoverPasskeyPublicKeys(high, RP_ID).map(hexOf).sort()).toEqual(lowKeys);
+    expect(recoverPasskeyPublicKeys({ ...high, signature: derOf(high.signature) }, RP_ID).map(hexOf).sort()).toEqual(lowKeys);
+  });
+
+  it('rejects what verifyOwnershipProof rejects', () => {
+    const passkey = newPasskey();
+    // A replayed assertion, presented against the challenge the caller chose now.
+    const replayed = assertion(passkey, createOwnershipChallenge());
+    expect(recoverPasskeyPublicKeys({ ...replayed, challenge: createOwnershipChallenge() }, RP_ID)).toEqual([]);
+    // Another relying party, either way round.
+    const elsewhere = assertion(passkey, createOwnershipChallenge(), { rpId: 'evil.example' });
+    expect(recoverPasskeyPublicKeys(elsewhere, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys(elsewhere, 'evil.example').map(hexOf)).toContain(hexOf(passkey.publicKey));
+    // A registration, not an assertion.
+    expect(recoverPasskeyPublicKeys(assertion(passkey, createOwnershipChallenge(), { type: 'webauthn.create' }), RP_ID)).toEqual([]);
+    // No user-present flag.
+    expect(recoverPasskeyPublicKeys(assertion(passkey, createOwnershipChallenge(), { flags: 0x04 }), RP_ID)).toEqual([]);
+    // A challenge shorter than 16 bytes; 16 is enough.
+    expect(recoverPasskeyPublicKeys(assertion(passkey, crypto.randomBytes(15)), RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys(assertion(passkey, crypto.randomBytes(16)), RP_ID).length).toBeGreaterThan(0);
+  });
+
+  it('returns [] rather than throwing on garbage', () => {
+    const passkey = newPasskey();
+    const good = assertion(passkey, createOwnershipChallenge());
+    expect(recoverPasskeyPublicKeys({ ...good, clientDataJson: new Uint8Array(Buffer.from('{"type":')) }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({ ...good, clientDataJson: new Uint8Array(Buffer.from('null')) }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({ ...good, authenticatorData: new Uint8Array(36) }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({ ...good, signature: new Uint8Array(3) }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({ ...good, signature: new Uint8Array(64) }, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys({} as OwnershipProof, RP_ID)).toEqual([]);
+    expect(recoverPasskeyPublicKeys(null as unknown as OwnershipProof, RP_ID)).toEqual([]);
+  });
+});
+
+describe('resolvePasskeyPublicKey', () => {
+  it('two assertions over different challenges pin exactly the signer', () => {
+    for (let i = 0; i < 12; i++) {
+      const passkey = newPasskey();
+      const proofs = [
+        assertion(passkey, createOwnershipChallenge(), SHAPES[i % 4]),
+        assertion(passkey, createOwnershipChallenge(), SHAPES[(i + 1 + (i >> 2)) % 4]),
+      ];
+      const key = resolvePasskeyPublicKey(proofs, RP_ID);
+      expect(hexOf(key)).toBe(hexOf(passkey.publicKey));
+      // The key verifyOwnershipProof then accepts for both.
+      for (const proof of proofs) {
+        expect(verifyOwnershipProof([{ publicKey: key! }], proof, RP_ID)).toHaveLength(1);
+      }
+    }
+  });
+
+  it('takes more than two, all from the one passkey', () => {
+    const passkey = newPasskey();
+    const proofs = [0, 1, 2].map(() => assertion(passkey, createOwnershipChallenge()));
+    expect(hexOf(resolvePasskeyPublicKey(proofs, RP_ID))).toBe(hexOf(passkey.publicKey));
+  });
+
+  it('needs two: one assertion, or none, gives null', () => {
+    const passkey = newPasskey();
+    expect(resolvePasskeyPublicKey([assertion(passkey, createOwnershipChallenge())], RP_ID)).toBeNull();
+    expect(resolvePasskeyPublicKey([], RP_ID)).toBeNull();
+  });
+
+  it('the same challenge twice gives null, even though two signatures over it would pin the key', () => {
+    const passkey = newPasskey();
+    const challenge = createOwnershipChallenge();
+    const twice = [assertion(passkey, challenge), assertion(passkey, challenge)];
+    // Two nonces, two r: by the keys alone they agree on the signer. The rule refuses them.
+    expect(Buffer.from(twice[0].signature).equals(Buffer.from(twice[1].signature))).toBe(false);
+    const second = recoverPasskeyPublicKeys(twice[1], RP_ID).map(hexOf);
+    expect(recoverPasskeyPublicKeys(twice[0], RP_ID).map(hexOf).filter((k) => second.includes(k))).toEqual([
+      hexOf(passkey.publicKey),
+    ]);
+    expect(resolvePasskeyPublicKey(twice, RP_ID)).toBeNull();
+    // A third, fresh one does not make up for the repeat.
+    expect(resolvePasskeyPublicKey([...twice, assertion(passkey, createOwnershipChallenge())], RP_ID)).toBeNull();
+  });
+
+  it('assertions from two different passkeys give null', () => {
+    const proofs = [assertion(newPasskey(), createOwnershipChallenge()), assertion(newPasskey(), createOwnershipChallenge())];
+    expect(resolvePasskeyPublicKey(proofs, RP_ID)).toBeNull();
+  });
+
+  it('one assertion that fails the checks gives null', () => {
+    const passkey = newPasskey();
+    const good = assertion(passkey, createOwnershipChallenge());
+    for (const bad of [
+      assertion(passkey, createOwnershipChallenge(), { rpId: 'evil.example' }),
+      assertion(passkey, createOwnershipChallenge(), { type: 'webauthn.create' }),
+      assertion(passkey, createOwnershipChallenge(), { flags: 0x04 }),
+      { ...assertion(passkey, createOwnershipChallenge()), challenge: createOwnershipChallenge() },
+    ]) {
+      expect(resolvePasskeyPublicKey([good, bad], RP_ID)).toBeNull();
+    }
+    expect(resolvePasskeyPublicKey([good, assertion(passkey, createOwnershipChallenge())], 'evil.example')).toBeNull();
+  });
+
+  it('returns null rather than throwing on garbage', () => {
+    const good = assertion(newPasskey(), createOwnershipChallenge());
+    expect(resolvePasskeyPublicKey([good, {} as OwnershipProof], RP_ID)).toBeNull();
+    expect(resolvePasskeyPublicKey(null as unknown as OwnershipProof[], RP_ID)).toBeNull();
+    expect(resolvePasskeyPublicKey([null, null] as unknown as OwnershipProof[], RP_ID)).toBeNull();
   });
 });
 
@@ -1735,6 +1929,53 @@ describe('passkey wallet ownership (validator)', () => {
     const key = await generateMockSecp256r1Key(RP_ID);
     const own = await client.findOwnPasskeyWallet({ credentialIdHash: key.credentialIdHash, rpId: RP_ID, proof: await proofFrom(key) });
     expect(own).toEqual({ adopt: null, needsConfirmation: [], unproven: 0 });
+  });
+
+  it('a passkey with no wallet, whose key the app does not hold: two assertions recover it, and the passkey signs for the wallet made with it', async () => {
+    // Registered elsewhere: the app has only what navigator.credentials.get
+    // returns — DER, with whichever s the authenticator drew; here one of each.
+    const key = await generateMockSecp256r1Key(RP_ID);
+    const authenticator = { privateKey: crypto.createPrivateKey(key.privateKey.toPEM()), publicKey: new Uint8Array(0) }; // key unknown to the app
+    const signIn = assertion(authenticator, createOwnershipChallenge(), { s: 'high' });
+    expect(await client.findOwnPasskeyWallet({ credentialIdHash: key.credentialIdHash, rpId: RP_ID, proof: signIn })).toEqual({
+      adopt: null,
+      needsConfirmation: [],
+      unproven: 0,
+    });
+
+    // The sign-in assertion leaves candidates; a second, over its own challenge, pins the key.
+    expect(recoverPasskeyPublicKeys(signIn, RP_ID).length).toBeGreaterThanOrEqual(2);
+    const again = assertion(authenticator, createOwnershipChallenge(), { s: 'low' });
+    const publicKey = resolvePasskeyPublicKey([signIn, again], RP_ID);
+    expect(hexOf(publicKey)).toBe(hexOf(key.publicKeyBytes));
+
+    const created = await client.createWallet({
+      payer: ctx.payer.publicKey,
+      userSeed: crypto.randomBytes(32),
+      owner: { type: 'secp256r1', credentialIdHash: key.credentialIdHash, compressedPubkey: publicKey!, rpId: RP_ID },
+    });
+    await sendTx(ctx, created.instructions);
+    await sendTx(ctx, [
+      SystemProgram.transfer({ fromPubkey: ctx.payer.publicKey, toPubkey: created.vaultPda, lamports: 2_000_000 }),
+    ]);
+
+    // A passkey Execute, its precompile naming the recovered key: the program
+    // verifies the passkey's signature against what the authority stores.
+    const before = await ctx.connection.getBalance(sink);
+    const { instructions } = await client.execute({
+      payer: ctx.payer.publicKey,
+      walletPda: created.walletPda,
+      signer: secp256r1({ ...createMockRawSigner(key), publicKeyBytes: publicKey! }),
+      instructions: [SystemProgram.transfer({ fromPubkey: created.vaultPda, toPubkey: sink, lamports: 1 })],
+    });
+    await sendTx(ctx, instructions);
+    expect(await ctx.connection.getBalance(sink)).toBe(before + 1);
+
+    // From now on the sign-in lookup adopts it.
+    const own = await client.findOwnPasskeyWallet({ credentialIdHash: key.credentialIdHash, rpId: RP_ID, proof: await proofFrom(key) });
+    expect(own.adopt?.walletPda.equals(created.walletPda)).toBe(true);
+    expect(own.adopt?.signatureCount).toBe(1);
+    expect(hexOf(own.adopt!.publicKey)).toBe(hexOf(publicKey));
   });
 
   // A wallet someone else controlled first, then handed to the victim's

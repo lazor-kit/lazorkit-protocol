@@ -267,29 +267,96 @@ export function verifyOwnershipProof<T extends { publicKey: Uint8Array }>(
   rpId: string,
 ): T[] {
   try {
-    const { challenge, signature, authenticatorData, clientDataJson } = proof;
-    if (challenge.length < 16) return [];
-
-    let clientData: unknown;
-    try {
-      clientData = JSON.parse(Buffer.from(clientDataJson).toString('utf8'));
-    } catch {
-      return [];
-    }
-    if (typeof clientData !== 'object' || clientData === null) return [];
-    const { type, challenge: signedChallenge } = clientData as Record<string, unknown>;
-    if (type !== 'webauthn.get') return [];
-    if (signedChallenge !== base64UrlNoPad(challenge)) return [];
-
-    if (authenticatorData.length < 37) return [];
-    if (!bytesEqual(authenticatorData.subarray(0, 32), rpIdHashOf(rpId))) return [];
-    if ((authenticatorData[32] & 0x01) === 0) return []; // user present
-
-    // WebAuthn signs authenticatorData || sha256(clientDataJSON), hashed once.
-    const message = sha256(concatBytes([authenticatorData, sha256(clientDataJson)]));
-    return candidates.filter((c) => p256Verifies(signature, message, c.publicKey));
+    const digest = assertionDigest(proof, rpId);
+    if (!digest) return [];
+    return candidates.filter((c) => p256Verifies(proof.signature, digest, c.publicKey));
   } catch {
     return [];
+  }
+}
+
+/**
+ * Pure. Every public key this proof verifies against — its signer's among
+ * them — as 33-byte compressed keys, each once.
+ *
+ * A WebAuthn assertion carries no public key, but an ECDSA signature names
+ * its signer up to a few candidates: the recovery ids 0..3 each give at most
+ * one (2 and 3 only in the rare case r + n < p), so almost always two. One
+ * assertion does not say which; {@link resolvePasskeyPublicKey} pins it with a
+ * second. The proof is checked exactly as {@link verifyOwnershipProof} checks
+ * it — a `webauthn.get` over exactly `proof.challenge` (>= 16 bytes), made
+ * under `rpId` with the user present — and every key returned passes
+ * `verifyOwnershipProof` for it. Returns `[]` when any check fails; never
+ * throws. The signature may be DER or 64-byte r||s, high-S or low-S, as
+ * `verifyOwnershipProof` accepts it.
+ */
+export function recoverPasskeyPublicKeys(proof: OwnershipProof, rpId: string): Uint8Array[] {
+  try {
+    const digest = assertionDigest(proof, rpId);
+    if (!digest) return [];
+    const keys: Uint8Array[] = [];
+    for (const format of SIGNATURE_FORMATS) {
+      let signature: ReturnType<typeof p256.Signature.fromBytes>;
+      try {
+        signature = p256.Signature.fromBytes(proof.signature, format);
+      } catch {
+        continue; // not this encoding
+      }
+      for (let recovery = 0; recovery < 4; recovery++) {
+        let key: Uint8Array;
+        try {
+          key = signature.addRecoveryBit(recovery).recoverPublicKey(digest).toBytes(true);
+        } catch {
+          continue; // no point for this id: r + n is not below p, or no curve point has that x
+        }
+        if (key.length !== 33) continue;
+        if (!p256Verifies(proof.signature, digest, key)) continue;
+        if (!keys.some((k) => bytesEqual(k, key))) keys.push(key);
+      }
+    }
+    return keys;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pure. The one public key that produced every proof, or `null`.
+ *
+ * For a passkey whose key you do not hold — one registered on another device,
+ * or by another app under the same `rpId` — when it has no wallet yet: collect
+ * two assertions from it, each over its own fresh challenge
+ * ({@link createOwnershipChallenge}), and pass them here; then create the
+ * wallet with the key this returns. Each proof leaves a few candidates
+ * ({@link recoverPasskeyPublicKeys}); only the signer's is common to both.
+ *
+ * `null` unless there are at least two proofs, no two over the same challenge,
+ * each passes the checks of {@link verifyOwnershipProof} under `rpId`, and
+ * exactly one key is common to all of them — so assertions from two different
+ * passkeys give `null`. Never throws.
+ *
+ * The key is the one that signed these assertions, and nothing more: the
+ * credential it belongs to is whichever produced them. Take both from
+ * `navigator.credentials.get` calls you made, the second with
+ * `allowCredentials` set to the first one's `rawId`, check the two `rawId`s
+ * match, and hash that `rawId` for the wallet's `credentialIdHash`.
+ */
+export function resolvePasskeyPublicKey(proofs: OwnershipProof[], rpId: string): Uint8Array | null {
+  try {
+    if (!Array.isArray(proofs) || proofs.length < 2) return null;
+    for (let i = 0; i < proofs.length; i++) {
+      for (let j = i + 1; j < proofs.length; j++) {
+        if (bytesEqual(proofs[i].challenge, proofs[j].challenge)) return null;
+      }
+    }
+    let common = recoverPasskeyPublicKeys(proofs[0], rpId);
+    for (const proof of proofs.slice(1)) {
+      const keys = recoverPasskeyPublicKeys(proof, rpId);
+      common = common.filter((c) => keys.some((k) => bytesEqual(k, c)));
+    }
+    return common.length === 1 ? common[0] : null;
+  } catch {
+    return null;
   }
 }
 
@@ -950,10 +1017,41 @@ function unreadableGrant(tokenAccount: PublicKey, tokenProgram: PublicKey): Toke
   return { tokenAccount, tokenProgram, mint: null, kind: 'unreadable', grantee: null, trusted: false };
 }
 
+/**
+ * What a valid assertion's signature covers, or `null` when the proof fails a
+ * check: a `webauthn.get` over exactly `proof.challenge` (>= 16 bytes), made
+ * under `rpId` with the user present. May throw on a malformed proof; callers
+ * catch.
+ */
+function assertionDigest(proof: OwnershipProof, rpId: string): Uint8Array | null {
+  const { challenge, authenticatorData, clientDataJson } = proof;
+  if (challenge.length < 16) return null;
+
+  let clientData: unknown;
+  try {
+    clientData = JSON.parse(Buffer.from(clientDataJson).toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof clientData !== 'object' || clientData === null) return null;
+  const { type, challenge: signedChallenge } = clientData as Record<string, unknown>;
+  if (type !== 'webauthn.get') return null;
+  if (signedChallenge !== base64UrlNoPad(challenge)) return null;
+
+  if (authenticatorData.length < 37) return null;
+  if (!bytesEqual(authenticatorData.subarray(0, 32), rpIdHashOf(rpId))) return null;
+  if ((authenticatorData[32] & 0x01) === 0) return null; // user present
+
+  // WebAuthn signs authenticatorData || sha256(clientDataJSON), hashed once.
+  return sha256(concatBytes([authenticatorData, sha256(clientDataJson)]));
+}
+
+/** Browsers return DER; the SDK's own signers hand over 64-byte r||s. */
+const SIGNATURE_FORMATS = ['der', 'compact'] as const;
+
 function p256Verifies(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): boolean {
-  // Browsers return DER; the SDK's own signers hand over 64-byte r||s. A
-  // 64-byte DER signature exists too, so try both rather than guess by length.
-  for (const format of ['der', 'compact'] as const) {
+  // A 64-byte DER signature exists too, so try both rather than guess by length.
+  for (const format of SIGNATURE_FORMATS) {
     try {
       if (p256.verify(signature, message, publicKey, { lowS: false, prehash: false, format })) {
         return true;

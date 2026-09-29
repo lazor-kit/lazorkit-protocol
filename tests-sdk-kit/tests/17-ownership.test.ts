@@ -23,6 +23,10 @@
  *     planted wallet, and the one wallet signed for is adopted
  *   - why a migration creates a destination wallet whose address holds only
  *     lamports: CreateWallet builds over them, for whoever runs it first
+ *   - a passkey with no wallet whose key the app does not hold: its key comes
+ *     back from two assertions (recoverPasskeyPublicKeys /
+ *     resolvePasskeyPublicKey), and the passkey signs for the wallet made
+ *     with it
  *
  * The pure rules and the RPC contract are unit-tested in
  * sdk/sdk-kit/tests/ownership.test.ts.
@@ -49,6 +53,8 @@ import {
   createOwnershipChallenge,
   ed25519,
   getAssociatedTokenAddress,
+  recoverPasskeyPublicKeys,
+  resolvePasskeyPublicKey,
   secp256r1,
   selectWalletByAddress,
   verifyOwnershipProof,
@@ -158,6 +164,50 @@ function tokenSetAuthorityIx(
     ],
     data,
   };
+}
+
+const P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+const hexOf = (bytes: Uint8Array | null) => (bytes ? Buffer.from(bytes).toString('hex') : null);
+
+/**
+ * What navigator.credentials.get returns over `challenge`, as an
+ * OwnershipProof: a DER signature with s in the `half` asked for — an
+ * authenticator returns either.
+ */
+function browserAssertion(key: MockSecp256r1Key, challenge: Uint8Array, half: 'high' | 'low'): OwnershipProof {
+  const authenticatorData = new Uint8Array(37);
+  authenticatorData.set(crypto.createHash('sha256').update(key.rpId).digest(), 0);
+  authenticatorData[32] = 0x05; // UP | UV
+  const clientDataJson = new Uint8Array(
+    Buffer.from(
+      JSON.stringify({
+        type: 'webauthn.get',
+        challenge: Buffer.from(challenge).toString('base64url'),
+        origin: `https://${key.rpId}`,
+        crossOrigin: false,
+      }),
+    ),
+  );
+  const signed = Buffer.concat([
+    authenticatorData,
+    crypto.createHash('sha256').update(clientDataJson).digest(),
+  ]);
+  const rs = crypto.sign('sha256', signed, { key: key.privateKey.toPEM(), dsaEncoding: 'ieee-p1363' });
+  let s = BigInt('0x' + rs.subarray(32).toString('hex'));
+  if (s > P256_N / 2n !== (half === 'high')) s = P256_N - s;
+  const integer = (bytes: Buffer) => {
+    let i = 0;
+    while (i < bytes.length - 1 && bytes[i] === 0) i++;
+    let v = bytes.subarray(i);
+    if (v[0]! & 0x80) v = Buffer.concat([Buffer.of(0), v]);
+    return Buffer.concat([Buffer.of(0x02, v.length), v]);
+  };
+  const body = Buffer.concat([
+    integer(rs.subarray(0, 32)),
+    integer(Buffer.from(s.toString(16).padStart(64, '0'), 'hex')),
+  ]);
+  const signature = new Uint8Array(Buffer.concat([Buffer.of(0x30, body.length), body]));
+  return { challenge, signature, authenticatorData, clientDataJson };
 }
 
 describe('passkey wallet ownership (validator)', () => {
@@ -1057,5 +1107,51 @@ describe('passkey wallet ownership (validator)', () => {
       proof: await proofFrom(key),
     });
     expect(own).toEqual({ adopt: null, needsConfirmation: [], unproven: 0 });
+  });
+
+  it('a passkey with no wallet, whose key the app does not hold: two assertions recover it, and the passkey signs for the wallet made with it', async () => {
+    // Registered elsewhere: the app has only what navigator.credentials.get
+    // returns — DER, with whichever s the authenticator drew; here one of each.
+    const key = await generateMockSecp256r1Key(RP_ID);
+    const signIn = browserAssertion(key, createOwnershipChallenge(), 'high');
+    expect(
+      await client.findOwnPasskeyWallet({ credentialIdHash: key.credentialIdHash, rpId: RP_ID, proof: signIn }),
+    ).toEqual({ adopt: null, needsConfirmation: [], unproven: 0 });
+
+    // The sign-in assertion leaves candidates; a second, over its own challenge, pins the key.
+    expect(recoverPasskeyPublicKeys(signIn, RP_ID).length).toBeGreaterThanOrEqual(2);
+    const again = browserAssertion(key, createOwnershipChallenge(), 'low');
+    const publicKey = resolvePasskeyPublicKey([signIn, again], RP_ID);
+    expect(hexOf(publicKey)).toBe(hexOf(key.publicKeyBytes));
+
+    const created = await client.createWallet({
+      payer: ctx.payer.address,
+      userSeed: crypto.randomBytes(32),
+      owner: { type: 'secp256r1', credentialIdHash: key.credentialIdHash, compressedPubkey: publicKey!, rpId: RP_ID },
+    });
+    await sendTx(ctx, created.instructions);
+    await airdrop(ctx, created.vaultPda, 2_000_000n);
+
+    // A passkey Execute, its precompile naming the recovered key: the program
+    // verifies the passkey's signature against what the authority stores.
+    const before = await getBalance(ctx, sink);
+    const { instructions } = await client.execute({
+      payer: ctx.payer.address,
+      walletPda: created.walletPda,
+      signer: secp256r1({ ...createMockSigner(key), publicKeyBytes: publicKey! }),
+      instructions: [systemTransferFromPda(created.vaultPda, sink, 1n)],
+    });
+    await sendTx(ctx, instructions);
+    expect(await getBalance(ctx, sink)).toBe(before + 1n);
+
+    // From now on the sign-in lookup adopts it.
+    const own = await client.findOwnPasskeyWallet({
+      credentialIdHash: key.credentialIdHash,
+      rpId: RP_ID,
+      proof: await proofFrom(key),
+    });
+    expect(own.adopt?.walletPda).toBe(created.walletPda);
+    expect(own.adopt?.signatureCount).toBe(1);
+    expect(hexOf(own.adopt!.publicKey)).toBe(hexOf(publicKey));
   });
 });
