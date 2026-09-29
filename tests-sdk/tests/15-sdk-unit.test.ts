@@ -30,6 +30,7 @@ import {
   type WalletAuthorityRecord,
 } from '../../sdk/sdk-legacy/src';
 import { createExecuteIx } from '../../sdk/sdk-legacy/src/utils/instructions';
+import { contextual } from './contextReads';
 
 const DEVNET_PROGRAM_ID = PROGRAM_ID_DEVNET;
 
@@ -197,11 +198,11 @@ describe('buildSecp256r1Challenge — wallet binding', () => {
   // same passkey revoking the same session address at the same counter,
   // slot and payer on two wallets signed identical bytes.
   it('prepare* names the wallet the authority belongs to', async () => {
-    const connection = {
+    const connection = contextual({
       // readAuthorityCounter: counter 0 at offset 8, so the next is 1.
       getAccountInfo: async () =>
         ({ data: Buffer.alloc(12), owner: DEVNET_PROGRAM_ID, executable: false, lamports: 0, rentEpoch: 0 }) as AccountInfo<Buffer>,
-    };
+    });
     const client = makeClient(connection);
     const payer = Keypair.generate().publicKey;
     const sessionPda = Keypair.generate().publicKey;
@@ -249,12 +250,12 @@ describe('buildSecp256r1Challenge — wallet binding', () => {
 // ExecuteDeferred with DeferredHashMismatch (3015).
 describe('prepareExecute / prepareAuthorize — the accounts hash uses runtime flags', () => {
   const SLOT = 12_345n;
-  const connection = {
+  const connection = contextual({
     // readAuthorityCounter reads counter 0 at offset 8; too short to be a
     // ProtocolConfig, so no fee is resolved.
     getAccountInfo: async () =>
       ({ data: Buffer.alloc(12), owner: DEVNET_PROGRAM_ID, executable: false, lamports: 0, rentEpoch: 0 }) as AccountInfo<Buffer>,
-  };
+  });
   const credentialIdHash = new Uint8Array(32).fill(0xc1);
 
   /** `key(32) ‖ flags(1)` per account, in the program's walk order. */
@@ -562,7 +563,7 @@ describe('resolveSecp256r1 — override short-circuit', () => {
     publicKeyBytes[0] = 0x02; // valid compressed prefix
 
     let accountInfoCalls = 0;
-    const fakeConnection = {
+    const fakeConnection = contextual({
       getSlot: () => {
         throw new Error('should not call getSlot');
       },
@@ -589,7 +590,7 @@ describe('resolveSecp256r1 — override short-circuit', () => {
         } as AccountInfo<Buffer>;
       },
       getProgramAccounts: async () => [],
-    } as unknown as Connection;
+    });
 
     const client = new LazorKitClient(fakeConnection, DEVNET_PROGRAM_ID);
     const [authorityPda] = client.findAuthority(walletPda, credentialIdHash);

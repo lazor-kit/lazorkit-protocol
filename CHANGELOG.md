@@ -53,6 +53,82 @@ wallet adapter does, refused the connect. Reproduced on devnet with
   passkey `Execute` signed for it that lands — the key the program verifies
   against is the recovered one.
 
+### Fixed — a passkey challenge built right after a send signed a spent counter (3006)
+
+**SDKs** (`@lazorkit/sdk-legacy` 1.3.0, `@lazorkit/sdk` 1.0.0-rc.4)
+
+Two passkey transactions from one authority, back to back, failed the second
+with `SignatureReused` (3006): three pairs out of three on devnet, and on a
+local validator too. The challenge signs the authority's counter + 1, and it
+was read with no freshness floor and, in sdk-legacy, at the Connection's
+default commitment (`finalized` for a Connection built without one). The
+wallet and the playground relayer hand back tx1's signature as soon as the RPC
+accepts it, so tx2's counter was read from a bank older than the slot tx1
+landed in, and tx2 signed the counter tx1 was about to use. The signature
+commits to the counter, so nothing can repair it after the user approves; it
+fails in the relayer's simulation, or on chain after the sponsor paid the fee.
+
+- Every read a passkey challenge is built from — the authority's counter, its
+  key and the slot — now takes `{ commitment, minContextSlot }`, default
+  `commitment: 'confirmed'` whatever the Connection's own. Pass the slot the
+  authority's previous transaction landed in (`getSignatureStatuses` → `slot`,
+  once confirmed) as `minContextSlot`, and the reads come from a node that has
+  executed it. Where: `Secp256r1Params` (every `prepare*`: `prepareExecute`,
+  `prepareAuthorize`, `prepareAddAuthority`, `prepareRemoveAuthority`,
+  `prepareTransferOwnership`, `prepareCreateSession`, `prepareRevokeSession`),
+  `Secp256r1SignerConfig` and the `secp256r1(signer, opts)` helper (every
+  one-shot method: `execute`, `transferSol` in sdk-legacy, `authorize`,
+  `addAuthority`, `removeAuthority`, `transferOwnership`, `createSession`,
+  `revokeSession`), `migrateV1Wallet` (the v1 authority's counter and the slot
+  of a passkey migration), and `readCounter` / `readAuthorityCounter` /
+  `readAuthorityPubkey`. `minContextSlot` is a `number` in sdk-legacy, a
+  `Slot` (`bigint`) in the kit SDK.
+- A node behind the floor answers -32016 ("minimum context slot has not been
+  reached"); the read is retried with a short backoff (100 ms, rising to 1 s)
+  for up to 10 s, then fails with the new `MinContextSlotNotReachedError`
+  (`minContextSlot`, `waitedMs`, the RPC error as `cause`) rather than read
+  older state. Other errors are not retried.
+- sdk-legacy reads the authority with `getAccountInfoAndContext`, because
+  web3.js `getAccountInfo` rethrows RPC errors without their code. A stubbed
+  Connection must provide it.
+- Behaviour change without the new options: sdk-legacy's challenge reads are
+  at `confirmed`, not the Connection's commitment (the kit SDK asks for
+  `confirmed` explicitly now, which `createSolanaRpc` already defaulted to). A
+  counter read after a *confirmed* send is then current; a send that is only
+  accepted still needs the floor: the wallet has to wait for tx1 to confirm
+  and pass its slot, or have its paymaster confirm before answering.
+- The program is unchanged: 3006 is the replay protection working, and
+  predicting counter + 2 would be wrong whenever tx1 fails or is dropped.
+- Tests: unit tests in both packages (tests-sdk `18-counter-read-unit` and the
+  migration case in `16-v1-migration-unit`; sdk-kit `counter-read`) that each
+  method passes the options to all three reads, the default, -32016 retried
+  then answered, retries exhausted, and that nothing else is retried. On a
+  local validator in both suites (`19-back-to-back`, kit `18-back-to-back`):
+  tx1 sent without waiting, then confirmed, and tx2 prepared at its landing
+  slot signs the next counter and lands; a floor a few slots ahead is waited
+  for (the node's real -32016 is recognised); one it never reaches ends in
+  `MinContextSlotNotReachedError`.
+
+### Fixed — size and capacity figures in the docs, and the litesvm CI job
+
+**Docs** — the room a passkey Execute leaves for inner instructions is about
+345 bytes (887 of the 1232 are its own; about 305 with a compute-unit limit,
+under 200 when Chrome pads clientDataJSON), not ~574; a passkey MigrateWallet
+without a lookup table fits 3 tokens (823 + ~100 bytes each; 4 with no
+`topOrigin` in clientDataJSON) and an Ed25519 one 7, not "about five" and
+"about ten". Measured with sdk-legacy 1.2.0 and cross-checked against devnet
+transactions; fixed in `docs/Architecture.md`, `docs/migration-ui-flow.md`
+(now a table), `docs/use-cases/eoa-with-passkey-spender.md`, the benchmark's
+capacity row and the `DeferredExecAccount` doc comment. The release artifacts
+rebuild to the same hashes (devnet `3584aec7…`, mainnet `4cb80304…`).
+
+**CI** — "program litesvm integration" failed since cargo-build-sbf 4.4.0
+(2026-09-22) made SBPF v3 its default: litesvm 0.6 cannot load a v3 binary and
+panicked in `add_program` (`lib.rs:700`, `InvalidAccountData`) in every test
+that loads the program. The fixture script, `scripts/test-program.sh` and the
+workflow's sunset build now pass `--arch v0` — what the program deploys as —
+and the test harness refuses a non-v0 artifact with a message saying so.
+
 ### Fixed — the passkey challenge names the wallet
 
 **Program**

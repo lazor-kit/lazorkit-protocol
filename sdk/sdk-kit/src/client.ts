@@ -30,8 +30,10 @@ import {
   type GetProgramAccountsApi,
   type GetSlotApi,
   type GetTokenAccountsByOwnerApi,
+  type Commitment,
   type Instruction,
   type Rpc,
+  type Slot,
 } from '@solana/kit';
 import { ACCOUNT_DISCRIMINATOR } from './constants.js';
 import bs58 from 'bs58';
@@ -133,7 +135,9 @@ import {
 import {
   readAuthorityCounter,
   readAuthorityPubkey,
+  type ChallengeReadOptions,
 } from './secp256r1/secp256r1.js';
+import { readChallengeSlot } from './secp256r1/challengeReads.js';
 import {
   buildCompactLayout,
   computeAccountsHash,
@@ -895,8 +899,14 @@ export class LazorKit {
 
   // ─── Account readers ─────────────────────────────────────────────
 
-  async readCounter(authorityPda: Address): Promise<number> {
-    return readAuthorityCounter(this.rpc, authorityPda);
+  /**
+   * The authority's odometer counter: the next passkey challenge signs one
+   * more. Read at `opts.commitment` (default `'confirmed'`) and, with
+   * `opts.minContextSlot`, from a node at or past that slot — see
+   * `Secp256r1Params.minContextSlot`.
+   */
+  async readCounter(authorityPda: Address, opts?: ChallengeReadOptions): Promise<number> {
+    return readAuthorityCounter(this.rpc, authorityPda, opts);
   }
 
   // ─── Secp256r1 prepare/finalize plumbing ─────────────────────────
@@ -907,17 +917,18 @@ export class LazorKit {
     const authorityPda =
       p.authorityPda ?? (await this.findAuthority(walletPda, p.credentialIdHash))[0];
 
+    // All three at one commitment and freshness floor: a node that has not yet
+    // executed the authority's previous transaction hands back the counter it
+    // consumed, and the signature fails with SignatureReused (3006).
+    const reads: ChallengeReadOptions = { commitment: p.commitment, minContextSlot: p.minContextSlot };
     const [publicKeyBytes, slot, counter] = await Promise.all([
       p.publicKeyBytes
         ? Promise.resolve(p.publicKeyBytes)
-        : readAuthorityPubkey(this.rpc, authorityPda),
+        : readAuthorityPubkey(this.rpc, authorityPda, reads),
       p.slotOverride != null
         ? Promise.resolve(p.slotOverride)
-        : this.rpc
-            .getSlot()
-            .send()
-            .then((s) => BigInt(s)),
-      this.readCounter(authorityPda).then((c) => c + 1),
+        : readChallengeSlot(this.rpc, reads),
+      this.readCounter(authorityPda, reads).then((c) => c + 1),
     ]);
 
     return { authorityPda, publicKeyBytes, slot, counter };
@@ -929,6 +940,8 @@ export class LazorKit {
       publicKeyBytes: s.signer.publicKeyBytes,
       authorityPda: s.authorityPda,
       slotOverride: s.slotOverride,
+      minContextSlot: s.minContextSlot,
+      commitment: s.commitment,
     };
   }
 
@@ -2977,6 +2990,17 @@ export class LazorKit {
      */
     refundDestination?: Address;
     /**
+     * Passkey owner only: read the v1 authority's counter and the challenge
+     * slot from a node at or past this slot. See
+     * `Secp256r1Params.minContextSlot`.
+     */
+    minContextSlot?: Slot;
+    /**
+     * Passkey owner only: commitment for those two reads (default
+     * `'confirmed'`). The migration's other reads are unaffected.
+     */
+    commitment?: Commitment;
+    /**
      * SPL Token mints whose canonical account in an existing destination vault
      * is checked for a changed owner, on top of wSOL, USDC, USDT and devnet
      * USDC; see vetMigrationDestination. The mints this migration moves are
@@ -3286,12 +3310,13 @@ export class LazorKit {
     // authority account, which `findV1WalletsByOwner` already read) rather than
     // from the WebAuthn response, which has none.
     const owner = params.owner as { compressedPubkey: Uint8Array };
+    const reads: ChallengeReadOptions = {
+      commitment: params.commitment,
+      minContextSlot: params.minContextSlot,
+    };
     const [counter, slot] = await Promise.all([
-      this.readCounter(v1.authority).then((c) => c + 1),
-      this.rpc
-        .getSlot()
-        .send()
-        .then((value) => BigInt(value)),
+      this.readCounter(v1.authority, reads).then((c) => c + 1),
+      readChallengeSlot(this.rpc, reads),
     ]);
     const prepared = this.buildPasskeySigning({
       discriminator: DISC_MIGRATE_WALLET,

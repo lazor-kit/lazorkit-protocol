@@ -6,7 +6,7 @@ import { address, getBase64Decoder, getBase64Encoder } from '@solana/kit';
  * Address brand (a base58 string) instead of v1 PublicKey; the rest
  * of the public surface is unchanged.
  */
-import type { AccountMeta, Address } from '@solana/kit';
+import type { AccountMeta, Address, Commitment, Slot } from '@solana/kit';
 import type { Secp256r1Signer, WebAuthnResponse } from './secp256r1/index.js';
 
 // ─── CreateWallet owner types ────────────────────────────────────────
@@ -52,6 +52,10 @@ export interface Secp256r1SignerConfig {
   authorityPda?: Address;
   /** Override slot (auto-fetched if omitted). */
   slotOverride?: bigint;
+  /** See {@link Secp256r1Params.minContextSlot}. */
+  minContextSlot?: Slot;
+  /** See {@link Secp256r1Params.commitment}. */
+  commitment?: Commitment;
 }
 
 /** Session key signer (for execute-as-session). */
@@ -81,7 +85,12 @@ export function ed25519(
 
 export function secp256r1(
   signer: Secp256r1Signer,
-  opts?: { authorityPda?: Address; slotOverride?: bigint },
+  opts?: {
+    authorityPda?: Address;
+    slotOverride?: bigint;
+    minContextSlot?: Slot;
+    commitment?: Commitment;
+  },
 ): Secp256r1SignerConfig {
   return { type: 'secp256r1', signer, ...opts };
 }
@@ -104,6 +113,22 @@ export interface Secp256r1Params {
   authorityPda?: Address;
   /** Override slot (skip the network slot read). */
   slotOverride?: bigint;
+  /**
+   * Read the authority's counter, its key and the slot from a node that has
+   * processed at least this slot. Pass the slot the authority's previous
+   * transaction landed in (`getSignatureStatuses(...).value[0].slot`, once it
+   * is confirmed) when this challenge follows it: a read made before a node has
+   * executed that transaction returns the counter it is about to use, and the
+   * signature fails on chain with SignatureReused (3006). The signature commits
+   * to the counter, so this cannot be repaired after the user has signed.
+   *
+   * While the node answers that it has not reached the slot (-32016), the reads
+   * are retried with a short backoff for up to 10 s, then the prepare call
+   * throws `MinContextSlotNotReachedError`.
+   */
+  minContextSlot?: Slot;
+  /** Commitment for those reads. Default `'confirmed'`. */
+  commitment?: Commitment;
 }
 
 // ─── Deferred execution payload ──────────────────────────────────────

@@ -4,9 +4,11 @@
  * The ownership and migration reads ask each RPC call for the slot it was
  * answered at (`getProgramAccounts` with `withContext`,
  * `getMultipleAccountsInfoAndContext`, `getTokenAccountsByOwner`) and pass it
- * on as the next call's `minContextSlot`. `contextual` lets a test state plain
- * answers — arrays of accounts, `{ value }` — and serves them as one node at
- * one slot would. Wrapping twice changes nothing.
+ * on as the next call's `minContextSlot`, and the passkey challenge reads the
+ * authority with `getAccountInfoAndContext` (whose errors keep their RPC
+ * code). `contextual` lets a test state plain answers — arrays of accounts,
+ * `{ value }`, `getAccountInfo` — and serves them as one node at one slot
+ * would. Wrapping twice changes nothing.
  */
 import type { Connection, PublicKey } from '@solana/web3.js';
 
@@ -30,6 +32,11 @@ export function contextual(methods: object, log?: AccountsRead[], slot = STUB_CO
     log?.push({ keys, minContextSlot: config?.minContextSlot });
     return { context: { slot }, value: await (conn.getMultipleAccountsInfo as Method)(keys) };
   };
+  // Late-bound too, for the same reason.
+  conn.getAccountInfoAndContext = async (key: PublicKey, config?: unknown) => ({
+    context: { slot },
+    value: await (conn.getAccountInfo as Method)(key, config),
+  });
   if (m.getProgramAccounts) {
     conn.getProgramAccounts = async (programId: PublicKey, config?: { withContext?: boolean }) => {
       const result = await m.getProgramAccounts(programId, config);

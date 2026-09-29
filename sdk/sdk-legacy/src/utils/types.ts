@@ -1,5 +1,5 @@
 import { Buffer } from 'buffer';
-import { PublicKey } from '@solana/web3.js';
+import { type Commitment, PublicKey } from '@solana/web3.js';
 import type { Secp256r1Signer } from './secp256r1';
 
 // ─── CreateWallet owner types ────────────────────────────────────────
@@ -43,6 +43,10 @@ export interface Secp256r1SignerConfig {
   authorityPda?: PublicKey;
   /** Override slot (auto-fetched from connection if omitted) */
   slotOverride?: bigint;
+  /** See {@link Secp256r1Params.minContextSlot}. */
+  minContextSlot?: number;
+  /** See {@link Secp256r1Params.commitment}. */
+  commitment?: Commitment;
 }
 
 /** Session key signer */
@@ -185,6 +189,26 @@ export interface Secp256r1Params {
   authorityPda?: PublicKey;
   /** Override slot (auto-fetched from connection if omitted) */
   slotOverride?: bigint;
+  /**
+   * Read the authority's counter, its key and the slot from a node that has
+   * processed at least this slot. Pass the slot the authority's previous
+   * transaction landed in (`getSignatureStatuses(...).value[0].slot`, once it
+   * is confirmed) when this challenge follows it: a read made before a node has
+   * executed that transaction returns the counter it is about to use, and the
+   * signature fails on chain with SignatureReused (3006). The signature commits
+   * to the counter, so this cannot be repaired after the user has signed.
+   *
+   * While the node answers that it has not reached the slot (-32016), the reads
+   * are retried with a short backoff for up to 10 s, then the prepare call
+   * throws `MinContextSlotNotReachedError`.
+   */
+  minContextSlot?: number;
+  /**
+   * Commitment for those reads. Default `'confirmed'`, whatever the
+   * Connection's own default: a Connection built without one reads at
+   * `finalized`, seconds behind the transaction it just sent.
+   */
+  commitment?: Commitment;
 }
 
 /** Raw WebAuthn authenticator response — what the browser gives back */
@@ -198,7 +222,12 @@ export function ed25519(publicKey: PublicKey, authorityPda?: PublicKey): Ed25519
 
 export function secp256r1(
   signer: Secp256r1Signer,
-  opts?: { authorityPda?: PublicKey; slotOverride?: bigint },
+  opts?: {
+    authorityPda?: PublicKey;
+    slotOverride?: bigint;
+    minContextSlot?: number;
+    commitment?: Commitment;
+  },
 ): Secp256r1SignerConfig {
   return { type: 'secp256r1', signer, ...opts };
 }

@@ -920,6 +920,51 @@ describe('migrateV1Wallet by address', () => {
     expect(Buffer.from(plan.migrate.challenge).equals(Buffer.from(challengeFor(plan.destinationWallet)))).toBe(false);
   });
 
+  it("reads a passkey migration's counter and slot at the commitment and floor it is given", async () => {
+    // The counter the challenge signs, and the slot it carries, come from a
+    // node at or past `minContextSlot` (3006 otherwise, if the v1 authority
+    // signed something just before). The owner check reads the authority too,
+    // with no config: only the counter read is held to the floor.
+    const counterReads: unknown[] = [];
+    const slotReads: unknown[] = [];
+    const connection = contextual({
+      ...stubConnection(),
+      getAccountInfo: async (key: PublicKey, config?: unknown) => {
+        if (!key.equals(v1Authority)) return null;
+        if (config !== undefined) counterReads.push(config);
+        return { data: v1AuthorityData(v1Wallet, 0, 1), lamports: 1 };
+      },
+      getSlot: async (config?: unknown) => {
+        slotReads.push(config);
+        return 1_000;
+      },
+    });
+    const owner = {
+      type: 'secp256r1' as const,
+      credentialIdHash: CREDENTIAL,
+      compressedPubkey: new Uint8Array(33).fill(0x7c),
+      rpId: 'portal.lazor.sh',
+    };
+    const client = new LazorKitClient(connection, PROGRAM_ID);
+
+    await client.migrateV1Wallet({
+      payer: Keypair.generate().publicKey,
+      owner,
+      v1Wallet,
+      minContextSlot: 4_242,
+      commitment: 'processed',
+    });
+    expect(counterReads).toEqual([{ commitment: 'processed', minContextSlot: 4_242 }]);
+    expect(slotReads).toContainEqual({ commitment: 'processed', minContextSlot: 4_242 });
+
+    // Without options: 'confirmed', whatever the Connection's default, and no floor.
+    counterReads.length = 0;
+    slotReads.length = 0;
+    await client.migrateV1Wallet({ payer: Keypair.generate().publicKey, owner, v1Wallet });
+    expect(counterReads).toEqual([{ commitment: 'confirmed' }]);
+    expect(slotReads).toContainEqual({ commitment: 'confirmed' });
+  });
+
   it('refuses to run from a client built at the retired v1 id', async () => {
     await expect(
       new LazorKitClient(stubConnection(), V1_PROGRAM_ID).migrateV1Wallet({
