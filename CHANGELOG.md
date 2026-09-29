@@ -32,19 +32,26 @@ wallet adapter does, refused the connect. Reproduced on devnet with
   proof, or `null` — with fewer than two proofs, any two over the same
   challenge, one that fails a check, or proofs from different passkeys. Ask the
   passkey for a second assertion over a fresh challenge, pinned to the first
-  one's credential, resolve, then `createWallet` with the key. It is the
-  passkey's own by construction: only its holder can sign challenges the app
-  just chose, under its `rpId`.
+  one's credential, resolve, then `createWallet` with the key. It is the key
+  of whoever produced the assertions. That is the passkey's only when both come
+  straight from `navigator.credentials.get` in the app's own page, where the
+  browser sets the rpId hash, flags and clientData: in a relayed proof those
+  bytes are the signer's choice (signed, but under the key being recovered), so
+  any P-256 key can make assertions that pass every check. Recovering from
+  assertions relayed by a portal or over a deep link fixes an honest portal's
+  wrong key (the fallback above), not a channel someone else controls.
 - `verifyOwnershipProof` now shares its checks with the recovery (one helper
   computes the signed digest or refuses); its behaviour is unchanged.
 - README, "Finding a returning user's wallet": what to do when the passkey has
   no wallet and you do not hold its key.
-- Tests: unit (both packages, plus a parity check of the two implementations,
-  and a constructed signature with r + n < p that only recovery ids 2 and 3
-  reach), and on a local validator in both suites: a fresh passkey's key
-  recovered from two browser-shaped assertions (one high-S), a wallet created
-  with it, and a passkey `Execute` signed for it that lands — the key the
-  program verifies against is the recovered one.
+- Tests: unit (both packages, including a repeated challenge anywhere among
+  the proofs and a 64-byte string that reads as both DER and r||s; in the kit
+  also a parity check of the two implementations and a constructed signature
+  with r + n < p that only recovery ids 2 and 3 reach), and on a local
+  validator in both suites: a fresh passkey's key recovered from two
+  browser-shaped assertions (one high-S), a wallet created with it, and a
+  passkey `Execute` signed for it that lands — the key the program verifies
+  against is the recovered one.
 
 ### Fixed — the passkey challenge names the wallet
 
