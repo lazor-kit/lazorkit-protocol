@@ -651,6 +651,37 @@ describe('recoverPasskeyPublicKeys', () => {
     expect(legacyRecoverPasskeyPublicKeys(proof, RP_ID).map(hex)).toEqual(keys.map(hex));
   });
 
+  it('a 64-byte string that reads as both DER and r||s gives the keys of both readings', () => {
+    // No authenticator returns one, but verifyOwnershipProof accepts a key
+    // under either reading, so recovery must return the keys of both — up to
+    // four from one string, where a real signature gives two.
+    const base = makeProof(newPasskey().secretKey);
+    for (let i = 0; ; i++) {
+      expect(i).toBeLessThan(64); // each reading has keys about half the time
+      const seed = sha256(utf8.encode(`two readings ${i}`));
+      const r = sha256(seed).subarray(0, 29);
+      const s = sha256(sha256(seed)).subarray(0, 29);
+      r[0] = s[0] = 0x11; // positive, no leading zero: valid DER integers
+      const signature = new Uint8Array([0x30, 0x3e, 0x02, 0x1d, ...r, 0x02, 0x1d, ...s]);
+      expect(signature).toHaveLength(64);
+      // Each reading alone, re-encoded so that it is the only one.
+      const derOnly = p256.Signature.fromBytes(signature, 'der').toCompactRawBytes(); // starts 00: not DER
+      const compactOnly = p256.Signature.fromBytes(signature, 'compact').toDERRawBytes(); // not 64 bytes
+      const derKeys = recoverPasskeyPublicKeys({ ...base, signature: derOnly }, RP_ID);
+      const compactKeys = recoverPasskeyPublicKeys({ ...base, signature: compactOnly }, RP_ID);
+      if (derKeys.length === 0 || compactKeys.length === 0) continue; // no curve point at one of the r
+      const proof = { ...base, signature };
+      const keys = recoverPasskeyPublicKeys(proof, RP_ID);
+      expect(keys).toHaveLength(4);
+      expect(keys.map(hex).sort()).toEqual([...derKeys, ...compactKeys].map(hex).sort());
+      for (const key of keys) {
+        expect(verifyOwnershipProof([{ publicKey: key }], proof, RP_ID)).toHaveLength(1);
+      }
+      expect(legacyRecoverPasskeyPublicKeys(proof, RP_ID).map(hex)).toEqual(keys.map(hex));
+      break;
+    }
+  });
+
   it('matches sdk-legacy key for key', () => {
     for (const shape of shapes) {
       const proof = makeProof(newPasskey().secretKey, shape);
@@ -714,6 +745,28 @@ describe('resolvePasskeyPublicKey', () => {
     // A third, fresh one does not make up for the repeat.
     expect(resolvePasskeyPublicKey([...twice, makeProof(passkey.secretKey)], RP_ID)).toBeNull();
     expect(legacyResolvePasskeyPublicKey(twice, RP_ID)).toBeNull();
+  });
+
+  it('a repeated challenge gives null wherever it sits among the proofs', () => {
+    const passkey = newPasskey();
+    const first = makeProof(passkey.secretKey);
+    const fresh = [makeProof(passkey.secretKey), makeProof(passkey.secretKey)];
+    // The first assertion again, re-encoded: the same challenge, and the same keys.
+    const repeat = { ...first, signature: p256.Signature.fromBytes(first.signature, 'der').toCompactRawBytes() };
+    expect(resolvePasskeyPublicKey([first, ...fresh], RP_ID)).not.toBeNull();
+    for (const proofs of [
+      [first, fresh[0]!, repeat],
+      [repeat, fresh[0]!, fresh[1]!, first],
+      [fresh[0]!, first, fresh[1]!, repeat],
+    ]) {
+      // By the keys alone these would pin the signer; the rule refuses them.
+      const common = proofs
+        .map((proof) => recoverPasskeyPublicKeys(proof, RP_ID).map(hex))
+        .reduce((a, b) => a.filter((k) => b.includes(k)));
+      expect(common).toEqual([hex(passkey.publicKey)]);
+      expect(resolvePasskeyPublicKey(proofs, RP_ID)).toBeNull();
+      expect(legacyResolvePasskeyPublicKey(proofs, RP_ID)).toBeNull();
+    }
   });
 
   it('assertions from two different passkeys give null', () => {
