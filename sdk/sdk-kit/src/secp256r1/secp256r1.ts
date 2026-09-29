@@ -15,6 +15,13 @@ import {
   type GetAccountInfoApi,
 } from '@solana/kit';
 import { ACCOUNT_DISCRIMINATOR } from '../constants.js';
+import {
+  atOrAfterContextSlot,
+  challengeReadConfig,
+  type ChallengeReadOptions,
+} from './challengeReads.js';
+
+export { MinContextSlotNotReachedError, type ChallengeReadOptions } from './challengeReads.js';
 
 const addressEncoder = getAddressEncoder();
 const base64Encoder = getBase64Encoder();
@@ -74,17 +81,37 @@ export interface Secp256r1Signer {
 
 // ─── On-chain authority reads ────────────────────────────────────────
 
+/** One authority account, read per `opts` (see {@link ChallengeReadOptions}). */
+async function readAuthorityAccount(
+  rpc: Rpc<GetAccountInfoApi>,
+  authorityPda: Address,
+  opts: ChallengeReadOptions | undefined,
+  what: string,
+) {
+  return atOrAfterContextSlot(
+    () =>
+      rpc
+        .getAccountInfo(authorityPda, { encoding: 'base64', ...challengeReadConfig(opts) })
+        .send(),
+    opts?.minContextSlot,
+    what,
+  );
+}
+
 /**
  * Reads the current odometer counter from an on-chain authority account.
  * The counter is a u32 LE at offset 8 of the AuthorityAccountHeader.
+ *
+ * Read at `opts.commitment` (default `'confirmed'`) and, with
+ * `opts.minContextSlot`, from a node at or past that slot: see
+ * {@link ChallengeReadOptions}.
  */
 export async function readAuthorityCounter(
   rpc: Rpc<GetAccountInfoApi>,
   authorityPda: Address,
+  opts?: ChallengeReadOptions,
 ): Promise<number> {
-  const info = await rpc
-    .getAccountInfo(authorityPda, { encoding: 'base64' })
-    .send();
+  const info = await readAuthorityAccount(rpc, authorityPda, opts, `the counter of ${authorityPda}`);
   if (!info.value)
     throw new Error(`Authority account not found: ${authorityPda}`);
   const bytes = base64ToBytes(info.value.data[0]);
@@ -97,14 +124,16 @@ export async function readAuthorityCounter(
  * Reads the compressed Secp256r1 public key (33 bytes) from an on-chain
  * authority account. Layout:
  *   [header(48)] [credential_id_hash(32)] [compressed_pubkey(33)] ...
+ *
+ * `opts` as for {@link readAuthorityCounter}: the key never changes, but an
+ * authority added by the previous transaction exists only from its slot.
  */
 export async function readAuthorityPubkey(
   rpc: Rpc<GetAccountInfoApi>,
   authorityPda: Address,
+  opts?: ChallengeReadOptions,
 ): Promise<Uint8Array> {
-  const info = await rpc
-    .getAccountInfo(authorityPda, { encoding: 'base64' })
-    .send();
+  const info = await readAuthorityAccount(rpc, authorityPda, opts, `the key of ${authorityPda}`);
   if (!info.value)
     throw new Error(`Authority account not found: ${authorityPda}`);
   const bytes = base64ToBytes(info.value.data[0]);

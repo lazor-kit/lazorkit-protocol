@@ -372,6 +372,37 @@ throws naming it.
 
 Sequence, UX and operator notes: [`docs/migration-ui-flow.md`](../../docs/migration-ui-flow.md).
 
+## Two passkey transactions in a row
+
+A passkey challenge signs the authority's counter + 1, read when you call
+`prepare*` (or a one-shot method). If the previous transaction from the same
+authority has been sent but not yet executed by the node you read from, that
+read returns the counter it is about to use, and the new signature fails with
+`SignatureReused` (3006) — after the user has approved it. Wait for the
+previous transaction to confirm and pass the slot it landed in:
+
+```ts
+const { value: [status] } = await rpc.getSignatureStatuses([signature]).send();
+
+const prepared = await lk.prepareExecute({
+  payer,
+  walletPda,
+  secp256r1: {
+    credentialIdHash,
+    minContextSlot: status!.slot, // read from a node that has executed it
+    // commitment: 'confirmed',   // the default
+  },
+  instructions,
+});
+```
+
+The same `minContextSlot` / `commitment` go on a signer config
+(`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet` and
+on `readCounter`, and apply to the counter, key and slot reads alike. A node
+behind the floor answers -32016; the SDK retries with a short backoff for up to
+10 s, then throws `MinContextSlotNotReachedError`. Same behaviour as
+`@lazorkit/sdk-legacy`, where `minContextSlot` is a `number`.
+
 ## Package layout
 
 ```

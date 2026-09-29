@@ -519,6 +519,29 @@ const { instructions: execIxs } = client.finalizeExecute(prepared, {
 
 **Every passkey operation has this three-phase shape** — `prepareExecute`, `prepareAddAuthority`, `prepareRemoveAuthority`, `prepareTransferOwnership`, `prepareCreateSession`, `prepareRevokeSession`, `prepareAuthorize`. Each pairs with a `finalizeX` that takes the WebAuthn response.
 
+#### Two passkey transactions in a row
+
+The challenge signs the authority's counter + 1, read in step 1. If the previous transaction from the same authority has been sent but not yet executed by the node you read from, that read returns the counter it is about to use, and the new signature fails with `SignatureReused` (3006) — after the user has approved it, and nothing can repair it. So wait for the previous transaction to confirm, and pass the slot it landed in:
+
+```typescript
+await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+const { value: [status] } = await connection.getSignatureStatuses([signature]);
+
+const prepared = await client.prepareExecute({
+  payer: payer.publicKey,
+  walletPda: wallet.walletPda,
+  secp256r1: {
+    credentialIdHash,
+    authorityPda: wallet.authorityPda,
+    minContextSlot: status!.slot, // read from a node that has executed it
+    // commitment: 'confirmed',   // the default, whatever the Connection's
+  },
+  instructions,
+});
+```
+
+The same two options go on a signer config for the one-shot methods (`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet`, and on `readCounter`. They apply to all three reads a challenge is built from: the counter, the key and the slot. A node that has not reached `minContextSlot` answers -32016; the SDK retries with a short backoff for up to 10 s, then throws `MinContextSlotNotReachedError`. Without `minContextSlot` the reads are at `confirmed`, which is enough only once the previous transaction is confirmed.
+
 Helper for wrapping the `navigator.credentials.get` → `WebAuthnResponse` conversion once:
 
 ```typescript
@@ -854,7 +877,7 @@ An authority that carries a policy itself may not add authorities at all.
 | 3001 | InvalidAuthorityPayload |
 | 3002 | PermissionDenied |
 | 3005 | InvalidMessageHash |
-| 3006 | SignatureReused (counter mismatch) |
+| 3006 | SignatureReused (counter mismatch — often a challenge read before the previous transaction executed; see [Two passkey transactions in a row](#two-passkey-transactions-in-a-row)) |
 | 3007 | InvalidSignatureAge |
 | 3008 | InvalidSessionDuration |
 | 3009 | SessionExpired |

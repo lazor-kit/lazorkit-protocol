@@ -79,3 +79,34 @@ export function extractErrorCode(err: unknown): number | null {
   if (match2) return parseInt(match2[1], 10);
   return null;
 }
+
+/**
+ * The RPC node never reached the `minContextSlot` a passkey challenge read
+ * asked for, within the wait (see {@link Secp256r1Params.minContextSlot}).
+ *
+ * Thrown instead of signing: a node behind that slot may not have executed the
+ * authority's previous transaction yet, and the counter it holds would already
+ * be spent — the program rejects such a signature with SignatureReused (3006),
+ * and the signature commits to the counter, so nothing can repair it after the
+ * user has approved. Retry, or read from a node that has caught up.
+ */
+export class MinContextSlotNotReachedError extends Error {
+  /** The slot the read had to be answered at or after. */
+  readonly minContextSlot: number;
+  /** How long the reads were retried, in milliseconds. */
+  readonly waitedMs: number;
+
+  constructor(params: { minContextSlot: number; waitedMs: number; what: string; cause?: unknown }) {
+    super(
+      `RPC node has not reached slot ${params.minContextSlot} after ${params.waitedMs} ms ` +
+        `(reading ${params.what} for a passkey challenge). The authority's previous ` +
+        `transaction may not be visible there yet, and a challenge over the counter it ` +
+        `holds would fail with SignatureReused (3006). Retry, or use an RPC endpoint that ` +
+        `has caught up.`,
+    );
+    this.name = 'MinContextSlotNotReachedError';
+    this.minContextSlot = params.minContextSlot;
+    this.waitedMs = params.waitedMs;
+    if (params.cause !== undefined) (this as { cause?: unknown }).cause = params.cause;
+  }
+}
