@@ -125,16 +125,17 @@ const credential = (await navigator.credentials.get({
 })) as PublicKeyCredential;
 const response = credential.response as AuthenticatorAssertionResponse;
 const credentialIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', credential.rawId));
+const proof = {
+  challenge,
+  signature: new Uint8Array(response.signature), // DER, as the browser returns it
+  authenticatorData: new Uint8Array(response.authenticatorData),
+  clientDataJson: new Uint8Array(response.clientDataJSON),
+};
 
 const { adopt, needsConfirmation, unproven } = await lk.findOwnPasskeyWallet({
   credentialIdHash,
   rpId,
-  proof: {
-    challenge,
-    signature: new Uint8Array(response.signature), // DER, as the browser returns it
-    authenticatorData: new Uint8Array(response.authenticatorData),
-    clientDataJson: new Uint8Array(response.clientDataJSON),
-  },
+  proof,
   trustedKeys: [backendAdmin], // optional: your own Ed25519 addresses on users' wallets
   watchMints: [yourAppsMint], // optional: SPL Token mints your app receives (see below)
 });
@@ -154,9 +155,11 @@ if (adopt) {
   if (!chosen) throw new Error('No wallet confirmed');
   wallet = selectWalletByAddress(needsConfirmation, chosen); // vault or wallet address
 } else {
-  // This passkey provably owns no wallet: create one. The public key comes from
-  // the passkey's registration (navigator.credentials.create) — an assertion
-  // carries none.
+  // This passkey provably owns no wallet: create one. An assertion carries no
+  // public key: use the one you kept from the passkey's registration
+  // (navigator.credentials.create) or, for a passkey registered somewhere
+  // else, recover it — see "A passkey with no wallet" below.
+  const compressedPubkey = keptPublicKey ?? (await recoverPublicKey(credential, proof));
   const created = await lk.createWallet({
     payer,
     userSeed: crypto.getRandomValues(new Uint8Array(32)),
@@ -211,6 +214,77 @@ if (adopt) {
   (plus one per `watchMints` entry), in three rounds, after one shared
   `getMultipleAccounts` of every candidate's wallet account; use an RPC
   endpoint that allows them.
+
+### A passkey with no wallet, whose key you do not hold
+
+Every passkey starts without a v2 wallet, including one a user registered on
+another device, in another browser, or through another app under your `rpId`.
+Signing in with it gives you an assertion and no public key, and a key taken
+from anywhere else — a portal's local storage, a deep link — may be another
+passkey's. `createWallet` takes whatever key it is given, and a wallet created
+for a key the passkey does not hold is one it can never sign for: whatever is
+sent to its vault is stuck.
+
+Recover the key from the passkey itself. An ECDSA signature names its signer
+up to a few candidates — almost always two — and a second signature over
+another message pins it: only the passkey's own key is common to both. So ask
+the same passkey for one more assertion, over a challenge of its own, and pass
+both to `resolvePasskeyPublicKey`:
+
+```ts
+import { createOwnershipChallenge, resolvePasskeyPublicKey, type OwnershipProof } from '@lazorkit/sdk';
+
+const sameBytes = (a: ArrayBuffer, b: ArrayBuffer) =>
+  a.byteLength === b.byteLength && new Uint8Array(a).every((x, i) => x === new Uint8Array(b)[i]);
+
+async function recoverPublicKey(credential: PublicKeyCredential, proof: OwnershipProof) {
+  const challenge = createOwnershipChallenge(); // not the sign-in challenge: a new one
+  const again = (await navigator.credentials.get({
+    publicKey: {
+      challenge,
+      rpId,
+      allowCredentials: [{ type: 'public-key', id: credential.rawId }], // the same passkey
+      userVerification: 'preferred',
+    },
+  })) as PublicKeyCredential;
+  if (!sameBytes(again.rawId, credential.rawId)) throw new Error('Another passkey answered');
+  const response = again.response as AuthenticatorAssertionResponse;
+
+  const publicKey = resolvePasskeyPublicKey(
+    [
+      proof, // the sign-in assertion
+      {
+        challenge,
+        signature: new Uint8Array(response.signature),
+        authenticatorData: new Uint8Array(response.authenticatorData),
+        clientDataJson: new Uint8Array(response.clientDataJSON),
+      },
+    ],
+    rpId,
+  );
+  if (!publicKey) throw new Error("Could not read this passkey's public key"); // ask again; never guess
+  return publicKey; // 33-byte compressed: the owner's compressedPubkey
+}
+```
+
+- The key is the passkey's own by construction: only its holder can sign
+  challenges you just made, under your `rpId`. Each assertion is checked as
+  `verifyOwnershipProof` checks one (a `webauthn.get` over exactly that
+  challenge, this relying party, the user present), and the key returned
+  verifies against both.
+- It is the key of whichever passkey signed, so take both assertions from
+  `navigator.credentials.get` calls you made, the second pinned to the first
+  one's `rawId`, check the two `rawId`s match, and hash that `rawId` for
+  `credentialIdHash`.
+- `null` means no single key: fewer than two assertions, two over the same
+  challenge, one that fails a check, or two passkeys. Ask again; do not fall
+  back to a key from elsewhere.
+- `recoverPasskeyPublicKeys(proof, rpId)` is the one-assertion step: every key
+  that assertion verifies against (almost always two), the signer's among
+  them.
+- Only for a passkey with no wallet. When `findOwnPasskeyWallet` finds one,
+  its stored key is the one the sign-in assertion was just verified against:
+  use `wallet.publicKey`.
 
 ## Migrating a v1 wallet
 
