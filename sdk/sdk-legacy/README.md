@@ -369,15 +369,23 @@ async function recoverPublicKey(credential: PublicKeyCredential, proof: Ownershi
 }
 ```
 
-- The key is the passkey's own by construction: only its holder can sign
-  challenges you just made, under your `rpId`. Each assertion is checked as
+- The key is the one that signed both assertions. Each is checked as
   `verifyOwnershipProof` checks one (a `webauthn.get` over exactly that
   challenge, this relying party, the user present), and the key returned
-  verifies against both.
-- It is the key of whichever passkey signed, so take both assertions from
-  `navigator.credentials.get` calls you made, the second pinned to the first
-  one's `rawId`, check the two `rawId`s match, and hash that `rawId` for
-  `credentialIdHash`.
+  verifies against both. But the signature covers those bytes under the very
+  key it names, so anyone holding any P-256 key can make assertions over your
+  challenges that pass. What makes it the passkey's key is where the
+  assertions come from: `navigator.credentials.get` calls in your own page,
+  where the browser sets the relying party and the passkey signs. Take both
+  there, the second pinned to the first one's `rawId`, check the two `rawId`s
+  match, and hash that `rawId` for `credentialIdHash`.
+- Assertions relayed to you — by a portal, over a deep link or a redirect —
+  prove only that whoever produced them holds the key. Recovering from them
+  corrects an honest portal that reports the wrong key; it does not protect you
+  from a channel someone else can write to, who can send assertions signed with
+  a key of their own and have you create a wallet they control. Authenticate
+  the channel (for a popup, check the `postMessage` origin), or trust the key
+  no more than you trust the channel.
 - `null` means no single key: fewer than two assertions, two over the same
   challenge, one that fails a check, or two passkeys. Ask again; do not fall
   back to a key from elsewhere.

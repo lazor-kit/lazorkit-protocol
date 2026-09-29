@@ -280,15 +280,20 @@ export function verifyOwnershipProof<T extends { publicKey: Uint8Array }>(
  * them — as 33-byte compressed keys, each once.
  *
  * A WebAuthn assertion carries no public key, but an ECDSA signature names
- * its signer up to a few candidates: the recovery ids 0..3 each give at most
- * one (2 and 3 only in the rare case r + n < p), so almost always two. One
+ * its signer up to a few candidates: each recovery id 0..3 gives at most one
+ * (2 and 3 only in the rare case r + n < p), so almost always two. One
  * assertion does not say which; {@link resolvePasskeyPublicKey} pins it with a
  * second. The proof is checked exactly as {@link verifyOwnershipProof} checks
  * it — a `webauthn.get` over exactly `proof.challenge` (>= 16 bytes), made
  * under `rpId` with the user present — and every key returned passes
  * `verifyOwnershipProof` for it. Returns `[]` when any check fails; never
  * throws. The signature may be DER or 64-byte r||s, high-S or low-S, as
- * `verifyOwnershipProof` accepts it.
+ * `verifyOwnershipProof` accepts it; a 64-byte string that reads as both
+ * counts under both readings, so it can give twice as many keys (no
+ * authenticator returns one).
+ *
+ * These checks say what the signer signed, not who it is: see
+ * {@link resolvePasskeyPublicKey} for where the proof has to come from.
  */
 export function recoverPasskeyPublicKeys(proof: OwnershipProof, rpId: string): Uint8Array[] {
   try {
@@ -335,11 +340,18 @@ export function recoverPasskeyPublicKeys(proof: OwnershipProof, rpId: string): U
  * exactly one key is common to all of them — so assertions from two different
  * passkeys give `null`. Never throws.
  *
- * The key is the one that signed these assertions, and nothing more: the
- * credential it belongs to is whichever produced them. Take both from
- * `navigator.credentials.get` calls you made, the second with
- * `allowCredentials` set to the first one's `rawId`, check the two `rawId`s
- * match, and hash that `rawId` for the wallet's `credentialIdHash`.
+ * The key is whichever key signed these assertions, and nothing more. Its
+ * signature covers the rpId hash, the flags and the clientData, but under that
+ * same key: anyone holding any P-256 key can make assertions over your
+ * challenges that pass every check. So the key is the passkey's only when both
+ * assertions come straight from `navigator.credentials.get` in your own page,
+ * where the browser sets those bytes: the second call with `allowCredentials`
+ * set to the first one's `rawId`; check the two `rawId`s match and hash that
+ * `rawId` for the wallet's `credentialIdHash`. Assertions relayed to you — by
+ * a portal, over a deep link or a redirect — prove only that whoever produced
+ * them holds the key. Over a channel you do not authenticate that can be
+ * whoever controls it, with a key of their own, and a wallet created with it
+ * is theirs.
  */
 export function resolvePasskeyPublicKey(proofs: OwnershipProof[], rpId: string): Uint8Array | null {
   try {
