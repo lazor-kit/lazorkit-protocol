@@ -68,7 +68,14 @@ changes the bytes:
   one is, and warns about it; the sunset binary grows from 45856 to 140200
   bytes, and no artifact hashes as recorded.
 - **`--tools-version v1.53`.** The default follows cargo-build-sbf (v1.54 for
-  4.1.0), and a v1.54 build differs.
+  4.1.0), and a v1.54 build differs. It also changes rustup: cargo-build-sbf
+  keeps one `1.89.0-sbpf-solana-<version>` toolchain linked (to
+  `~/.cache/solana/<version>/platform-tools/rust`) and uninstalls the other
+  when the version changes. A pinned build, `check-release-hashes.sh`
+  included, unlinks `1.89.0-sbpf-solana-v1.54`, and the next unpinned build
+  links it back. Both downloads stay in `~/.cache/solana`, so switching is
+  quick, but two builds with different `--tools-version` running at the same
+  time on one machine can interfere: run them one after the other.
 - **`--arch v0`.** The program deploys as SBPF v0, and cargo-build-sbf 4.4.0
   and later build v3 by default. A v3 binary loads on a local test validator
   and passes the size check, but litesvm refuses it.
