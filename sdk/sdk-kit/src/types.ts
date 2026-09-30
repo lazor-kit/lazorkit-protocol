@@ -104,7 +104,20 @@ export function session(
 
 // ─── Secp256r1 prepare-only params ───────────────────────────────────
 
-/** Identity bag for the prepare* methods (no signer callback). */
+/**
+ * Identity bag for the prepare* methods (no signer callback).
+ *
+ * **One passkey flow per authority at a time.** The challenge signs the
+ * authority's counter + 1, read when the flow is prepared. Two flows for one
+ * authority that overlap — two prepares before the first transaction lands,
+ * two tabs or devices using one passkey, an app and a wallet — read the same
+ * counter and both sign counter + 1; whichever lands second fails with
+ * SignatureReused (3006), and no `minContextSlot` helps, because neither has
+ * landed when the other reads. Run prepare → sign → send → confirm for one
+ * authority one after another, passing the previous transaction's slot as
+ * `minContextSlot`. The SDK keeps no per-authority state and does not queue
+ * flows for you (README: "Two passkey transactions in a row").
+ */
 export interface Secp256r1Params {
   credentialIdHash: Uint8Array;
   /** Compressed public key (33 bytes). Auto-fetched from on-chain authority if omitted. */
@@ -123,11 +136,17 @@ export interface Secp256r1Params {
    * to the counter, so this cannot be repaired after the user has signed.
    *
    * While the node answers that it has not reached the slot (-32016), the reads
-   * are retried with a short backoff for up to 10 s, then the prepare call
-   * throws `MinContextSlotNotReachedError`.
+   * are retried with a short backoff for up to 10 s (30 s at `'finalized'`),
+   * then the prepare call throws `MinContextSlotNotReachedError`. If one of
+   * the reads fails for another reason, the call rejects with that error and
+   * the other reads stop at once.
    */
   minContextSlot?: Slot;
-  /** Commitment for those reads. Default `'confirmed'`. */
+  /**
+   * Commitment for those reads. Default `'confirmed'`. `'finalized'` with a
+   * `minContextSlot` waits for that slot to be finalized: about 32 slots
+   * (13 s) after it was confirmed.
+   */
   commitment?: Commitment;
 }
 

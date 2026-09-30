@@ -406,8 +406,16 @@ The same `minContextSlot` / `commitment` go on a signer config
 (`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet` and
 on `readCounter`, and apply to the counter, key and slot reads alike. A node
 behind the floor answers -32016; the SDK retries with a short backoff for up to
-10 s, then throws `MinContextSlotNotReachedError`. Same behaviour as
-`@lazorkit/sdk-legacy`, where `minContextSlot` is a `number`.
+10 s, then throws `MinContextSlotNotReachedError` (its `commitment` says which
+bank was behind). If one of the three reads fails for another reason, the call
+rejects with that error at once and the other two stop retrying. Same
+behaviour as `@lazorkit/sdk-legacy`, where `minContextSlot` is a `number`.
+
+With `commitment: 'finalized'`, `minContextSlot` is a slot the node must have
+*finalized*, about 32 slots (13 s on mainnet) after it was confirmed. The reads
+then wait up to 30 s, so a floor at a just-confirmed tx1 costs that much before
+the passkey prompt. Unless you need finalized reads, keep the default:
+`confirmed` with the floor is enough to sign the right counter.
 
 Without `minContextSlot` the reads are at `confirmed`, whatever the RPC's own
 default. That is enough only when the node answering them has executed the
@@ -415,6 +423,49 @@ previous transaction; behind a load-balanced endpoint it may not have, even
 after tx1 confirmed on another node, so pass the floor anyway. If you confirm
 at `processed`, read at `processed` too (`commitment: 'processed'`, and send
 with a `processed` preflight): a `confirmed` read right after misses tx1.
+
+**One passkey flow per authority at a time.** Two flows for the same authority
+that overlap — two `prepare*` calls before the first transaction lands, two
+tabs or devices with one passkey, an app and a wallet — read the same counter
+and both sign counter + 1. Whichever lands second fails with 3006, and no floor
+helps: neither has landed when the other reads. Run prepare → sign → send →
+confirm for one authority one after another, each floored at the previous
+one's slot. The SDK keeps no per-authority state and does not queue for you;
+within one app a queue of your own is enough:
+
+```ts
+// Your app's, not the SDK's: flows for one authority run one after another.
+const tails = new Map<Address, Promise<void>>();
+
+async function oneAtATime<T>(authority: Address, flow: () => Promise<T>): Promise<T> {
+  const run = (tails.get(authority) ?? Promise.resolve()).then(flow);
+  const tail = run.then(() => undefined, () => undefined);
+  tails.set(authority, tail);
+  try {
+    return await run;
+  } finally {
+    if (tails.get(authority) === tail) tails.delete(authority);
+  }
+}
+
+// flow = prepare (floored at the last slot) → passkey prompt → send → confirm
+await oneAtATime(authorityPda, () => payWithPasskey(invoice));
+```
+
+Across tabs, devices or apps that share a passkey no local queue helps; a 3006
+there means another flow used the counter first, and the fix is to prepare
+again (a new prompt), floored at a slot that includes it.
+
+**A 3006 is not always LazorKit's.** A program that `execute` calls can fail
+with the same custom code — Anchor's account errors use 3000–3017, so an inner
+Anchor program's `AccountNotMutable` is 3006 too — and the transaction then
+fails with it. A preflight failure's logs name the program: the first
+`Program <id> failed: custom program error: 0x…` line is the one that raised
+it. A landed failure (`{ InstructionError: [i, { Custom: 3006 }] }` from
+`getSignatureStatuses`) names only the top-level instruction, which is the
+LazorKit one whichever program inside it failed: read its logs
+(`getTransaction(signature)` → `meta.logMessages`) before telling the user to
+sign again.
 
 ## Package layout
 

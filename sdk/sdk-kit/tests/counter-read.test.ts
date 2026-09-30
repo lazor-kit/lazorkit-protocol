@@ -15,6 +15,7 @@ import {
   SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY,
   SolanaError,
   address,
+  isSolanaError,
   type Address,
 } from '@solana/kit';
 import {
@@ -91,6 +92,17 @@ function signerThatStops(credentialIdHash: Uint8Array): Secp256r1Signer {
 afterEach(() => {
   vi.useRealTimers();
 });
+
+/** The real setTimeout, for waiting on real async work while timers are faked. */
+const realSetTimeout = globalThis.setTimeout;
+
+/** Waits in real time until `calls()` is non-zero (at most a second). */
+async function untilCalled(calls: () => number): Promise<void> {
+  for (let i = 0; i < 200 && calls() === 0; i++) {
+    await new Promise((resolve) => realSetTimeout(resolve, 5));
+  }
+  expect(calls()).toBeGreaterThan(0);
+}
 
 describe('challenge reads — options reach every read', () => {
   const credentialIdHash = new Uint8Array(32).fill(0xa7);
@@ -278,5 +290,216 @@ describe('challenge reads — a node behind the floor', () => {
     });
     await expect(readAuthorityCounter(rpc, authorityPda)).rejects.toBeInstanceOf(SolanaError);
     expect(calls()).toBe(1);
+  });
+});
+
+// A floor at 'finalized' is the slot being finalized, about 32 slots (13 s)
+// after it was confirmed. With the 10 s wait of the other commitments, a
+// finalized read floored at a just-confirmed slot — what the README tells a
+// caller to pass — always ended in MinContextSlotNotReachedError, with a
+// message that blamed the RPC endpoint.
+describe("challenge reads — a floor at 'finalized'", () => {
+  const authorityPda = address('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
+  const atFinalized = { commitment: 'finalized' as const, minContextSlot: 5_000n };
+
+  /**
+   * A node whose finalized bank reaches the floor `afterMs` after the first
+   * read asks for it (prepare* derives addresses with real async crypto
+   * first, so the reads may start after a fake-timer advance began).
+   */
+  function finalizesAfter(afterMs: number) {
+    let start: number | undefined;
+    let calls = 0;
+    const behind = () => Date.now() - (start ??= Date.now()) < afterMs;
+    const answer = () => {
+      calls++;
+      if (behind()) throw notReached();
+      return { value: authorityAccount() };
+    };
+    const rpc = {
+      getAccountInfo: (key: Address, config?: Record<string, unknown>) => ({
+        send: async () => {
+          if (key !== authorityPda) return { value: null }; // protocol config: none
+          expect(config?.commitment).toBe('finalized');
+          return answer();
+        },
+      }),
+      getSlot: (config?: Record<string, unknown>) => ({
+        send: async () => {
+          expect(config?.commitment).toBe('finalized');
+          if (behind()) throw notReached();
+          return 5_040n;
+        },
+      }),
+    };
+    return { rpc: rpc as never, calls: () => calls };
+  }
+
+  it('waits past 10 s for the slot to finalize (13 s here), then reads', async () => {
+    vi.useFakeTimers();
+    const { rpc, calls } = finalizesAfter(13_000);
+    const outcome = readAuthorityCounter(rpc, authorityPda, atFinalized).then(
+      (counter) => counter,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await outcome).toBe(COUNTER);
+    expect(calls()).toBeGreaterThan(10);
+  });
+
+  it('prepare* waits the same way for all three reads', async () => {
+    vi.useFakeTimers();
+    const lk0 = new LazorKit({} as never, PROGRAM_ID_DEVNET);
+    const credentialIdHash = new Uint8Array(32).fill(0x3d);
+    const [walletPda] = await lk0.findWallet(new Uint8Array(32).fill(0x53));
+    const { rpc, calls } = finalizesAfter(13_000);
+    const outcome = new LazorKit(rpc, PROGRAM_ID_DEVNET)
+      .prepareExecute({
+        payer: PAYER,
+        walletPda,
+        secp256r1: { credentialIdHash, authorityPda, ...atFinalized },
+        instructions: [],
+      })
+      .then(
+        (prepared) => prepared,
+        (e: unknown) => e,
+      );
+    await untilCalled(calls);
+    await vi.advanceTimersByTimeAsync(20_000);
+    const prepared = await outcome;
+    expect(prepared).not.toBeInstanceOf(Error);
+    expect((prepared as { challenge: Uint8Array }).challenge).toHaveLength(32);
+  });
+
+  it('gives up after about 30 s, saying the slot is not finalized', async () => {
+    vi.useFakeTimers();
+    const { rpc } = finalizesAfter(Number.POSITIVE_INFINITY);
+    const outcome = readAuthorityCounter(rpc, authorityPda, atFinalized).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(40_000);
+    const e = (await outcome) as MinContextSlotNotReachedError;
+    expect(e).toBeInstanceOf(MinContextSlotNotReachedError);
+    expect(e.commitment).toBe('finalized');
+    expect(e.waitedMs).toBeGreaterThan(25_000);
+    expect(e.waitedMs).toBeLessThanOrEqual(30_000);
+    expect(e.message).toContain('Slot 5000 is not finalized');
+    expect(e.message).toContain("read at 'confirmed'");
+    expect(e.message).not.toContain('use an RPC endpoint that has caught up');
+  });
+
+  it("'confirmed' still gives up after 10 s, and names its commitment", async () => {
+    vi.useFakeTimers();
+    const rpc = {
+      getAccountInfo: () => ({
+        send: async () => {
+          throw notReached();
+        },
+      }),
+    };
+    const outcome = readAuthorityCounter(rpc as never, authorityPda, { minContextSlot: 5_000n }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    const e = (await outcome) as MinContextSlotNotReachedError;
+    expect(e).toBeInstanceOf(MinContextSlotNotReachedError);
+    expect(e.commitment).toBe('confirmed');
+    expect(e.waitedMs).toBeLessThanOrEqual(10_000);
+    expect(e.message).toContain("slot 5000 at 'confirmed'");
+  });
+});
+
+// The counter, key and slot reads of one challenge run side by side. When one
+// fails outright, the prepare call rejects at once; the others used to keep
+// retrying -32016 for up to the whole wait, polling the RPC after the caller
+// had moved on and holding the process open on their timers.
+describe('challenge reads — one fails, the others stop', () => {
+  const credentialIdHash = new Uint8Array(32).fill(0x3e);
+
+  async function setup() {
+    const lk0 = new LazorKit({} as never, PROGRAM_ID_DEVNET);
+    const [walletPda] = await lk0.findWallet(new Uint8Array(32).fill(0x54));
+    const [authority] = await lk0.findAuthority(walletPda, credentialIdHash);
+    let accountReads = 0;
+    const rpc = {
+      // A node behind the floor for the authority (key and counter reads) ...
+      getAccountInfo: (key: Address) => ({
+        send: async () => {
+          if (key !== authority) return { value: null };
+          accountReads++;
+          throw notReached();
+        },
+      }),
+      // ... and a slot read that fails outright.
+      getSlot: () => ({
+        send: async () => {
+          throw new SolanaError(SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY, {});
+        },
+      }),
+    };
+    return { lk: new LazorKit(rpc as never, PROGRAM_ID_DEVNET), walletPda, accountReads: () => accountReads };
+  }
+
+  it('prepare* rejects with the failure, and no read polls on afterwards', async () => {
+    vi.useFakeTimers();
+    const { lk, walletPda, accountReads } = await setup();
+    const outcome = lk
+      .prepareExecute({
+        payer: PAYER,
+        walletPda,
+        secp256r1: { credentialIdHash, minContextSlot: 5_000n },
+        instructions: [],
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    // Let the reads start and the slot read fail; no timer has to fire for it.
+    await vi.advanceTimersByTimeAsync(0);
+    const error = await outcome;
+    expect(isSolanaError(error, SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY)).toBe(true);
+
+    const readsAtReject = accountReads();
+    expect(readsAtReject).toBeGreaterThan(0);
+    // Nothing left to wake up (no retry timer holds the process open), and
+    // no read reaches the RPC after the caller got its answer.
+    const timersAtReject = vi.getTimerCount();
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect({ timersAtReject, readsAfterReject: accountReads() - readsAtReject }).toEqual({
+      timersAtReject: 0,
+      readsAfterReject: 0,
+    });
+  });
+
+  it('a read still waiting for the floor stops as soon as another fails', async () => {
+    vi.useFakeTimers();
+    const { lk, walletPda, accountReads } = await setup();
+    // The key is the caller's here: only the counter read waits for the floor.
+    const outcome = lk
+      .prepareRevokeSession({
+        payer: PAYER,
+        walletPda,
+        secp256r1: {
+          credentialIdHash,
+          publicKeyBytes: Uint8Array.from([0x02, ...new Uint8Array(32).fill(7)]),
+          minContextSlot: 5_000n,
+        },
+        sessionPda: PAYER,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(isSolanaError(await outcome, SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY)).toBe(true);
+    const readsAtReject = accountReads();
+    const timersAtReject = vi.getTimerCount();
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect({ timersAtReject, readsAfterReject: accountReads() - readsAtReject }).toEqual({
+      timersAtReject: 0,
+      readsAfterReject: 0,
+    });
   });
 });
