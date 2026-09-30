@@ -36,8 +36,15 @@ name: SBF cluster feature check
 # Every build that succeeds passes `--arch v0` and is checked to be SBPF v0
 # (scripts/assert-sbpf-v0.sh): the program deploys as v0.
 #
-# Runs on every PR touching the program, its crates, the lockfile, the
-# toolchain pin or the hash record, and on this workflow.
+# Runs on every PR touching the program, its crates, the lockfile, cargo's
+# config or the Rust toolchain file, the toolchain pin or the hash record, and
+# on this workflow; on every push to main and develop; and weekly, for drift
+# from outside the repository (a platform-tools download, the runner image).
+# A repo-root .cargo/config.toml alone moves the bytes: `overflow-checks =
+# true` there makes the sunset 49896 bytes instead of 45856.
+#
+# A red run blocks a merge only where the repository makes these checks
+# required (branch protection); the workflow cannot.
 
 on:
   pull_request:
@@ -47,6 +54,8 @@ on:
       - 'no-padding/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain.toml'
       - 'scripts/sbf-toolchain.sh'
       - 'scripts/release-hashes.txt'
       - 'scripts/check-release-hashes.sh'
@@ -54,6 +63,9 @@ on:
       - '.github/workflows/sbf-cluster-check.yml'
   push:
     branches: [main, develop]
+  # Weekly (Mondays 03:17 UTC), from the default branch's copy of this file.
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
 
 permissions:
