@@ -10,7 +10,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TOOLS="${SBF_TOOLS_VERSION:-v1.53}"
+# shellcheck source=sbf-toolchain.sh
+. scripts/sbf-toolchain.sh
+sbf_toolchain_check warn
+TOOLS="${SBF_TOOLS_VERSION:-$SBF_PLATFORM_TOOLS_VERSION}"
 # v0 explicitly: cargo-build-sbf 4.4.0 defaults to v3, which litesvm 0.6 cannot
 # load (see scripts/build-repro-fixtures.sh).
 

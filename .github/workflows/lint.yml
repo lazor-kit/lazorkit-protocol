@@ -73,10 +73,25 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.89.0
 
-      - name: Install Solana toolchain
+      # The release toolchain (scripts/sbf-toolchain.sh), not the stable
+      # installer, so the suite tests the bytes that ship: the stable
+      # installer's cargo-build-sbf 4.4.0 builds this crate without LTO.
+      - name: Read the toolchain pin
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          . scripts/sbf-toolchain.sh
+          echo "SBF_AGAVE_RELEASE=$SBF_AGAVE_RELEASE" >> "$GITHUB_ENV"
+          echo "SBF_PLATFORM_TOOLS_VERSION=$SBF_PLATFORM_TOOLS_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install Solana toolchain (pinned)
+        run: |
+          sh -c "$(curl -sSfL "https://release.anza.xyz/$SBF_AGAVE_RELEASE/install")"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Check cargo-build-sbf is the pinned version
+        run: |
+          cargo-build-sbf --version
+          . scripts/sbf-toolchain.sh
+          sbf_toolchain_check strict
 
       - name: Cache cargo build
         uses: actions/cache@v4
@@ -86,11 +101,12 @@ jobs:
             ~/.cargo/git
             target
             test-fixtures/malicious-cpi/target
-          key: sbf-tests-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: sbf-tests-${{ runner.os }}-${{ env.SBF_AGAVE_RELEASE }}-${{ env.SBF_PLATFORM_TOOLS_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
 
       # Builds both the program and the malicious-cpi wrapper that
-      # repro_h1_cpi_bypass loads as a second .so, both as SBPF v0 (the
-      # script passes --arch v0; see its header).
+      # repro_h1_cpi_bypass loads as a second .so, both as SBPF v0 with the
+      # pinned platform-tools (the script passes --tools-version and
+      # --arch v0; see its header).
       - name: Build SBF artifacts
         run: ./scripts/build-repro-fixtures.sh
 
@@ -100,11 +116,11 @@ jobs:
       # The sunset binary is a different build — the program id is compiled in
       # and it refuses all but three instructions — so its suite needs its own
       # artifact. Built last: nothing after this step reads the devnet one.
-      # `--arch v0` as in build-repro-fixtures.sh: the stable installer brings
-      # cargo-build-sbf 4.4.0, whose v3 default litesvm 0.6 cannot load.
+      # `--arch v0` as in build-repro-fixtures.sh: cargo-build-sbf 4.4.0 makes
+      # v3 the default, which litesvm 0.6 cannot load.
       - name: Build sunset artifact (rehearsal-v1)
         working-directory: program
-        run: cargo build-sbf --features rehearsal-v1 --arch v0
+        run: cargo build-sbf --features rehearsal-v1 --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0
 
       - name: cargo test (sunset binary)
         run: cargo test --features rehearsal-v1 -p lazorkit-program --test sunset_tests

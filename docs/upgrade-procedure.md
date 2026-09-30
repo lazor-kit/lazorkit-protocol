@@ -190,7 +190,11 @@ swept to the owner-approved destination and the v1 wallet + authority closed.
 ### 6. Deploy
 
 ```bash
-cargo build-sbf --features mainnet --arch v0    # v3 is the default from cargo-build-sbf 4.4.0
+# The pinned toolchain (scripts/sbf-toolchain.sh): cargo-build-sbf 4.1.0 from
+# Agave v4.2.2, platform-tools v1.53; v3 is the default from cargo-build-sbf 4.4.0,
+# which also drops LTO for this crate. mainnet-deploy-checklist.md §2 has the
+# fresh-target-dir form and scripts/check-release-hashes.sh the recorded hashes.
+cargo build-sbf --features mainnet --tools-version v1.53 --arch v0
 ./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
 sha256sum target/deploy/lazorkit_program.so     # record it
 solana program deploy target/deploy/lazorkit_program.so -u m

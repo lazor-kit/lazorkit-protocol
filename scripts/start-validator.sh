@@ -56,11 +56,17 @@ if pgrep -f solana-test-validator >/dev/null 2>&1; then
   fi
 fi
 
-# 2. Build the SBF artifact the validator is about to preload. `--arch v0`, as
-#    the program deploys: cargo-build-sbf 4.4.0 made v3 the default, and a local
+# 2. Build the SBF artifact the validator is about to preload, with the release
+#    toolchain (scripts/sbf-toolchain.sh; another cargo-build-sbf only warns
+#    here, but its binary is not the one that ships). `--arch v0`, as the
+#    program deploys: cargo-build-sbf 4.4.0 made v3 the default, and a local
 #    validator would load a v3 build without complaint, so the SDK suites would
 #    test a binary that never ships.
-( cd "$REPO_ROOT/program" && cargo build-sbf --features devnet --arch v0 ) || exit 1
+# shellcheck source=sbf-toolchain.sh
+. "$REPO_ROOT/scripts/sbf-toolchain.sh"
+sbf_toolchain_check warn
+( cd "$REPO_ROOT/program" &&
+  cargo build-sbf --features devnet --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 ) || exit 1
 
 # `cargo build-sbf` and `cargo test` do not always agree on the target
 # directory — depending on how the shell was invoked, CARGO_TARGET_DIR may point

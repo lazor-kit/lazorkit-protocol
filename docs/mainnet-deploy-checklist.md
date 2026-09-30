@@ -117,6 +117,22 @@ decisions in section 1.
 Three artifacts, built once, hashed once, and deployed from exactly those
 files. Nothing below deploys a path that a later build could overwrite.
 
+- [ ] **The pinned toolchain** (`scripts/sbf-toolchain.sh`): Agave **v4.2.2**,
+      whose `cargo-build-sbf` is **4.1.0**, with platform-tools **v1.53** and
+      `--arch v0`. Not the stable installer:
+      ```bash
+      sh -c "$(curl -sSfL https://release.anza.xyz/v4.2.2/install)"   # or: agave-install init v4.2.2
+      cargo-build-sbf --version   # must print "cargo-build-sbf 4.1.0"; anything else: stop
+      ```
+      ⚠️ **cargo-build-sbf 4.4.0 builds different bytes.** It is what the
+      stable installer brings since 2026-09-22, and it turns link-time
+      optimisation off for a crate that is both `cdylib` and `lib` — this one;
+      the litesvm tests link it as a library — with only a warning ("two crate
+      types defined … precludes link-time optimizations"). On this source its
+      mainnet build hashes `622142f5…` instead of `4cb80304…`, and its
+      mainnet-v1 sunset is **140200** bytes instead of 45856, which the size
+      check below stops. Pinning `--tools-version` alone does not help; the
+      cargo-build-sbf version is part of the build.
 - [ ] Build from the pinned release commit, **each into its own directory**:
       ```bash
       T=$(mktemp -d)   # a fresh target dir: see the --tools-version note below
@@ -125,7 +141,16 @@ files. Nothing below deploys a path that a later build could overwrite.
       solana program dump LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi target/artifacts/v1-live.so --url <mainnet-rpc>
       ./scripts/assert-sbpf-v0.sh target/artifacts/v2/lazorkit_program.so target/artifacts/sunset/lazorkit_program.so target/artifacts/v1-live.so
       shasum -a 256 target/artifacts/v2/lazorkit_program.so target/artifacts/sunset/lazorkit_program.so target/artifacts/v1-live.so
+      ./scripts/check-release-hashes.sh   # an independent rebuild of all four, against scripts/release-hashes.txt
       ```
+      `check-release-hashes.sh` rebuilds mainnet, mainnet-v1, devnet and
+      devnet-v1 in its own fresh target dir with the same flags, refuses any
+      cargo-build-sbf but 4.1.0, and compares size and SHA-256 with
+      `scripts/release-hashes.txt`, which the SBF cluster check also enforces
+      on Linux in CI. The two `target/artifacts` builds above must hash the
+      same as its `mainnet` and `mainnet-v1` lines. A mismatch on a release
+      commit whose program did not change means this machine does not
+      reproduce the build: stop.
       ⚠️ **Always pass `--arch v0`.** cargo-build-sbf 4.4.0 (2026-09-22, what
       the stable installer brings) builds SBPF v3 when no `--arch` is given.
       Nothing else here would notice: the v3 sizes pass the check below
@@ -157,11 +182,18 @@ files. Nothing below deploys a path that a later build could overwrite.
       artifact over 100 KB is the wrong file; stop.
 - [ ] Record the toolchain and all three SHA-256 hashes in the deploy log.
       Builds are only trustworthy if reproducible — a second machine must
-      produce the same hashes.
-      ⚠️ **The toolchain moved after the 2026-09-11 rehearsal.** That run used
-      solana-cli 4.0.3 with platform-tools v1.53; the machine now has
-      `cargo-build-sbf` 4.2.2. Pin `--tools-version v1.53` as above, record what
-      you get, and rehearse (§3) with the files you are actually going to deploy.
+      produce the same hashes, and CI is one: the SBF cluster check installs
+      Agave v4.2.2 on Linux and holds the four builds to
+      `scripts/release-hashes.txt`.
+      ⚠️ **The toolchain moved twice since the 2026-09-11 rehearsal.** That run
+      used solana-cli 4.0.3 with platform-tools v1.53. The tables below were
+      built with solana-cli 4.2.2 (cargo-build-sbf 4.1.0) and v1.53 on
+      2026-09-28, and reproduced with the same on 2026-09-30; the stable
+      installer has since moved to cargo-build-sbf 4.4.0 (above). Build with
+      the pin, record what you get, and rehearse (§3) with the files you are
+      actually going to deploy. Moving the pin is a release decision: every
+      hash changes, so re-record `scripts/release-hashes.txt` and the tables,
+      and rehearse again.
 - [ ] **SBPF version.** These builds are SBPFv0 because of `--arch v0`, and
       `assert-sbpf-v0.sh` above has checked it. Mainnet deploys v0 today —
       SIMD-0500 ("disable deployment of SBPF v0, v1 and v2 programs",
@@ -1203,7 +1235,8 @@ handover against the v2 deploy window is free. (The sunset binary refuses
 ```
 date/operator:
 release commit:                 <sha>
-toolchain (rustc / solana):     <versions>   platform-tools: v1.53
+toolchain:                      cargo-build-sbf 4.1.0 (Agave v4.2.2)   platform-tools: v1.53   --arch v0
+check-release-hashes.sh:        <ok / output>
 v2 id:                          LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8
 v2 .so sha256 / size:           <hash> / <bytes>      (target/artifacts/v2)
 sunset .so sha256 / size:       <hash> / <bytes>      (target/artifacts/sunset, ≈ 45 KB)

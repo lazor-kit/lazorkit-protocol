@@ -13,18 +13,37 @@ name: SBF cluster feature check
 #      `compile_error!` (otherwise nothing prevents an unflagged build
 #      from silently embedding whichever ID happens to be the default).
 #
-# Every build that succeeds passes `--arch v0` and is checked to be SBPF v0
-# (scripts/assert-sbpf-v0.sh): the program deploys as v0, and the stable
-# installer's cargo-build-sbf 4.4.0 builds v3 by default, which this job
-# recorded without noticing until 2026-09-30.
+#   5. The release artifacts — mainnet, mainnet-v1, devnet, devnet-v1 —
+#      rebuilt in a fresh target dir, hash to what scripts/release-hashes.txt
+#      records (scripts/check-release-hashes.sh). A program change that moves
+#      a binary fails here until the record is updated, and a toolchain or
+#      dependency drift that moves one fails here instead of at deploy time.
 #
-# Runs on every PR touching the program / assertions crate or this workflow.
+# The toolchain is pinned (scripts/sbf-toolchain.sh: Agave v4.2.2, whose
+# cargo-build-sbf is 4.1.0, and platform-tools v1.53), not the stable
+# installer: the stable installer's cargo-build-sbf 4.4.0 (2026-09-22) turns
+# LTO off for this crate, so its builds stopped matching the release hashes
+# (mainnet 622142f5… instead of 4cb80304…, a 140200-byte sunset instead of
+# 45856), and builds SBPF v3 unless told `--arch v0`.
+#
+# Every build that succeeds passes `--arch v0` and is checked to be SBPF v0
+# (scripts/assert-sbpf-v0.sh): the program deploys as v0.
+#
+# Runs on every PR touching the program, its crates, the lockfile, the
+# toolchain pin or the hash record, and on this workflow.
 
 on:
   pull_request:
     paths:
       - 'program/**'
       - 'assertions/**'
+      - 'no-padding/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/sbf-toolchain.sh'
+      - 'scripts/release-hashes.txt'
+      - 'scripts/check-release-hashes.sh'
+      - 'scripts/assert-sbpf-v0.sh'
       - '.github/workflows/sbf-cluster-check.yml'
   push:
     branches: [main, develop]
@@ -36,15 +55,29 @@ permissions:
 jobs:
   cluster-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Solana toolchain
+      - name: Read the toolchain pin
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          . scripts/sbf-toolchain.sh
+          echo "SBF_AGAVE_RELEASE=$SBF_AGAVE_RELEASE" >> "$GITHUB_ENV"
+          echo "SBF_PLATFORM_TOOLS_VERSION=$SBF_PLATFORM_TOOLS_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install Solana toolchain (pinned)
+        run: |
+          sh -c "$(curl -sSfL "https://release.anza.xyz/$SBF_AGAVE_RELEASE/install")"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
+      - name: Check cargo-build-sbf is the pinned version
+        run: |
+          cargo-build-sbf --version
+          . scripts/sbf-toolchain.sh
+          sbf_toolchain_check strict
+
+      # Keyed on the toolchain too: `--tools-version` does not invalidate
+      # cargo's cache, so objects from another toolchain would be reused.
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
@@ -52,11 +85,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: sbf-${{ hashFiles('**/Cargo.lock') }}
+          key: sbf-${{ env.SBF_AGAVE_RELEASE }}-${{ env.SBF_PLATFORM_TOOLS_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build mainnet binary
         working-directory: program
-        run: cargo build-sbf --features mainnet --arch v0
+        run: cargo build-sbf --features mainnet --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0
 
       - name: Record mainnet hash
         id: mainnet
@@ -68,7 +101,7 @@ jobs:
 
       - name: Build devnet binary
         working-directory: program
-        run: cargo build-sbf --features devnet --arch v0
+        run: cargo build-sbf --features devnet --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0
 
       - name: Record devnet hash
         id: devnet
@@ -80,7 +113,7 @@ jobs:
 
       - name: Build sunset binary (mainnet-v1)
         working-directory: program
-        run: cargo build-sbf --features mainnet-v1 --arch v0
+        run: cargo build-sbf --features mainnet-v1 --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0
 
       - name: Record sunset hash
         id: sunset
@@ -99,8 +132,8 @@ jobs:
         working-directory: program
         run: |
           set -euo pipefail
-          cargo build-sbf --features rehearsal --arch v0 --sbf-out-dir /tmp/sbf-rehearsal
-          cargo build-sbf --features rehearsal-v1 --arch v0 --sbf-out-dir /tmp/sbf-rehearsal-v1
+          cargo build-sbf --features rehearsal --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 --sbf-out-dir /tmp/sbf-rehearsal
+          cargo build-sbf --features rehearsal-v1 --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 --sbf-out-dir /tmp/sbf-rehearsal-v1
           ../scripts/assert-sbpf-v0.sh /tmp/sbf-rehearsal/lazorkit_program.so /tmp/sbf-rehearsal-v1/lazorkit_program.so
           shasum -a 256 /tmp/sbf-rehearsal/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal.sha
           shasum -a 256 /tmp/sbf-rehearsal-v1/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal-v1.sha
@@ -135,7 +168,7 @@ jobs:
           # also work, but capturing to a file gives us the log to search
           # afterwards regardless of pipeline state.
           set +e
-          cargo build-sbf > /tmp/build.log 2>&1
+          cargo build-sbf --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 > /tmp/build.log 2>&1
           BUILD_EXIT=$?
           set -e
           cat /tmp/build.log
@@ -155,7 +188,7 @@ jobs:
         working-directory: program
         run: |
           set +e
-          cargo build-sbf --features mainnet --features devnet > /tmp/build-both.log 2>&1
+          cargo build-sbf --features mainnet --features devnet --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 > /tmp/build-both.log 2>&1
           BUILD_EXIT=$?
           set -e
           cat /tmp/build-both.log
@@ -169,3 +202,9 @@ jobs:
             exit 1
           fi
           echo "✓ both-features build correctly rejected"
+
+      # Last, so the checks above report even when this one fails. Its own
+      # fresh target dir (the script makes one): nothing from the cache above
+      # can leak into the artifacts it hashes.
+      - name: Release artifacts match scripts/release-hashes.txt
+        run: ./scripts/check-release-hashes.sh mainnet mainnet-v1 devnet devnet-v1
