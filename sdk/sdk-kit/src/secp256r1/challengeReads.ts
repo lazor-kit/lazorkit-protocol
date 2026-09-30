@@ -26,7 +26,11 @@ import {
  * repaired: it commits to the counter, so only a new passkey prompt helps.
  */
 export interface ChallengeReadOptions {
-  /** Commitment for the reads. Default `'confirmed'`. */
+  /**
+   * Commitment for the reads. Default `'confirmed'`, whatever the RPC's own
+   * default. A caller that confirms the previous transaction only at
+   * `'processed'` reads at `'processed'` too.
+   */
   commitment?: Commitment;
   /**
    * Answer only from a node at or past this slot: pass the slot the

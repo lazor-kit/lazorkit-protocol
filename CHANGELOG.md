@@ -70,10 +70,11 @@ fails in the relayer's simulation, or on chain after the sponsor paid the fee.
 
 - Every read a passkey challenge is built from — the authority's counter, its
   key and the slot — now takes `{ commitment, minContextSlot }`, default
-  `commitment: 'confirmed'` whatever the Connection's own. Pass the slot the
-  authority's previous transaction landed in (`getSignatureStatuses` → `slot`,
-  once confirmed) as `minContextSlot`, and the reads come from a node that has
-  executed it. Where: `Secp256r1Params` (every `prepare*`: `prepareExecute`,
+  `commitment: 'confirmed'` (in sdk-legacy `'processed'` on a Connection at
+  `'processed'`: never staler than the Connection). Pass the slot the
+  authority's previous transaction landed in, or any later slot a node that
+  confirmed it reports (`confirmTransaction` → `context.slot`), as
+  `minContextSlot`, and the reads come from a node that has executed it. Where: `Secp256r1Params` (every `prepare*`: `prepareExecute`,
   `prepareAuthorize`, `prepareAddAuthority`, `prepareRemoveAuthority`,
   `prepareTransferOwnership`, `prepareCreateSession`, `prepareRevokeSession`),
   `Secp256r1SignerConfig` and the `secp256r1(signer, opts)` helper (every
@@ -92,22 +93,35 @@ fails in the relayer's simulation, or on chain after the sponsor paid the fee.
   web3.js `getAccountInfo` rethrows RPC errors without their code. A stubbed
   Connection must provide it.
 - Behaviour change without the new options: sdk-legacy's challenge reads are
-  at `confirmed`, not the Connection's commitment (the kit SDK asks for
-  `confirmed` explicitly now, which `createSolanaRpc` already defaulted to). A
-  counter read after a *confirmed* send is then current; a send that is only
-  accepted still needs the floor: the wallet has to wait for tx1 to confirm
-  and pass its slot, or have its paymaster confirm before answering.
+  at `confirmed` on a Connection built without a commitment (which read at
+  `finalized`) or at `finalized`; a Connection at `processed` or `confirmed`
+  reads where it did in 1.2.0. (The kit SDK asks for `confirmed` explicitly
+  now, which `createSolanaRpc` already defaulted to.) A counter read after a
+  send confirmed on the same node is then current; a send that is only
+  accepted, or confirmed by another node behind a load-balanced RPC, still
+  needs the floor: the wallet has to wait for tx1 to confirm and pass its
+  slot, or have its paymaster confirm before answering. With the kit SDK, a
+  caller that confirms at `processed` passes `commitment: 'processed'` too.
 - The program is unchanged: 3006 is the replay protection working, and
   predicting counter + 2 would be wrong whenever tx1 fails or is dropped.
+- README (sdk-legacy): a 3006 is not always LazorKit's. A program `Execute`
+  calls can fail with the same custom code (Anchor's `AccountNotMutable` is
+  3006), and `extractErrorCode` / `errorFromCode` read only the number; the
+  first `Program <id> failed` log line names the program that raised it.
 - Tests: unit tests in both packages (tests-sdk `18-counter-read-unit` and the
   migration case in `16-v1-migration-unit`; sdk-kit `counter-read`) that each
-  method passes the options to all three reads, the default, -32016 retried
-  then answered, retries exhausted, and that nothing else is retried. On a
-  local validator in both suites (`19-back-to-back`, kit `18-back-to-back`):
-  tx1 sent without waiting, then confirmed, and tx2 prepared at its landing
-  slot signs the next counter and lands; a floor a few slots ahead is waited
-  for (the node's real -32016 is recognised); one it never reaches ends in
-  `MinContextSlotNotReachedError`.
+  method passes the options to all three reads, the default (per Connection
+  commitment in sdk-legacy), -32016 retried then answered, retries exhausted,
+  and that nothing else is retried. On a local validator in both suites
+  (`19-back-to-back`, kit `18-back-to-back`), with tx1 confirmed at
+  `processed` only so that `confirmed` reads lag it the way a node behind a
+  load balancer does: without a floor tx2 signs the spent counter and fails
+  with 3006 (the negative control); floored at tx1's slot it lands, three
+  pairs in a row, where the SDK before this change fails. Also: a floor a few
+  slots ahead is waited for (the node's real -32016 is recognised), one it
+  never reaches ends in `MinContextSlotNotReachedError`, and, on a
+  sdk-legacy Connection at `processed`, tx2 prepared with no options right
+  after tx1 confirms there lands and a wallet just created is found.
 
 ### Fixed — size and capacity figures in the docs, and the litesvm CI job
 

@@ -23,6 +23,7 @@ import {
   setTransactionMessageLifetimeUsingBlockhash,
   signTransactionMessageWithSigners,
   type Address,
+  type Commitment,
   type Instruction,
   type KeyPairSigner,
   type SolanaRpcSubscriptionsApi,
@@ -275,6 +276,8 @@ export async function sendTx(
   signers: TransactionSigner[] = [],
   /** Pays the transaction fee: `ctx.payer` unless a test needs another key to. */
   feePayer: TransactionSigner = ctx.payer,
+  /** Waits for this commitment (and preflights at it). */
+  commitment: Commitment = 'confirmed',
 ): Promise<string> {
   const { value: latestBlockhash } = await ctx.rpc.getLatestBlockhash().send();
 
@@ -299,7 +302,7 @@ export async function sendTx(
   const signature = getSignatureFromTransaction(signed);
   // `sendAndConfirm`'s factory accepts blockhash-lifetime txs only; our
   // builder always sets a blockhash lifetime above so the cast is safe.
-  await ctx.sendAndConfirm(signed as never, { commitment: 'confirmed' });
+  await ctx.sendAndConfirm(signed as never, { commitment });
   return signature;
 }
 

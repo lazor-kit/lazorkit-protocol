@@ -62,6 +62,11 @@ export const ERROR_NAMES: Record<number, string> = {
 
 /**
  * Look up error name from code.
+ *
+ * The code alone does not say which program raised it: a program that
+ * `Execute` calls can fail with the same custom code (Anchor's account errors
+ * use 3000–3017, so its `AccountNotMutable` is 3006 too). The first
+ * `Program <id> failed: custom program error` log line names the program.
  */
 export function errorFromCode(code: number): string | undefined {
   return ERROR_NAMES[code];
@@ -69,7 +74,8 @@ export function errorFromCode(code: number): string | undefined {
 
 /**
  * Extracts the custom program error code from a Solana SendTransactionError.
- * Returns null if the error is not a custom program error.
+ * Returns null if the error is not a custom program error. Whichever program
+ * raised it: see {@link errorFromCode}.
  */
 export function extractErrorCode(err: unknown): number | null {
   const msg = String(err);

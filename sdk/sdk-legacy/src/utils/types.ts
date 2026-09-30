@@ -193,7 +193,8 @@ export interface Secp256r1Params {
    * Read the authority's counter, its key and the slot from a node that has
    * processed at least this slot. Pass the slot the authority's previous
    * transaction landed in (`getSignatureStatuses(...).value[0].slot`, once it
-   * is confirmed) when this challenge follows it: a read made before a node has
+   * is confirmed; `confirmTransaction(...).context.slot` is at or after it and
+   * does as well) when this challenge follows it: a read made before a node has
    * executed that transaction returns the counter it is about to use, and the
    * signature fails on chain with SignatureReused (3006). The signature commits
    * to the counter, so this cannot be repaired after the user has signed.
@@ -204,9 +205,10 @@ export interface Secp256r1Params {
    */
   minContextSlot?: number;
   /**
-   * Commitment for those reads. Default `'confirmed'`, whatever the
-   * Connection's own default: a Connection built without one reads at
-   * `finalized`, seconds behind the transaction it just sent.
+   * Commitment for those reads. Default `'confirmed'`, or `'processed'` when
+   * the Connection's own commitment is `'processed'`: never staler than the
+   * Connection. (A Connection built without one would read at `finalized`,
+   * seconds behind the transaction it just sent.)
    */
   commitment?: Commitment;
 }

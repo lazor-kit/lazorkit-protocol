@@ -521,11 +521,15 @@ const { instructions: execIxs } = client.finalizeExecute(prepared, {
 
 #### Two passkey transactions in a row
 
-The challenge signs the authority's counter + 1, read in step 1. If the previous transaction from the same authority has been sent but not yet executed by the node you read from, that read returns the counter it is about to use, and the new signature fails with `SignatureReused` (3006) — after the user has approved it, and nothing can repair it. So wait for the previous transaction to confirm, and pass the slot it landed in:
+The challenge signs the authority's counter + 1, read in step 1. If the previous transaction from the same authority has been sent but not yet executed by the node you read from, that read returns the counter it is about to use, and the new signature fails with `SignatureReused` (3006) — after the user has approved it, and nothing can repair it. So wait for the previous transaction to confirm, and pass a slot at or after the one it landed in:
 
 ```typescript
-await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
-const { value: [status] } = await connection.getSignatureStatuses([signature]);
+// The context slot of the confirmation is at or after the slot tx1 landed in.
+const { context, value } = await connection.confirmTransaction(
+  { signature, blockhash, lastValidBlockHeight },
+  'confirmed',
+);
+if (value.err) throw new Error(`previous transaction failed: ${JSON.stringify(value.err)}`);
 
 const prepared = await client.prepareExecute({
   payer: payer.publicKey,
@@ -533,14 +537,16 @@ const prepared = await client.prepareExecute({
   secp256r1: {
     credentialIdHash,
     authorityPda: wallet.authorityPda,
-    minContextSlot: status!.slot, // read from a node that has executed it
-    // commitment: 'confirmed',   // the default, whatever the Connection's
+    minContextSlot: context.slot, // read from a node that has executed tx1
+    // commitment: 'confirmed',   // the default ('processed' on a 'processed' Connection)
   },
   instructions,
 });
 ```
 
-The same two options go on a signer config for the one-shot methods (`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet`, and on `readCounter`. They apply to all three reads a challenge is built from: the counter, the key and the slot. A node that has not reached `minContextSlot` answers -32016; the SDK retries with a short backoff for up to 10 s, then throws `MinContextSlotNotReachedError`. Without `minContextSlot` the reads are at `confirmed`, which is enough only once the previous transaction is confirmed.
+The same two options go on a signer config for the one-shot methods (`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet`, and on `readCounter`. They apply to all three reads a challenge is built from: the counter, the key and the slot. A node that has not reached `minContextSlot` answers -32016; the SDK retries with a short backoff for up to 10 s, then throws `MinContextSlotNotReachedError`.
+
+Without `minContextSlot` the reads are at `confirmed`, or at `processed` when the Connection itself is at `processed` (never staler than the Connection, as in 1.2.0). That is enough only when the node that answers the reads has itself executed the previous transaction. Behind a load-balanced RPC endpoint the confirmation and the next reads can reach different nodes, and the one that answers may still be behind: pass the floor even after confirming.
 
 Helper for wrapping the `navigator.credentials.get` → `WebAuthnResponse` conversion once:
 
@@ -877,7 +883,7 @@ An authority that carries a policy itself may not add authorities at all.
 | 3001 | InvalidAuthorityPayload |
 | 3002 | PermissionDenied |
 | 3005 | InvalidMessageHash |
-| 3006 | SignatureReused (counter mismatch — often a challenge read before the previous transaction executed; see [Two passkey transactions in a row](#two-passkey-transactions-in-a-row)) |
+| 3006 | SignatureReused (counter mismatch — often a challenge read before the previous transaction executed; see [Two passkey transactions in a row](#two-passkey-transactions-in-a-row)). Not always LazorKit's: see the note below the table |
 | 3007 | InvalidSignatureAge |
 | 3008 | InvalidSessionDuration |
 | 3009 | SessionExpired |
@@ -890,6 +896,8 @@ An authority that carries a policy itself may not add authorities at all.
 | 3031 | SessionVaultDataLenChanged (H1 fix) |
 | 3032 | SessionTokenAuthorityChanged (H1 fix) |
 | 4001–4007 | Protocol fee errors |
+
+A program that `Execute` calls can fail with the same custom code, and the transaction then fails with it too: Anchor's account errors use 3000–3017, so an inner Anchor program's `AccountNotMutable` is also `Custom(3006)`. `extractErrorCode` and `errorFromCode` read only the number. The transaction logs name the program: the first `Program <id> failed: custom program error: 0x…` line is the one that raised it, and only when that id is the LazorKit program is the code one of the above. A landed failure (`{"InstructionError":[i,{"Custom":3006}]}`) carries no program; read its logs with `getTransaction`.
 
 See [`docs/Architecture.md`](../../docs/Architecture.md) for the full security model and account layouts.
 
