@@ -5,7 +5,9 @@
 #
 #   ./scripts/check-release-hashes.sh                     # mainnet mainnet-v1 devnet devnet-v1
 #   ./scripts/check-release-hashes.sh mainnet devnet      # some of them
-#   OUT=/some/dir ./scripts/check-release-hashes.sh       # keep the .so files, OUT/<feature>/
+#   OUT=target/artifacts ./scripts/check-release-hashes.sh mainnet
+#                                                         # keep the .so files, OUT/<feature>/
+#                                                         # (a relative OUT is from the current dir)
 #
 # Every build runs as docs/mainnet-deploy-checklist.md §2 has it: the pinned
 # toolchain (scripts/sbf-toolchain.sh; refused if cargo-build-sbf is another
@@ -55,6 +57,8 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 out="${OUT:-$work/out}"
 mkdir -p "$out"
+# Absolute: the builds run in program/, the checks from here.
+out="$(cd "$out" && pwd)"
 
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then

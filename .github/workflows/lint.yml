@@ -34,6 +34,9 @@ jobs:
       - name: Kora configs match the two-id rollout
         run: node scripts/kora-config-lint.cjs
 
+      - name: Deploy commands in the docs deploy a built artifact
+        run: node scripts/deploy-docs-lint.cjs
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 

@@ -157,11 +157,21 @@ shank idl -o . --out-filename idl.json -p "$PROGRAM_ID"
 
 ### G. Deploy to Devnet
 
+Deploy the file the build just wrote, from a fresh target dir, never
+`target/deploy/`: with `CARGO_TARGET_DIR` set (a `cargo` wrapper, CI) a bare
+`cargo build-sbf` writes elsewhere and leaves `target/deploy/` stale.
+
 ```bash
-cargo build-sbf --features devnet --tools-version v1.53 --arch v0
-./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
-solana program deploy target/deploy/lazorkit_program.so -u d
+( cd program && rm -rf ../target/artifacts/devnet &&
+  CARGO_TARGET_DIR=$(mktemp -d) command cargo build-sbf --features devnet --tools-version v1.53 --arch v0 --sbf-out-dir ../target/artifacts/devnet )
+./scripts/assert-sbpf-v0.sh target/artifacts/devnet/lazorkit_program.so
+solana program deploy target/artifacts/devnet/lazorkit_program.so \
+  --program-id 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv --upgrade-authority <devnet-upgrade-authority.json> -u d
 ```
+
+To deploy the recorded devnet artifact itself, build it with
+`OUT=target/artifacts ./scripts/check-release-hashes.sh devnet` instead: same
+path, and it only exits 0 when the file matches `scripts/release-hashes.txt`.
 
 ## Continuous Integration
 
