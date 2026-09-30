@@ -11,16 +11,13 @@
 # toolchain (scripts/sbf-toolchain.sh; refused if cargo-build-sbf is another
 # version), `--tools-version`, `--arch v0`, and one fresh CARGO_TARGET_DIR for
 # this run, so no object compiled by another toolchain is reused
-# (`--tools-version` does not invalidate cargo's cache). Each binary is checked
-# to be SBPF v0, then against the record.
-#
-# The record is for macOS on Apple silicon ($SBF_RELEASE_HOST in
-# sbf-toolchain.sh): platform-tools' std embeds the paths it was built under,
-# and its Linux package builds other bytes. On another host the script refuses
-# to run; SBF_ANY_HOST=1 builds and compares anyway (expect a mismatch).
+# (`--tools-version` does not invalidate cargo's cache), with GITHUB_SHA and
+# GITHUB_REF_NAME unset: security.txt compiles them in, and the recorded
+# artifacts have them empty (CI sets both). Each binary is checked to be
+# SBPF v0, then against the record.
 #
 # Exit status: 0 all match, 1 a mismatch or a failed build, 2 usage,
-# 3 not the pinned cargo-build-sbf, or not the release host.
+# 3 not the pinned cargo-build-sbf.
 
 set -euo pipefail
 
@@ -41,12 +38,6 @@ for f in "${features[@]}"; do
 done
 
 sbf_toolchain_check strict || exit 3
-if [ "$(sbf_host)" != "$SBF_RELEASE_HOST" ] && [ "${SBF_ANY_HOST:-}" != 1 ]; then
-  echo "error: the recorded hashes are for $SBF_RELEASE_HOST builds; this host is $(sbf_host)." >&2
-  echo "       platform-tools $SBF_PLATFORM_TOOLS_VERSION is a separate build per host and its std embeds" >&2
-  echo "       the paths it was built under, so this host builds other bytes. SBF_ANY_HOST=1 compares anyway." >&2
-  exit 3
-fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -62,6 +53,7 @@ sha256() {
 }
 
 echo "toolchain: $(cargo-build-sbf --version | head -1), platform-tools $SBF_PLATFORM_TOOLS_VERSION, --arch v0, on $(sbf_host)"
+echo "env:       $SBF_EMBEDDED_ENV unset for the builds (security.txt embeds them)"
 echo "commit:    $(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)"
 
 status=0
@@ -71,7 +63,7 @@ for f in "${features[@]}"; do
   mkdir -p "$dir"
   echo "== $f"
   if ! (cd "$root/program" &&
-        CARGO_TARGET_DIR="$work/target" command cargo build-sbf \
+        CARGO_TARGET_DIR="$work/target" sbf_release_env cargo build-sbf \
           --features "$f" \
           --tools-version "$SBF_PLATFORM_TOOLS_VERSION" \
           --arch v0 \
@@ -95,9 +87,11 @@ for f in "${features[@]}"; do
   else
     echo "FAIL $f  built $bytes $sha" >&2
     echo "          recorded $want_bytes $want_sha" >&2
-    # Build paths compiled in (panic locations) are the usual host-specific bytes.
+    # What the build environment put in: security.txt's source fields (empty
+    # in the record) and any absolute build path (panic locations).
     if command -v strings >/dev/null 2>&1; then
-      echo "     absolute paths in the binary:" >&2
+      echo "     source_revision / source_release, then absolute paths, in the binary:" >&2
+      strings -n 1 "$so" | grep -A1 -E '^source_(revision|release)$' | sed 's/^/       /' >&2 || true
       strings -n 8 "$so" | grep '^/' | sed 's/^/       /' >&2 || true
     fi
     status=1

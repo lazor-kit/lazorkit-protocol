@@ -129,10 +129,15 @@ files. Nothing below deploys a path that a later build could overwrite.
       optimisation off for a crate that is both `cdylib` and `lib` — this one;
       the litesvm tests link it as a library — with only a warning ("two crate
       types defined … precludes link-time optimizations"). On this source its
-      mainnet build hashes `622142f5…` instead of `4cb80304…`, and its
       mainnet-v1 sunset is **140200** bytes instead of 45856, which the size
-      check below stops. Pinning `--tools-version` alone does not help; the
-      cargo-build-sbf version is part of the build.
+      check below stops, and no artifact hashes as recorded. Pinning
+      `--tools-version` alone does not help; the cargo-build-sbf version is
+      part of the build.
+      ⚠️ **`GITHUB_SHA` and `GITHUB_REF_NAME` must be unset.** The program's
+      `security_txt!` compiles them in (`source_revision`, `source_release`),
+      and the recorded artifacts have both empty. They are unset in a normal
+      shell; GitHub Actions sets both, and a build there is 48 bytes larger
+      with other hashes. `check-release-hashes.sh` unsets them itself.
 - [ ] Build from the pinned release commit, **each into its own directory**:
       ```bash
       T=$(mktemp -d)   # a fresh target dir: see the --tools-version note below
@@ -147,7 +152,7 @@ files. Nothing below deploys a path that a later build could overwrite.
       devnet-v1 in its own fresh target dir with the same flags, refuses any
       cargo-build-sbf but 4.1.0, and compares size and SHA-256 with
       `scripts/release-hashes.txt`, which the SBF cluster check also enforces
-      on Linux in CI. The two `target/artifacts` builds above must hash the
+      in CI, on ubuntu and on macOS. The two `target/artifacts` builds above must hash the
       same as its `mainnet` and `mainnet-v1` lines. A mismatch on a release
       commit whose program did not change means this machine does not
       reproduce the build: stop.
@@ -182,9 +187,9 @@ files. Nothing below deploys a path that a later build could overwrite.
       artifact over 100 KB is the wrong file; stop.
 - [ ] Record the toolchain and all three SHA-256 hashes in the deploy log.
       Builds are only trustworthy if reproducible — a second machine must
-      produce the same hashes, and CI is one: the SBF cluster check installs
-      Agave v4.2.2 on Linux and holds the four builds to
-      `scripts/release-hashes.txt`.
+      produce the same hashes, and CI is two: the SBF cluster check installs
+      Agave v4.2.2 on an ubuntu and a macOS runner and holds the four builds
+      to `scripts/release-hashes.txt` on each.
       ⚠️ **The toolchain moved twice since the 2026-09-11 rehearsal.** That run
       used solana-cli 4.0.3 with platform-tools v1.53. The tables below were
       built with solana-cli 4.2.2 (cargo-build-sbf 4.1.0) and v1.53 on
