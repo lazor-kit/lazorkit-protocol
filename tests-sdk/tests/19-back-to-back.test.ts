@@ -15,8 +15,10 @@
  * the floor fails that case). Also pinned against a real node: a floor it has
  * not reached yet is waited for (-32016 comes back with its code through
  * web3.js), one it never reaches ends in MinContextSlotNotReachedError, not in
- * a stale read, and a Connection at `processed` keeps reading there by default
- * (1.2.0 read at the Connection's commitment).
+ * a stale read, a floor read at `finalized` waits for that slot to finalize
+ * (about 32 slots after it was confirmed, longer than the 10 s the other
+ * commitments wait), and a Connection at `processed` keeps reading there by
+ * default (1.2.0 read at the Connection's commitment).
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import {
@@ -89,7 +91,7 @@ describe('back-to-back passkey transactions', () => {
    * and relayer did; preflight runs at the Connection's commitment.
    */
   async function payOut(
-    floor?: { minContextSlot?: number; commitment?: 'processed' | 'confirmed' },
+    floor?: { minContextSlot?: number; commitment?: 'processed' | 'confirmed' | 'finalized' },
     lk: LazorKitClient = client,
     connection: Connection = ctx.connection,
   ): Promise<Sent> {
@@ -174,6 +176,30 @@ describe('back-to-back passkey transactions', () => {
       reads.mockRestore();
     }
   });
+
+  // What the README tells a caller to pass (the slot tx1 landed in, once it
+  // is confirmed), with the reads at 'finalized': that slot is finalized about
+  // 32 slots later. The reads used to give up after 10 s, always, with an
+  // error that blamed the RPC endpoint.
+  it("at 'finalized', floored at a just-confirmed tx1, tx2 waits for finalization and lands", async () => {
+    const before = await client.readCounter(authorityPda);
+    const tx1 = await payOut();
+    expect((await ctx.connection.confirmTransaction(tx1, 'confirmed')).value.err).toBeNull();
+    const {
+      value: [status1],
+    } = await ctx.connection.getSignatureStatuses([tx1.signature]);
+    const landed = status1!.slot;
+    // Not finalized yet: the reads have to wait for it.
+    expect(await ctx.connection.getSlot('finalized')).toBeLessThan(landed);
+
+    const started = Date.now();
+    const err2 = await outcome(() => payOut({ minContextSlot: landed, commitment: 'finalized' }));
+    expect(err2).toBeNull();
+    // It waited for the node's finalized bank, not for 10 s and an error.
+    expect(await ctx.connection.getSlot('finalized')).toBeGreaterThanOrEqual(landed);
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(await client.readCounter(authorityPda)).toBe(before + 2);
+  }, 60_000);
 
   it('gives up with MinContextSlotNotReachedError on a floor the node never reaches', async () => {
     const floor = (await ctx.connection.getSlot('confirmed')) + 1_000_000;

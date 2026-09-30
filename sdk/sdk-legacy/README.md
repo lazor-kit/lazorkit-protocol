@@ -544,9 +544,35 @@ const prepared = await client.prepareExecute({
 });
 ```
 
-The same two options go on a signer config for the one-shot methods (`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet`, and on `readCounter`. They apply to all three reads a challenge is built from: the counter, the key and the slot. A node that has not reached `minContextSlot` answers -32016; the SDK retries with a short backoff for up to 10 s, then throws `MinContextSlotNotReachedError`.
+The same two options go on a signer config for the one-shot methods (`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet`, and on `readCounter`. They apply to all three reads a challenge is built from: the counter, the key and the slot. A node that has not reached `minContextSlot` answers -32016; the SDK retries with a short backoff for up to 10 s, then throws `MinContextSlotNotReachedError` (its `commitment` says which bank was behind). If one of the three reads fails for another reason, the call rejects with that error at once and the other two stop retrying.
+
+With `commitment: 'finalized'`, `minContextSlot` is a slot the node must have *finalized*, which happens about 32 slots (13 s on mainnet) after it was confirmed. The reads then wait up to 30 s, so a floor at a just-confirmed tx1 costs that much before the passkey prompt. Unless you need finalized reads, keep the default: `confirmed` with the floor is enough to sign the right counter.
 
 Without `minContextSlot` the reads are at `confirmed`, or at `processed` when the Connection itself is at `processed` (never staler than the Connection, as in 1.2.0). That is enough only when the node that answers the reads has itself executed the previous transaction. Behind a load-balanced RPC endpoint the confirmation and the next reads can reach different nodes, and the one that answers may still be behind: pass the floor even after confirming.
+
+**One passkey flow per authority at a time.** Two flows for the same authority that overlap — two `prepare*` calls before the first transaction lands, two tabs or devices with one passkey, an app and a wallet — read the same counter and both sign counter + 1. Whichever lands second fails with 3006, and no floor helps: neither has landed when the other reads. Run prepare → sign → send → confirm for one authority one after another, each floored at the previous one's slot. The SDK keeps no per-authority state and does not queue for you; within one app a queue of your own is enough:
+
+```typescript
+// Your app's, not the SDK's: flows for one authority run one after another.
+const tails = new Map<string, Promise<void>>();
+
+async function oneAtATime<T>(authority: PublicKey, flow: () => Promise<T>): Promise<T> {
+  const key = authority.toBase58();
+  const run = (tails.get(key) ?? Promise.resolve()).then(flow);
+  const tail = run.then(() => undefined, () => undefined);
+  tails.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (tails.get(key) === tail) tails.delete(key);
+  }
+}
+
+// flow = prepare (floored at the last slot) → passkey prompt → send → confirm
+await oneAtATime(wallet.authorityPda, () => payWithPasskey(invoice));
+```
+
+Across tabs, devices or apps that share a passkey no local queue helps; a 3006 there means another flow used the counter first, and the fix is to prepare again (a new prompt), floored at a slot that includes it.
 
 Helper for wrapping the `navigator.credentials.get` → `WebAuthnResponse` conversion once:
 
@@ -897,7 +923,7 @@ An authority that carries a policy itself may not add authorities at all.
 | 3032 | SessionTokenAuthorityChanged (H1 fix) |
 | 4001–4007 | Protocol fee errors |
 
-A program that `Execute` calls can fail with the same custom code, and the transaction then fails with it too: Anchor's account errors use 3000–3017, so an inner Anchor program's `AccountNotMutable` is also `Custom(3006)`. `extractErrorCode` and `errorFromCode` read only the number. The transaction logs name the program: the first `Program <id> failed: custom program error: 0x…` line is the one that raised it, and only when that id is the LazorKit program is the code one of the above. A landed failure (`{"InstructionError":[i,{"Custom":3006}]}`) carries no program; read its logs with `getTransaction`.
+A program that `Execute` calls can fail with the same custom code, and the transaction then fails with it too: Anchor's account errors use 3000–3017, so an inner Anchor program's `AccountNotMutable` is also `Custom(3006)`. `extractErrorCode` and `errorFromCode` read only the number. The transaction logs name the program: the first `Program <id> failed: custom program error: 0x…` line is the one that raised it, and only when that id is the LazorKit program is the code one of the above. A landed failure (`{"InstructionError":[i,{"Custom":3006}]}` from `confirmTransaction` or `getSignatureStatuses`) names only the top-level instruction — the LazorKit one, whichever program inside it failed — so it cannot be attributed without its logs: read them with `getTransaction(signature)` → `meta.logMessages` before telling the user to sign again. `extractErrorCode` returns `null` for that object (it reads error text only).
 
 See [`docs/Architecture.md`](../../docs/Architecture.md) for the full security model and account layouts.
 

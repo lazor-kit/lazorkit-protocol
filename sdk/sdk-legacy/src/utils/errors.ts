@@ -1,6 +1,7 @@
 /**
  * Error code map for LazorKit program errors.
  */
+import type { Commitment } from '@solana/web3.js';
 
 /** Map of error code → human-readable name */
 export const ERROR_NAMES: Record<number, string> = {
@@ -67,6 +68,11 @@ export const ERROR_NAMES: Record<number, string> = {
  * `Execute` calls can fail with the same custom code (Anchor's account errors
  * use 3000–3017, so its `AccountNotMutable` is 3006 too). The first
  * `Program <id> failed: custom program error` log line names the program.
+ * A landed failure, `{ InstructionError: [i, { Custom: N }] }` from
+ * `confirmTransaction` or `getSignatureStatuses`, names only the top-level
+ * instruction — the LazorKit one, whichever program inside it failed — so it
+ * cannot be attributed without the logs (`getTransaction(signature)` →
+ * `meta.logMessages`). Without them, do not report it as this name.
  */
 export function errorFromCode(code: number): string | undefined {
   return ERROR_NAMES[code];
@@ -76,6 +82,12 @@ export function errorFromCode(code: number): string | undefined {
  * Extracts the custom program error code from a Solana SendTransactionError.
  * Returns null if the error is not a custom program error. Whichever program
  * raised it: see {@link errorFromCode}.
+ *
+ * It reads the error's text only: `custom program error: 0x…` (a preflight
+ * failure) or `Custom(N)`. A landed `TransactionError` object such as
+ * `{ InstructionError: [1, { Custom: 3006 }] }` gives null, and its
+ * `JSON.stringify` form (`"Custom":3006`) does not match either; that error
+ * carries no program id anyway (see {@link errorFromCode}).
  */
 export function extractErrorCode(err: unknown): number | null {
   const msg = String(err);
@@ -95,24 +107,47 @@ export function extractErrorCode(err: unknown): number | null {
  * be spent — the program rejects such a signature with SignatureReused (3006),
  * and the signature commits to the counter, so nothing can repair it after the
  * user has approved. Retry, or read from a node that has caught up.
+ *
+ * At `'finalized'` the floor is the slot being finalized, which happens about
+ * 32 slots (13 s) after it is confirmed; the read waits up to 30 s for that
+ * (10 s at the other commitments), and the message says so.
  */
 export class MinContextSlotNotReachedError extends Error {
   /** The slot the read had to be answered at or after. */
   readonly minContextSlot: number;
   /** How long the reads were retried, in milliseconds. */
   readonly waitedMs: number;
+  /** The commitment the read was made at, when known. */
+  readonly commitment?: Commitment;
 
-  constructor(params: { minContextSlot: number; waitedMs: number; what: string; cause?: unknown }) {
+  constructor(params: {
+    minContextSlot: number;
+    waitedMs: number;
+    what: string;
+    commitment?: Commitment;
+    cause?: unknown;
+  }) {
+    const { minContextSlot, waitedMs, what, commitment } = params;
+    const finalized = commitment === 'finalized' || commitment === 'max' || commitment === 'root';
     super(
-      `RPC node has not reached slot ${params.minContextSlot} after ${params.waitedMs} ms ` +
-        `(reading ${params.what} for a passkey challenge). The authority's previous ` +
-        `transaction may not be visible there yet, and a challenge over the counter it ` +
-        `holds would fail with SignatureReused (3006). Retry, or use an RPC endpoint that ` +
-        `has caught up.`,
+      finalized
+        ? `Slot ${minContextSlot} is not finalized on the RPC node after ${waitedMs} ms ` +
+            `(reading ${what} for a passkey challenge at 'finalized'). A slot is finalized ` +
+            `about 32 slots (13 s) after it is confirmed. Wait for the previous transaction ` +
+            `to be finalized before preparing, or read at 'confirmed' (the default) with the ` +
+            `same minContextSlot. Reading older state instead would sign a counter that ` +
+            `transaction may have spent: SignatureReused (3006).`
+        : `RPC node has not reached slot ${minContextSlot}` +
+            `${commitment ? ` at '${commitment}'` : ''} after ${waitedMs} ms ` +
+            `(reading ${what} for a passkey challenge). The authority's previous ` +
+            `transaction may not be visible there yet, and a challenge over the counter it ` +
+            `holds would fail with SignatureReused (3006). Retry, or use an RPC endpoint that ` +
+            `has caught up.`,
     );
     this.name = 'MinContextSlotNotReachedError';
-    this.minContextSlot = params.minContextSlot;
-    this.waitedMs = params.waitedMs;
+    this.minContextSlot = minContextSlot;
+    this.waitedMs = waitedMs;
+    if (commitment !== undefined) this.commitment = commitment;
     if (params.cause !== undefined) (this as { cause?: unknown }).cause = params.cause;
   }
 }

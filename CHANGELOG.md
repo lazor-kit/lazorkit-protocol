@@ -122,6 +122,39 @@ fails in the relayer's simulation, or on chain after the sponsor paid the fee.
   never reaches ends in `MinContextSlotNotReachedError`, and, on a
   sdk-legacy Connection at `processed`, tx2 prepared with no options right
   after tx1 confirms there lands and a wallet just created is found.
+- A floor at `commitment: 'finalized'` waited 10 s like the others, but a slot
+  is finalized about 32 slots (13 s) after it is confirmed, so a finalized read
+  floored at a just-confirmed tx1 — what the README says to pass — always
+  ended in `MinContextSlotNotReachedError`, with a message blaming the RPC
+  endpoint. A finalized read now waits up to 30 s for its floor; if the slot is
+  still not finalized, the error says so and suggests waiting for tx1 to
+  finalize or reading at `confirmed`. The error has a new `commitment` field,
+  and names the commitment in its message at the other commitments too.
+- The counter, key and slot reads run side by side. When one failed outright
+  (a 5xx, an unhealthy node), the call rejected at once but the other two kept
+  retrying -32016 for up to 10 s: polling the RPC after the caller had its
+  answer, a new set on every retry of the prepare, and a Node process held open
+  by their timers. They now stop as soon as one fails. The stop is per call;
+  the SDK keeps no state between calls.
+- One passkey flow per authority at a time (both READMEs and the
+  `Secp256r1Params` JSDoc): two flows for one authority that overlap sign the
+  same counter, and whichever lands second fails with 3006 whatever floor is
+  passed. The SDK does not queue; the READMEs show a queue for the app's side,
+  and say that across tabs or devices sharing a passkey the answer to that
+  3006 is a new prompt.
+- A landed `{ InstructionError: [i, { Custom: N }] }` names only the
+  top-level (LazorKit) instruction, so it cannot be attributed to LazorKit or to
+  a program `Execute` called without the transaction's logs. The sdk-legacy
+  README and the `errorFromCode` / `extractErrorCode` JSDoc say so (the latter
+  returns `null` for that object), and the kit README now has the same note.
+- Tests for the last four, each failing on the SDKs before them: unit tests in
+  both packages (a finalized floor reached after 13 s is waited for, one never
+  reached gives up after about 30 s with the finalized message, `confirmed`
+  still gives up at 10 s and names itself; with one read failing, no retry
+  timer is left and no read reaches the RPC afterwards — before, 28 more reads
+  in the next 11 s), and on a local validator in both suites: tx1 confirmed,
+  tx2 floored at its slot at `finalized` waits for finalization (about 13 s)
+  and lands.
 
 ### Fixed — size and capacity figures in the docs, and the litesvm CI job
 

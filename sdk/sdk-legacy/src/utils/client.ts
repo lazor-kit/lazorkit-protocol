@@ -46,8 +46,8 @@ import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountIdempotentIx,
 } from './spl';
-import { type ChallengeReadOptions, readAuthorityCounter, readAuthorityPubkey } from './secp256r1';
-import { readChallengeSlot } from './challengeReads';
+import { type ChallengeReadOptions, readAuthorityCounter } from './secp256r1';
+import { readChallengeInputs } from './challengeReads';
 import {
   packCompactInstructions,
   computeAccountsHash,
@@ -736,21 +736,18 @@ export class LazorKitClient {
     const authorityPda =
       p.authorityPda ?? this.findAuthority(walletPda, p.credentialIdHash)[0];
 
-    // Fire independent RPC reads in parallel. Overrides short-circuit to
-    // `Promise.resolve` so callers that pre-fetch everything make zero network calls.
+    // Independent RPC reads, in parallel; what the caller passed is not read.
     // All three at one commitment and freshness floor: a node that has not yet
     // executed the authority's previous transaction hands back the counter it
-    // consumed, and the signature fails with SignatureReused (3006).
+    // consumed, and the signature fails with SignatureReused (3006). If one
+    // read fails, the others stop waiting for the floor.
     const reads: ChallengeReadOptions = { commitment: p.commitment, minContextSlot: p.minContextSlot };
-    const [publicKeyBytes, slot, counter] = await Promise.all([
-      p.publicKeyBytes
-        ? Promise.resolve(p.publicKeyBytes)
-        : readAuthorityPubkey(this.connection, authorityPda, reads),
-      p.slotOverride != null
-        ? Promise.resolve(p.slotOverride)
-        : readChallengeSlot(this.connection, reads),
-      this.readCounter(authorityPda, reads).then((c) => c + 1),
-    ]);
+    const { publicKeyBytes, slot, counter } = await readChallengeInputs(
+      this.connection,
+      authorityPda,
+      reads,
+      { publicKeyBytes: p.publicKeyBytes, slotOverride: p.slotOverride },
+    );
 
     return { authorityPda, publicKeyBytes, slot, counter };
   }
@@ -3196,10 +3193,10 @@ export class LazorKitClient {
       commitment: params.commitment,
       minContextSlot: params.minContextSlot,
     };
-    const [counter, slot] = await Promise.all([
-      readAuthorityCounter(this.connection, v1.authority, reads).then((c) => c + 1),
-      readChallengeSlot(this.connection, reads),
-    ]);
+    // The key is the caller's, so only the counter and the slot are read.
+    const { counter, slot } = await readChallengeInputs(this.connection, v1.authority, reads, {
+      publicKeyBytes: owner.compressedPubkey,
+    });
     const prepared = prepareSecp256r1({
       discriminator: Uint8Array.from([DISC_MIGRATE_WALLET]),
       signedPayload,

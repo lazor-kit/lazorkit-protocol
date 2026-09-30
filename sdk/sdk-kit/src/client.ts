@@ -134,10 +134,9 @@ import {
 } from './secp256r1/signing.js';
 import {
   readAuthorityCounter,
-  readAuthorityPubkey,
   type ChallengeReadOptions,
 } from './secp256r1/secp256r1.js';
-import { readChallengeSlot } from './secp256r1/challengeReads.js';
+import { readChallengeInputs } from './secp256r1/challengeReads.js';
 import {
   buildCompactLayout,
   computeAccountsHash,
@@ -917,19 +916,16 @@ export class LazorKit {
     const authorityPda =
       p.authorityPda ?? (await this.findAuthority(walletPda, p.credentialIdHash))[0];
 
+    // Independent RPC reads, in parallel; what the caller passed is not read.
     // All three at one commitment and freshness floor: a node that has not yet
     // executed the authority's previous transaction hands back the counter it
-    // consumed, and the signature fails with SignatureReused (3006).
+    // consumed, and the signature fails with SignatureReused (3006). If one
+    // read fails, the others stop waiting for the floor.
     const reads: ChallengeReadOptions = { commitment: p.commitment, minContextSlot: p.minContextSlot };
-    const [publicKeyBytes, slot, counter] = await Promise.all([
-      p.publicKeyBytes
-        ? Promise.resolve(p.publicKeyBytes)
-        : readAuthorityPubkey(this.rpc, authorityPda, reads),
-      p.slotOverride != null
-        ? Promise.resolve(p.slotOverride)
-        : readChallengeSlot(this.rpc, reads),
-      this.readCounter(authorityPda, reads).then((c) => c + 1),
-    ]);
+    const { publicKeyBytes, slot, counter } = await readChallengeInputs(this.rpc, authorityPda, reads, {
+      publicKeyBytes: p.publicKeyBytes,
+      slotOverride: p.slotOverride,
+    });
 
     return { authorityPda, publicKeyBytes, slot, counter };
   }
@@ -3314,10 +3310,10 @@ export class LazorKit {
       commitment: params.commitment,
       minContextSlot: params.minContextSlot,
     };
-    const [counter, slot] = await Promise.all([
-      this.readCounter(v1.authority, reads).then((c) => c + 1),
-      readChallengeSlot(this.rpc, reads),
-    ]);
+    // The key is the caller's, so only the counter and the slot are read.
+    const { counter, slot } = await readChallengeInputs(this.rpc, v1.authority, reads, {
+      publicKeyBytes: owner.compressedPubkey,
+    });
     const prepared = this.buildPasskeySigning({
       discriminator: DISC_MIGRATE_WALLET,
       sysvarIxIndex: SYSVAR_IX_INDEX_MIGRATE_WALLET,

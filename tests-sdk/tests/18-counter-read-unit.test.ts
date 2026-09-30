@@ -97,6 +97,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** The real setTimeout, for waiting on real async work while timers are faked. */
+const realSetTimeout = globalThis.setTimeout;
+
+/** Waits in real time until `calls()` is non-zero (at most a second). */
+async function untilCalled(calls: () => number): Promise<void> {
+  for (let i = 0; i < 200 && calls() === 0; i++) {
+    await new Promise((resolve) => realSetTimeout(resolve, 5));
+  }
+  expect(calls()).toBeGreaterThan(0);
+}
+
 describe('challenge reads — options reach every read', () => {
   const payer = Keypair.generate().publicKey;
   const walletPda = Keypair.generate().publicKey;
@@ -366,5 +377,221 @@ describe('challenge reads — a node behind the floor', () => {
 
     await expect(readAuthorityCounter(connection, authorityPda)).rejects.toBeInstanceOf(SolanaJSONRPCError);
     expect(calls).toBe(1);
+  });
+});
+
+// A floor at 'finalized' is the slot being finalized, about 32 slots (13 s)
+// after it was confirmed. With the 10 s wait of the other commitments, a
+// finalized read floored at a just-confirmed slot — what the README tells a
+// caller to pass — always ended in MinContextSlotNotReachedError, with a
+// message that blamed the RPC endpoint.
+describe("challenge reads — a floor at 'finalized'", () => {
+  const authorityPda = Keypair.generate().publicKey;
+  const atFinalized = { commitment: 'finalized' as const, minContextSlot: 5_000 };
+
+  /**
+   * A node whose finalized bank reaches the floor `afterMs` after the first
+   * read asks for it.
+   */
+  function finalizesAfter(afterMs: number, authority: () => PublicKey = () => authorityPda) {
+    let start: number | undefined;
+    let calls = 0;
+    const behind = () => Date.now() - (start ??= Date.now()) < afterMs;
+    const connection = contextual({
+      getAccountInfo: async (key: PublicKey, config?: { commitment?: string }) => {
+        if (!key.equals(authority())) return null; // protocol config: none
+        expect(config?.commitment).toBe('finalized');
+        calls++;
+        if (behind()) throw notReached();
+        return authorityAccount();
+      },
+      getSlot: async (config?: { commitment?: string }) => {
+        expect(config?.commitment).toBe('finalized');
+        if (behind()) throw notReached('failed to get slot');
+        return 5_040;
+      },
+      getMultipleAccountsInfo: async (keys: PublicKey[]) => keys.map(() => null),
+    });
+    return { connection, calls: () => calls };
+  }
+
+  it('waits past 10 s for the slot to finalize (13 s here), then reads', async () => {
+    vi.useFakeTimers();
+    const { connection, calls } = finalizesAfter(13_000);
+    const outcome = readAuthorityCounter(connection, authorityPda, atFinalized).then(
+      (counter) => counter,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await outcome).toBe(COUNTER);
+    expect(calls()).toBeGreaterThan(10);
+  });
+
+  it('prepare* waits the same way for all three reads', async () => {
+    vi.useFakeTimers();
+    const walletPda = Keypair.generate().publicKey;
+    const credentialIdHash = new Uint8Array(32).fill(0x3d);
+    let authority: PublicKey | undefined;
+    const { connection, calls } = finalizesAfter(13_000, () => authority!);
+    const client = new LazorKitClient(connection, PROGRAM_ID);
+    authority = client.findAuthority(walletPda, credentialIdHash)[0];
+
+    const outcome = client
+      .prepareExecute({
+        payer: Keypair.generate().publicKey,
+        walletPda,
+        secp256r1: { credentialIdHash, ...atFinalized },
+        instructions: [],
+      })
+      .then(
+        (prepared) => prepared,
+        (e: unknown) => e,
+      );
+    await untilCalled(calls);
+    await vi.advanceTimersByTimeAsync(20_000);
+    const prepared = await outcome;
+    expect(prepared).not.toBeInstanceOf(Error);
+    expect((prepared as { challenge: Uint8Array }).challenge).toHaveLength(32);
+  });
+
+  it('gives up after about 30 s, saying the slot is not finalized', async () => {
+    vi.useFakeTimers();
+    const { connection } = finalizesAfter(Number.POSITIVE_INFINITY);
+    const outcome = readAuthorityCounter(connection, authorityPda, atFinalized).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(40_000);
+    const e = (await outcome) as MinContextSlotNotReachedError;
+    expect(e).toBeInstanceOf(MinContextSlotNotReachedError);
+    expect(e.commitment).toBe('finalized');
+    expect(e.waitedMs).toBeGreaterThan(25_000);
+    expect(e.waitedMs).toBeLessThanOrEqual(30_000);
+    expect(e.message).toContain('Slot 5000 is not finalized');
+    expect(e.message).toContain("read at 'confirmed'");
+    expect(e.message).not.toContain('use an RPC endpoint that has caught up');
+  });
+
+  it("'confirmed' still gives up after 10 s, and names its commitment", async () => {
+    vi.useFakeTimers();
+    const connection = {
+      getAccountInfoAndContext: async () => {
+        throw notReached();
+      },
+    } as unknown as Connection;
+    const outcome = readAuthorityCounter(connection, authorityPda, { minContextSlot: 5_000 }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    const e = (await outcome) as MinContextSlotNotReachedError;
+    expect(e).toBeInstanceOf(MinContextSlotNotReachedError);
+    expect(e.commitment).toBe('confirmed');
+    expect(e.waitedMs).toBeLessThanOrEqual(10_000);
+    expect(e.message).toContain("slot 5000 at 'confirmed'");
+  });
+});
+
+// The counter, key and slot reads of one challenge run side by side. When one
+// fails outright, the prepare call rejects at once; the others used to keep
+// retrying -32016 for up to the whole wait, polling the RPC after the caller
+// had moved on and holding the process open on their timers.
+describe('challenge reads — one fails, the others stop', () => {
+  const credentialIdHash = new Uint8Array(32).fill(0x3e);
+
+  function setup() {
+    const walletPda = Keypair.generate().publicKey;
+    let authority: PublicKey | undefined;
+    let accountReads = 0;
+    const connection = contextual({
+      // A node behind the floor for the authority (key and counter reads) ...
+      getAccountInfo: async (key: PublicKey) => {
+        if (!authority || !key.equals(authority)) return null;
+        accountReads++;
+        throw notReached();
+      },
+      // ... and a slot read that fails outright.
+      getSlot: async () => {
+        throw new SolanaJSONRPCError({ code: -32005, message: 'Node is unhealthy' }, 'failed to get slot');
+      },
+      getMultipleAccountsInfo: async (keys: PublicKey[]) => keys.map(() => null),
+    });
+    const client = new LazorKitClient(connection, PROGRAM_ID);
+    authority = client.findAuthority(walletPda, credentialIdHash)[0];
+    return { client, walletPda, accountReads: () => accountReads };
+  }
+
+  it('prepare* rejects with the failure, and no read polls on afterwards', async () => {
+    vi.useFakeTimers();
+    const { client, walletPda, accountReads } = setup();
+    const outcome = client
+      .prepareExecute({
+        payer: Keypair.generate().publicKey,
+        walletPda,
+        secp256r1: { credentialIdHash, minContextSlot: 5_000 },
+        instructions: [],
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    // Let the reads start and the slot read fail; no timer has to fire for it.
+    await vi.advanceTimersByTimeAsync(0);
+    const error = await outcome;
+    expect(String(error)).toContain('Node is unhealthy');
+
+    const readsAtReject = accountReads();
+    expect(readsAtReject).toBeGreaterThan(0);
+    // Nothing left to wake up (no retry timer holds the process open), and
+    // no read reaches the RPC after the caller got its answer.
+    const timersAtReject = vi.getTimerCount();
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect({ timersAtReject, readsAfterReject: accountReads() - readsAtReject }).toEqual({
+      timersAtReject: 0,
+      readsAfterReject: 0,
+    });
+  });
+
+  it('a read still waiting for the floor stops as soon as another fails', async () => {
+    vi.useFakeTimers();
+    const { client, walletPda, accountReads } = setup();
+    // The key is the caller's here: only the counter read waits for the floor.
+    const outcome = client
+      .prepareRevokeSession({
+        payer: Keypair.generate().publicKey,
+        walletPda,
+        secp256r1: {
+          credentialIdHash,
+          publicKeyBytes: Uint8Array.from([0x02, ...new Uint8Array(32).fill(7)]),
+          minContextSlot: 5_000,
+        },
+        sessionPda: Keypair.generate().publicKey,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(String(await outcome)).toContain('Node is unhealthy');
+    const readsAtReject = accountReads();
+    const timersAtReject = vi.getTimerCount();
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect({ timersAtReject, readsAfterReject: accountReads() - readsAtReject }).toEqual({
+      timersAtReject: 0,
+      readsAfterReject: 0,
+    });
+  });
+});
+
+// A landed failure cannot be attributed from its TransactionError: it names
+// the top-level instruction (LazorKit's), not the program inside it that
+// failed. The helpers read text only and say nothing for it.
+describe('error helpers — a landed Custom code carries no program', () => {
+  it('extractErrorCode reads a preflight error, not a landed TransactionError', async () => {
+    const { extractErrorCode } = await import('../../sdk/sdk-legacy/src');
+    const landed = { InstructionError: [1, { Custom: 3006 }] };
+    expect(extractErrorCode(landed)).toBeNull();
+    expect(extractErrorCode(JSON.stringify(landed))).toBeNull();
+    expect(extractErrorCode(new Error('custom program error: 0xbbe'))).toBe(3006);
   });
 });

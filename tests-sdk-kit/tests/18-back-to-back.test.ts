@@ -12,8 +12,10 @@
  * and tx2's reads are at `confirmed`, a slot or so behind. The first case is
  * the negative control (without the floor tx2 signs the spent counter); with
  * the floor, or with `commitment: 'processed'`, it lands. Also pinned against
- * a real node: a floor it has not reached yet is waited for (-32016), and one
- * it never reaches ends in MinContextSlotNotReachedError, not in a stale read.
+ * a real node: a floor it has not reached yet is waited for (-32016), one it
+ * never reaches ends in MinContextSlotNotReachedError, not in a stale read, and
+ * a floor read at `finalized` waits for that slot to finalize (about 32 slots
+ * after it was confirmed, longer than the 10 s the other commitments wait).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import * as crypto from 'node:crypto';
@@ -79,7 +81,7 @@ describe('back-to-back passkey transactions (validator)', () => {
    * reads; sent and waited for at `commitment`.
    */
   async function payOut(
-    floor?: { minContextSlot?: bigint; commitment?: 'processed' | 'confirmed' },
+    floor?: { minContextSlot?: bigint; commitment?: 'processed' | 'confirmed' | 'finalized' },
     commitment: 'processed' | 'confirmed' = 'confirmed',
   ) {
     const { instructions } = await client.execute({
@@ -154,6 +156,27 @@ describe('back-to-back passkey transactions (validator)', () => {
     expect(counter).toBeGreaterThanOrEqual(2);
     expect(await ctx.rpc.getSlot({ commitment: 'confirmed' }).send()).toBeGreaterThanOrEqual(floor);
   });
+
+  // What the README tells a caller to pass (the slot tx1 landed in, once it
+  // is confirmed), with the reads at 'finalized': that slot is finalized about
+  // 32 slots later. The reads used to give up after 10 s, always.
+  it("at 'finalized', floored at a just-confirmed tx1, tx2 waits for finalization and lands", async () => {
+    const before = await client.readCounter(authorityPda);
+    const sig1 = await payOut(); // confirmed
+    const {
+      value: [status1],
+    } = await ctx.rpc.getSignatureStatuses([toSignature(sig1)]).send();
+    expect(status1?.err).toBeNull();
+    const landed = status1!.slot;
+    // Not finalized yet: the reads have to wait for it.
+    expect(await ctx.rpc.getSlot({ commitment: 'finalized' }).send()).toBeLessThan(landed);
+
+    const started = Date.now();
+    expect(await outcome(() => payOut({ minContextSlot: landed, commitment: 'finalized' }))).toBeNull();
+    expect(await ctx.rpc.getSlot({ commitment: 'finalized' }).send()).toBeGreaterThanOrEqual(landed);
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(await client.readCounter(authorityPda)).toBe(before + 2);
+  }, 60_000);
 
   it('gives up with MinContextSlotNotReachedError on a floor the node never reaches', async () => {
     const floor = (await ctx.rpc.getSlot({ commitment: 'confirmed' }).send()) + 1_000_000n;

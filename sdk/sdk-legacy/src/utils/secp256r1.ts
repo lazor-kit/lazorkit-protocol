@@ -1,8 +1,7 @@
 import { Buffer } from 'buffer';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { sha256 } from '@noble/hashes/sha2';
-import { ACCOUNT_DISCRIMINATOR } from '../constants';
-import { type ChallengeReadOptions, atOrAfterContextSlot, challengeReadConfig } from './challengeReads';
+import { type ChallengeReadOptions, readChallengeCounter, readChallengeKey } from './challengeReads';
 
 export type { ChallengeReadOptions } from './challengeReads';
 
@@ -61,24 +60,6 @@ export interface Secp256r1Signer {
 }
 
 /**
- * One authority account, read per `opts`. `getAccountInfoAndContext` rather
- * than `getAccountInfo`: the latter rethrows RPC errors without their code.
- */
-async function readAuthorityAccount(
-  connection: Connection,
-  authorityPda: PublicKey,
-  opts: ChallengeReadOptions | undefined,
-  what: string,
-) {
-  const { value } = await atOrAfterContextSlot(
-    () => connection.getAccountInfoAndContext(authorityPda, challengeReadConfig(connection, opts)),
-    opts?.minContextSlot,
-    what,
-  );
-  return value;
-}
-
-/**
  * Reads the current odometer counter from an on-chain authority account.
  * The counter is a u32 LE at offset 8 of the AuthorityAccountHeader.
  *
@@ -91,16 +72,9 @@ export async function readAuthorityCounter(
   authorityPda: PublicKey,
   opts?: ChallengeReadOptions,
 ): Promise<number> {
-  const info = await readAuthorityAccount(
-    connection,
-    authorityPda,
-    opts,
-    `the counter of ${authorityPda.toBase58()}`,
-  );
-  if (!info) throw new Error(`Authority account not found: ${authorityPda.toBase58()}`);
-  if (info.data.length < 12) throw new Error('Authority account data too short');
-  const view = new DataView(info.data.buffer, info.data.byteOffset);
-  return view.getUint32(8, true); // offset 8, little-endian, u32
+  // Read with `getAccountInfoAndContext`: `getAccountInfo` rethrows RPC errors
+  // without their code.
+  return readChallengeCounter(connection, authorityPda, opts);
 }
 
 /**
@@ -117,23 +91,7 @@ export async function readAuthorityPubkey(
   authorityPda: PublicKey,
   opts?: ChallengeReadOptions,
 ): Promise<Uint8Array> {
-  const info = await readAuthorityAccount(
-    connection,
-    authorityPda,
-    opts,
-    `the key of ${authorityPda.toBase58()}`,
-  );
-  if (!info) throw new Error(`Authority account not found: ${authorityPda.toBase58()}`);
-  // Header is 48 bytes, credential_id_hash is 32 bytes, pubkey is 33 bytes.
-  // Min size = 48 + 32 + 33 = 113 bytes for a Secp256r1 authority.
-  if (info.data.length < 113) throw new Error('Authority account too small for Secp256r1');
-  // Byte 0 is the account discriminator.
-  if (info.data[0] !== ACCOUNT_DISCRIMINATOR.AUTHORITY)
-    throw new Error('Not an Authority account');
-  // Byte 1 is the authority_type: Secp256r1 = 1.
-  if (info.data[1] !== 1) throw new Error('Authority is not Secp256r1');
-  // Pubkey at offset 48 + 32 = 80, length 33.
-  return new Uint8Array(info.data.slice(80, 80 + 33));
+  return readChallengeKey(connection, authorityPda, opts);
 }
 
 /**

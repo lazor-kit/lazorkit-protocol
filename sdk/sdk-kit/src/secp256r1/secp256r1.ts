@@ -9,22 +9,19 @@
 import { sha256 } from '@noble/hashes/sha2';
 import {
   getAddressEncoder,
-  getBase64Encoder,
   type Address,
   type Rpc,
   type GetAccountInfoApi,
 } from '@solana/kit';
-import { ACCOUNT_DISCRIMINATOR } from '../constants.js';
 import {
-  atOrAfterContextSlot,
-  challengeReadConfig,
+  readChallengeCounter,
+  readChallengeKey,
   type ChallengeReadOptions,
 } from './challengeReads.js';
 
 export { MinContextSlotNotReachedError, type ChallengeReadOptions } from './challengeReads.js';
 
 const addressEncoder = getAddressEncoder();
-const base64Encoder = getBase64Encoder();
 
 // ─── WebAuthn authenticator data helper ──────────────────────────────
 
@@ -81,23 +78,6 @@ export interface Secp256r1Signer {
 
 // ─── On-chain authority reads ────────────────────────────────────────
 
-/** One authority account, read per `opts` (see {@link ChallengeReadOptions}). */
-async function readAuthorityAccount(
-  rpc: Rpc<GetAccountInfoApi>,
-  authorityPda: Address,
-  opts: ChallengeReadOptions | undefined,
-  what: string,
-) {
-  return atOrAfterContextSlot(
-    () =>
-      rpc
-        .getAccountInfo(authorityPda, { encoding: 'base64', ...challengeReadConfig(opts) })
-        .send(),
-    opts?.minContextSlot,
-    what,
-  );
-}
-
 /**
  * Reads the current odometer counter from an on-chain authority account.
  * The counter is a u32 LE at offset 8 of the AuthorityAccountHeader.
@@ -111,13 +91,7 @@ export async function readAuthorityCounter(
   authorityPda: Address,
   opts?: ChallengeReadOptions,
 ): Promise<number> {
-  const info = await readAuthorityAccount(rpc, authorityPda, opts, `the counter of ${authorityPda}`);
-  if (!info.value)
-    throw new Error(`Authority account not found: ${authorityPda}`);
-  const bytes = base64ToBytes(info.value.data[0]);
-  if (bytes.length < 12) throw new Error('Authority account data too short');
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return view.getUint32(8, /* le */ true);
+  return readChallengeCounter(rpc, authorityPda, opts);
 }
 
 /**
@@ -133,21 +107,7 @@ export async function readAuthorityPubkey(
   authorityPda: Address,
   opts?: ChallengeReadOptions,
 ): Promise<Uint8Array> {
-  const info = await readAuthorityAccount(rpc, authorityPda, opts, `the key of ${authorityPda}`);
-  if (!info.value)
-    throw new Error(`Authority account not found: ${authorityPda}`);
-  const bytes = base64ToBytes(info.value.data[0]);
-  // Min size = 48 (header) + 32 (credential_id_hash) + 33 (pubkey) = 113.
-  if (bytes.length < 113)
-    throw new Error('Authority account too small for Secp256r1');
-  if (bytes[0] !== ACCOUNT_DISCRIMINATOR.AUTHORITY)
-    throw new Error('Not an Authority account');
-  if (bytes[1] !== 1) throw new Error('Authority is not Secp256r1');
-  return bytes.slice(80, 80 + 33);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  return new Uint8Array(base64Encoder.encode(b64));
+  return readChallengeKey(rpc, authorityPda, opts);
 }
 
 // ─── Auth payload builders ───────────────────────────────────────────
