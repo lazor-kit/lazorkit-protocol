@@ -9,8 +9,10 @@
 #   cargo test-sbf --features devnet --test repro_c1_admin_freeze
 #   cargo test-sbf --features devnet --test repro_h1_cpi_bypass
 #
-# Requires the Solana toolchain (`cargo build-sbf`). Install with:
-#   sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+# Requires the Solana toolchain (`cargo build-sbf`), the release one
+# (scripts/sbf-toolchain.sh) so the tests load the bytes that ship. Install with:
+#   sh -c "$(curl -sSfL https://release.anza.xyz/v4.2.2/install)"
+# Another cargo-build-sbf only warns here.
 #
 # `--arch v0` is explicit because cargo-build-sbf 4.4.0 changed the default to
 # v3, and litesvm 0.6 cannot load a v3 binary: every test that loads the
@@ -27,11 +29,16 @@ if ! command -v cargo-build-sbf >/dev/null 2>&1; then
   exit 1
 fi
 
+# shellcheck source=sbf-toolchain.sh
+. "$repo_root/scripts/sbf-toolchain.sh"
+sbf_toolchain_check warn
+tools=(--tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0)
+
 echo "==> building lazorkit-program (devnet)"
-( cd "$repo_root" && cargo build-sbf --features devnet --arch v0 )
+( cd "$repo_root" && cargo build-sbf --features devnet "${tools[@]}" )
 
 echo "==> building malicious-cpi fixture"
-( cd "$repo_root/test-fixtures/malicious-cpi" && cargo build-sbf --arch v0 )
+( cd "$repo_root/test-fixtures/malicious-cpi" && cargo build-sbf "${tools[@]}" )
 
 echo
 echo "artifacts:"

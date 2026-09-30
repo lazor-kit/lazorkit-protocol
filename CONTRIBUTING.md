@@ -7,7 +7,8 @@ Thank you for your interest in contributing to LazorKit.
 1. Fork the repository
 2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/program-v2.git`
 3. Install prerequisites (see [DEVELOPMENT.md](DEVELOPMENT.md))
-4. Build the program: `cargo build-sbf`
+4. Build the program: `cargo build-sbf --features devnet --tools-version v1.53 --arch v0`
+   (the pinned toolchain: Agave v4.2.2, see DEVELOPMENT.md §A)
 5. Run tests: `cd tests-sdk && npm test`
 
 ## Development Workflow

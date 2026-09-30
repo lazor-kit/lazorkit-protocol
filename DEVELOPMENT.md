@@ -2,7 +2,11 @@
 
 ## Prerequisites
 
-- [Solana Tool Suite](https://docs.solanalabs.com/cli/install) (v2.x+)
+- The Agave tool suite at the pinned release, **v4.2.2** (its `cargo-build-sbf`
+  is 4.1.0): `sh -c "$(curl -sSfL https://release.anza.xyz/v4.2.2/install)"`.
+  The stable installer brings cargo-build-sbf 4.4.0, which builds this program
+  without LTO, so its binaries are not the ones the release hashes describe.
+  See `scripts/sbf-toolchain.sh` and [§A](#a-build-program).
 - [Rust](https://www.rust-lang.org/tools/install) (via rustup)
 - [Node.js 18+](https://nodejs.org/) & npm
 - [shank-cli](https://github.com/metaplex-foundation/shank): `cargo install shank-cli`
@@ -43,22 +47,40 @@ unflagged build fails with "pick exactly one cluster feature".
 
 ```bash
 # v2 on devnet — embeds 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv
-cargo build-sbf --features devnet --arch v0
+cargo build-sbf --features devnet --tools-version v1.53 --arch v0
 
 # v2 on mainnet — embeds LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8
-cargo build-sbf --features mainnet --arch v0
+cargo build-sbf --features mainnet --tools-version v1.53 --arch v0
 
 # The v1 ids build only as the sunset binary (MigrateWallet, ReclaimDeferred,
 # CloseExpiredSession; everything else 4018 RetiredDeployment):
-cargo build-sbf --features mainnet-v1 --arch v0   # LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi
-cargo build-sbf --features devnet-v1 --arch v0    # 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
+cargo build-sbf --features mainnet-v1 --tools-version v1.53 --arch v0   # LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi
+cargo build-sbf --features devnet-v1 --tools-version v1.53 --arch v0    # 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
 ```
 
-Always pass `--arch v0`: the program deploys as SBPF v0, and cargo-build-sbf
-4.4.0 and later build v3 by default. A v3 binary loads on a local test
-validator and passes the size check, but litesvm refuses it and it is not the
-artifact the release hashes describe. `./scripts/assert-sbpf-v0.sh <file.so>`
-checks a binary.
+The release toolchain is pinned in `scripts/sbf-toolchain.sh`: Agave v4.2.2
+(`cargo-build-sbf --version` says 4.1.0), platform-tools v1.53, SBPF v0. All
+three change the bytes:
+
+- **cargo-build-sbf 4.1.0.** 4.4.0 (what the stable installer brings since
+  2026-09-22) disables LTO for a crate that is both `cdylib` and `lib`, as this
+  one is, and warns about it; its mainnet build is 622142f5…, not 4cb80304…,
+  and the sunset binary grows from 45856 to 140200 bytes.
+- **`--tools-version v1.53`.** The default follows cargo-build-sbf (v1.54 for
+  4.1.0), and a v1.54 build differs.
+- **`--arch v0`.** The program deploys as SBPF v0, and cargo-build-sbf 4.4.0
+  and later build v3 by default. A v3 binary loads on a local test validator
+  and passes the size check, but litesvm refuses it.
+  `./scripts/assert-sbpf-v0.sh <file.so>` checks a binary.
+
+`./scripts/check-release-hashes.sh` rebuilds mainnet, mainnet-v1, devnet and
+devnet-v1 that way in a fresh target dir and compares each with
+`scripts/release-hashes.txt`; it refuses to run on another cargo-build-sbf. A
+change that moves a binary must update that file (and the tables in
+`docs/mainnet-deploy-checklist.md`) — the SBF cluster check fails until it does.
+The build scripts (`build-all.sh`, `build-repro-fixtures.sh`,
+`start-validator.sh`, `test-program.sh`) use the same pin and only warn on
+another cargo-build-sbf.
 
 For anything you will deploy, add `--sbf-out-dir <dir>` and deploy from that
 directory. A `CARGO_TARGET_DIR` override (the maintainer's shell sets one) makes
@@ -121,7 +143,7 @@ shank idl -o . --out-filename idl.json -p "$PROGRAM_ID"
 ### G. Deploy to Devnet
 
 ```bash
-cargo build-sbf --features devnet --arch v0
+cargo build-sbf --features devnet --tools-version v1.53 --arch v0
 ./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
 solana program deploy target/deploy/lazorkit_program.so -u d
 ```
@@ -139,9 +161,14 @@ GitHub Actions runs the `lint` workflow on every pull request and on pushes to
   `npx tsc -p tsconfig.json --noEmit`.
 
 The `SBF cluster feature check` workflow also runs on pull requests touching
-program/assertions code and on pushes to `main` / `develop`. It builds both
-mainnet and devnet SBF binaries, verifies they differ, and verifies invalid
-feature selections fail at compile time.
+the program, its crates, `Cargo.lock`, the toolchain pin or the hash record,
+and on pushes to `main` / `develop`. It installs the pinned toolchain (Agave
+v4.2.2, and checks cargo-build-sbf is 4.1.0), builds both mainnet and devnet
+SBF binaries, verifies they differ, verifies invalid feature selections fail at
+compile time, and finally runs `scripts/check-release-hashes.sh`: the four
+release artifacts, rebuilt in a fresh target dir, must match
+`scripts/release-hashes.txt`. The `program litesvm integration` job of `lint`
+uses the same pinned toolchain.
 
 Local-validator integration tests are still a manual release/audit check:
 

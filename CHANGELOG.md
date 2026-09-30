@@ -154,6 +154,30 @@ checklist, `build-all.sh`, `start-validator.sh` and the cluster check run it.
 The §2 commands rebuild to the table's hashes (mainnet `4cb80304…`, sunset
 `6080da9f…`, devnet `3584aec7…`).
 
+**Toolchain pinned** — `--arch v0` was not enough. cargo-build-sbf 4.4.0 also
+turns link-time optimisation off for a crate that is both `cdylib` and `lib`
+(this one), with only a warning, so CI's v0 builds stopped reproducing the
+release hashes: mainnet `622142f5…` instead of `4cb80304…`, and a 140200-byte
+mainnet-v1 sunset instead of 45856, which §2's size check would stop. The
+release toolchain is now named in one place, `scripts/sbf-toolchain.sh`: Agave
+v4.2.2 (cargo-build-sbf 4.1.0) with platform-tools v1.53 and `--arch v0`.
+- Both CI jobs that build SBF install that release instead of `stable`, check
+  `cargo-build-sbf --version`, pass `--tools-version`, and key their cargo
+  cache on the toolchain (`--tools-version` does not invalidate cargo's cache).
+- New `scripts/check-release-hashes.sh` rebuilds mainnet, mainnet-v1, devnet
+  and devnet-v1 in a fresh target dir, refuses any other cargo-build-sbf, and
+  compares size and SHA-256 with the new `scripts/release-hashes.txt`. The SBF
+  cluster check runs it on Linux, so a change that moves a binary fails until
+  the record is updated, and toolchain drift fails in CI rather than at deploy
+  time. It also runs on changes to `Cargo.lock`, `no-padding/`, the pin and the
+  record.
+- `build-all.sh`, `build-repro-fixtures.sh`, `start-validator.sh` and
+  `test-program.sh` use the pin and warn on another cargo-build-sbf; §2 of the
+  checklist, `DEVELOPMENT.md`, `CONTRIBUTING.md` and `upgrade-procedure.md`
+  name it. Rebuilt with it in a fresh target dir, all four artifacts match the
+  record (mainnet `4cb80304…`, mainnet-v1 `6080da9f…`, devnet `3584aec7…`,
+  devnet-v1 `2cf15c89…`).
+
 ### Fixed — the passkey challenge names the wallet
 
 **Program**
