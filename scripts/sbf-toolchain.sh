@@ -11,10 +11,20 @@
 # cargo-build-sbf 4.4.0, which the Agave stable installer brings since
 # 2026-09-22, turns link-time optimisation off for a crate that is both
 # `cdylib` and `lib` (this one: the litesvm tests link it as a library) and
-# says so in a warning. Its mainnet build is 622142f5…, not 4cb80304…, and the
-# mainnet-v1 sunset grows from 45856 to 140200 bytes, which §2's "a sunset over
-# 100 KB is the wrong file" check would stop. With --tools-version unpinned the
+# says so only in a warning: the mainnet-v1 sunset grows from 45856 to 140200
+# bytes, which §2's "a sunset over 100 KB is the wrong file" check would stop,
+# and no artifact hashes as recorded. With --tools-version unpinned the
 # compiler moves too (v1.54 builds differ from v1.53 ones).
+#
+# The build environment is an input as well: program/src/lib.rs's
+# security_txt! embeds GITHUB_SHA and GITHUB_REF_NAME (source_revision and
+# source_release, through default_env!). GitHub Actions sets both, so a CI
+# build of the recorded commit is 48 bytes larger and hashes otherwise; the
+# recorded artifacts were built with both unset (empty fields). Release builds
+# and the hash check run under `sbf_release_env`, which unsets them.
+#
+# With these fixed the build reproduces across hosts: macOS on Apple silicon
+# and the ubuntu CI runner build the recorded bytes.
 #
 # Changing any of these changes every artifact: rebuild with
 # scripts/check-release-hashes.sh, re-record scripts/release-hashes.txt and the
@@ -24,14 +34,12 @@ SBF_AGAVE_RELEASE=v4.2.2
 SBF_CARGO_BUILD_SBF_VERSION=4.1.0
 SBF_PLATFORM_TOOLS_VERSION=v1.53
 
-# The host the release hashes (scripts/release-hashes.txt) are for: macOS on
-# Apple silicon. platform-tools is a separate build per host, and its
-# precompiled std carries the absolute paths it was built under into every
-# program's panic locations (/Users/runner/work/platform-tools/… in the macOS
-# package). The Linux v1.53 package builds this source 48 bytes larger
-# (40 for a sunset binary) with other hashes, the same cargo-build-sbf and
-# flags notwithstanding. Build and check release artifacts on this host.
-SBF_RELEASE_HOST="Darwin arm64"
+# Environment variables the program compiles in (security.txt), unset for a
+# release build: `sbf_release_env cargo build-sbf …`.
+SBF_EMBEDDED_ENV="GITHUB_SHA GITHUB_REF_NAME"
+sbf_release_env() {
+  env -u GITHUB_SHA -u GITHUB_REF_NAME "$@"
+}
 
 # "Darwin arm64", "Linux x86_64", …
 sbf_host() {

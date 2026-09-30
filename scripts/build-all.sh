@@ -38,7 +38,9 @@ echo "--- 🚀 LazorKit build (cluster: $CLUSTER) ---"
 sbf_toolchain_check warn
 echo "[1/3] Building Rust Program (cargo build-sbf --features $CLUSTER --tools-version $SBF_PLATFORM_TOOLS_VERSION --arch v0)..."
 cd "$PROGRAM_DIR"
-cargo build-sbf --features "$CLUSTER" --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 --sbf-out-dir "$ROOT_DIR/target/deploy"
+# GITHUB_SHA / GITHUB_REF_NAME unset, as for the recorded artifacts
+# (security.txt compiles them in).
+sbf_release_env cargo build-sbf --features "$CLUSTER" --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 --sbf-out-dir "$ROOT_DIR/target/deploy"
 "$ROOT_DIR/scripts/assert-sbpf-v0.sh" "$ROOT_DIR/target/deploy/lazorkit_program.so"
 
 # Step 2: Generate IDL using Shank, picking the program ID from the keypair

@@ -1,12 +1,12 @@
 # The release artifacts this source builds, with the pinned toolchain
 # (scripts/sbf-toolchain.sh: Agave v4.2.2 / cargo-build-sbf 4.1.0,
-# platform-tools v1.53, --arch v0), each in a fresh target dir, on macOS on
-# Apple silicon. (platform-tools' Linux package builds other bytes: its std
-# embeds the paths it was built under. See sbf-toolchain.sh.)
+# platform-tools v1.53, --arch v0), each in a fresh target dir, with
+# GITHUB_SHA and GITHUB_REF_NAME unset (security.txt compiles them in; these
+# artifacts have them empty). Recorded on macOS (Apple silicon).
 #
 # scripts/check-release-hashes.sh rebuilds and compares; the SBF cluster check
-# runs it on a macOS arm64 runner on every change to the program, so a change
-# that moves a binary fails CI until this file (and the tables in
+# runs it on an ubuntu and a macOS runner on every change to the program, so a
+# change that moves a binary fails CI until this file (and the tables in
 # docs/mainnet-deploy-checklist.md) record the new hashes. A mismatch with no
 # program change means the build is not reproducible on that machine: stop and
 # find out why before deploying.
