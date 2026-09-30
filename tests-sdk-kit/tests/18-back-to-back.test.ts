@@ -3,16 +3,27 @@
  * Mirrors tests-sdk/tests/19-back-to-back.test.ts.
  *
  * tx2's challenge signs the authority's counter + 1, read when tx2 is
- * prepared; read before tx1 has executed, it is the counter tx1 is about to
- * use and tx2 fails with SignatureReused (3006). The floor: read tx2's
- * counter, key and slot at or after the slot tx1 landed in
- * (`minContextSlot`). Also pinned against a real node: a floor it has not
- * reached yet is waited for (-32016), and one it never reaches ends in
- * MinContextSlotNotReachedError, not in a stale read.
+ * prepared; read from a bank that has not executed tx1 yet, it is the counter
+ * tx1 is about to use and tx2 fails with SignatureReused (3006). The floor:
+ * read tx2's counter, key and slot at or after the slot tx1 landed in
+ * (`minContextSlot`).
+ *
+ * One node stands in for a lagging one: tx1 is confirmed at `processed` only,
+ * and tx2's reads are at `confirmed`, a slot or so behind. The first case is
+ * the negative control (without the floor tx2 signs the spent counter); with
+ * the floor, or with `commitment: 'processed'`, it lands. Also pinned against
+ * a real node: a floor it has not reached yet is waited for (-32016), and one
+ * it never reaches ends in MinContextSlotNotReachedError, not in a stale read.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import * as crypto from 'node:crypto';
-import { generateKeyPairSigner, signature as toSignature, type Address } from '@solana/kit';
+import {
+  SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM,
+  generateKeyPairSigner,
+  isSolanaError,
+  signature as toSignature,
+  type Address,
+} from '@solana/kit';
 import { LazorKit, MinContextSlotNotReachedError, secp256r1 } from '@lazorkit/sdk';
 import {
   airdrop,
@@ -23,6 +34,14 @@ import {
   type TestContext,
 } from './common.js';
 import { createMockSigner, generateMockSecp256r1Key } from './secp256r1Utils.js';
+
+/** SignatureReused anywhere in a send's error chain (preflight or landed). */
+function isSpentCounter(err: unknown): boolean {
+  for (let e = err, i = 0; e != null && i < 8; e = (e as { cause?: unknown }).cause, i++) {
+    if (isSolanaError(e, SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM) && e.context.code === 3006) return true;
+  }
+  return false;
+}
 
 describe('back-to-back passkey transactions (validator)', () => {
   let ctx: TestContext;
@@ -55,28 +74,78 @@ describe('back-to-back passkey transactions (validator)', () => {
     await airdrop(ctx, sink, 1_000_000n);
   });
 
-  /** One lamport out of the vault, signed by the passkey, with `floor` on its reads. */
-  async function payOut(floor?: { minContextSlot?: bigint }) {
+  /**
+   * One lamport out of the vault, signed by the passkey, with `floor` on its
+   * reads; sent and waited for at `commitment`.
+   */
+  async function payOut(
+    floor?: { minContextSlot?: bigint; commitment?: 'processed' | 'confirmed' },
+    commitment: 'processed' | 'confirmed' = 'confirmed',
+  ) {
     const { instructions } = await client.execute({
       payer: ctx.payer.address,
       walletPda,
       signer: secp256r1(signer, floor),
       instructions: [systemTransferFromPda(vaultPda, sink, 1n)],
     });
-    return sendTx(ctx, instructions);
+    return sendTx(ctx, instructions, [], ctx.payer, commitment);
   }
 
-  it("tx2 prepared at tx1's landing slot signs the next counter and lands", async () => {
-    const before = await client.readCounter(authorityPda);
+  /** How tx2 ends: `null` once confirmed without error, else its error. */
+  async function outcome(send: () => Promise<string>): Promise<unknown> {
+    try {
+      await send();
+      return null;
+    } catch (e) {
+      return e;
+    }
+  }
 
-    const sig1 = await payOut();
+  /** tx1, confirmed at 'processed' only; returns the slot it landed in. */
+  async function tx1AtProcessed(): Promise<bigint> {
+    const sig1 = await payOut(undefined, 'processed');
     const {
       value: [status1],
     } = await ctx.rpc.getSignatureStatuses([toSignature(sig1)]).send();
     expect(status1?.err).toBeNull();
+    return status1!.slot;
+  }
 
-    await payOut({ minContextSlot: status1!.slot });
-    expect(await client.readCounter(authorityPda)).toBe(before + 2);
+  it('negative control: without a floor, tx2 read right after tx1 is processed signs the spent counter (3006)', async () => {
+    let spent = 0;
+    for (let round = 0; round < 3; round++) {
+      const landed = await tx1AtProcessed();
+      // No floor: the reads are at 'confirmed', which has not seen tx1 yet.
+      const err2 = await outcome(() => payOut());
+      if (err2 !== null) {
+        expect(isSpentCounter(err2), String(err2)).toBe(true);
+        spent++;
+      }
+      // The next round starts from a counter every bank agrees on.
+      await client.readCounter(authorityPda, { minContextSlot: landed });
+    }
+    expect(spent).toBeGreaterThan(0);
+  });
+
+  it("tx2 floored at tx1's landing slot lands, though tx1 was only seen processed", async () => {
+    const before = await client.readCounter(authorityPda);
+    for (let round = 0; round < 3; round++) {
+      const landed = await tx1AtProcessed();
+      expect(await outcome(() => payOut({ minContextSlot: landed }))).toBeNull();
+    }
+    expect(await client.readCounter(authorityPda)).toBe(before + 6);
+  });
+
+  // A caller that confirms at 'processed' reads there too (a 'confirmed'
+  // preflight would reject tx2 the same way, so it sends there as well).
+  it("a caller at 'processed' throughout: tx2 read right after tx1 lands", async () => {
+    const atProcessed = { commitment: 'processed' as const };
+    const before = await client.readCounter(authorityPda, atProcessed);
+    for (let round = 0; round < 3; round++) {
+      await payOut(atProcessed, 'processed');
+      expect(await outcome(() => payOut(atProcessed, 'processed'))).toBeNull();
+    }
+    expect(await client.readCounter(authorityPda, atProcessed)).toBe(before + 6);
   });
 
   it('waits for a node that has not reached the floor yet, then reads', async () => {

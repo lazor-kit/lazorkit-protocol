@@ -123,7 +123,7 @@ describe('challenge reads — options reach every read', () => {
     expect(prepared.challenge).toHaveLength(32);
   });
 
-  it("defaults to 'confirmed' with no floor, whatever the connection's own commitment", async () => {
+  it("defaults to 'confirmed' with no floor on a Connection built without a commitment", async () => {
     let authority: PublicKey | undefined;
     const { connection, reads } = recordingConnection(() => authority);
     const client = new LazorKitClient(connection, PROGRAM_ID);
@@ -133,6 +133,53 @@ describe('challenge reads — options reach every read', () => {
 
     expect(reads).toHaveLength(3);
     for (const r of reads) expect(r.config).toEqual({ commitment: 'confirmed' });
+  });
+
+  // Never staler than the Connection: 1.2.0 read at the Connection's own
+  // commitment, and a 'processed' Connection confirms its sends at processed.
+  // A 'confirmed' read right after holds the counter the previous transaction
+  // used (3006 on chain), or no authority at all right after createWallet.
+  // A 'finalized' Connection (or none: the RPC's default is finalized) is read
+  // at 'confirmed', seconds fresher.
+  for (const [own, expected] of [
+    ['processed', 'processed'],
+    ['recent', 'processed'],
+    ['confirmed', 'confirmed'],
+    ['finalized', 'confirmed'],
+  ] as const) {
+    it(`on a Connection at '${own}', the default reads are at '${expected}'`, async () => {
+      let authority: PublicKey | undefined;
+      const { connection, reads } = recordingConnection(() => authority);
+      Object.assign(connection, { commitment: own });
+      expect(connection.commitment).toBe(own);
+      const client = new LazorKitClient(connection, PROGRAM_ID);
+      authority = client.findAuthority(walletPda, credentialIdHash)[0];
+
+      await client.prepareExecute({ payer, walletPda, secp256r1: { credentialIdHash }, instructions: [] });
+      expect(await client.readCounter(authority)).toBe(COUNTER);
+      expect(await readAuthorityCounter(connection, authority)).toBe(COUNTER);
+
+      expect(reads).toHaveLength(5);
+      for (const r of reads) expect(r.config).toEqual({ commitment: expected });
+    });
+  }
+
+  it("an explicit commitment wins over a 'processed' Connection's", async () => {
+    let authority: PublicKey | undefined;
+    const { connection, reads } = recordingConnection(() => authority);
+    Object.assign(connection, { commitment: 'processed' });
+    const client = new LazorKitClient(connection, PROGRAM_ID);
+    authority = client.findAuthority(walletPda, credentialIdHash)[0];
+
+    await client.prepareExecute({
+      payer,
+      walletPda,
+      secp256r1: { credentialIdHash, commitment: 'confirmed', minContextSlot: 7 },
+      instructions: [],
+    });
+
+    expect(reads).toHaveLength(3);
+    for (const r of reads) expect(r.config).toEqual({ commitment: 'confirmed', minContextSlot: 7 });
   });
 
   it('readCounter takes the same options', async () => {

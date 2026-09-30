@@ -71,7 +71,7 @@ async function readAuthorityAccount(
   what: string,
 ) {
   const { value } = await atOrAfterContextSlot(
-    () => connection.getAccountInfoAndContext(authorityPda, challengeReadConfig(opts)),
+    () => connection.getAccountInfoAndContext(authorityPda, challengeReadConfig(connection, opts)),
     opts?.minContextSlot,
     what,
   );
@@ -82,9 +82,9 @@ async function readAuthorityAccount(
  * Reads the current odometer counter from an on-chain authority account.
  * The counter is a u32 LE at offset 8 of the AuthorityAccountHeader.
  *
- * Read at `opts.commitment` (default `'confirmed'`) and, with
- * `opts.minContextSlot`, from a node at or past that slot: see
- * {@link ChallengeReadOptions}.
+ * Read at `opts.commitment` (default `'confirmed'`, or `'processed'` on a
+ * Connection at `'processed'`) and, with `opts.minContextSlot`, from a node at
+ * or past that slot: see {@link ChallengeReadOptions}.
  */
 export async function readAuthorityCounter(
   connection: Connection,

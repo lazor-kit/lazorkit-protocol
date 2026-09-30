@@ -2,17 +2,32 @@
  * Two passkey transactions from one authority, back to back, on a validator.
  *
  * tx2's challenge signs the authority's counter + 1, read when tx2 is
- * prepared. Sent before tx1 has executed, that read returns the counter tx1 is
- * about to use and tx2 fails with SignatureReused (3006) — three pairs out of
- * three on devnet with a wallet and relayer that answer before confirming. The
- * floor: confirm tx1, and read tx2's counter, key and slot at or after the
- * slot tx1 landed in (`minContextSlot`). Also pinned here, against a real
- * node: a floor the node has not reached yet is waited for (-32016 comes back
- * with its code through web3.js), and one it never reaches ends in
- * MinContextSlotNotReachedError, not in a stale read.
+ * prepared. Read from a bank that has not executed tx1 yet, that is the
+ * counter tx1 is about to use, and tx2 fails with SignatureReused (3006) —
+ * three pairs out of three on devnet with a wallet and relayer that answer
+ * before confirming. The floor: read tx2's counter, key and slot at or after
+ * the slot tx1 landed in (`minContextSlot`).
+ *
+ * One node stands in for a lagging one here: tx1 is confirmed at `processed`
+ * only, and tx2's reads are at `confirmed`, a slot or so behind. The first case
+ * is the negative control: without the floor tx2 signs the spent counter, so
+ * this setup reproduces the bug. With the floor it lands (an SDK that ignored
+ * the floor fails that case). Also pinned against a real node: a floor it has
+ * not reached yet is waited for (-32016 comes back with its code through
+ * web3.js), one it never reaches ends in MinContextSlotNotReachedError, not in
+ * a stale read, and a Connection at `processed` keeps reading there by default
+ * (1.2.0 read at the Connection's commitment).
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest';
-import { Keypair, LAMPORTS_PER_SOL, SystemProgram, Transaction, type PublicKey } from '@solana/web3.js';
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  SystemProgram,
+  Transaction,
+  type PublicKey,
+  type TransactionError,
+} from '@solana/web3.js';
 import * as crypto from 'crypto';
 
 import {
@@ -20,8 +35,19 @@ import {
   MinContextSlotNotReachedError,
   secp256r1,
 } from '../../sdk/sdk-legacy/src';
-import { setupTest, sendTx, makeClient, type TestContext } from './common';
+import { RPC_URL, setupTest, sendTx, makeClient, type TestContext } from './common';
 import { createMockRawSigner, generateMockSecp256r1Key } from './secp256r1Utils';
+
+type Sent = { signature: string; blockhash: string; lastValidBlockHeight: number };
+
+/** SignatureReused, from a preflight error or a landed `{ InstructionError: [i, { Custom }] }`. */
+function isSpentCounter(err: unknown): boolean {
+  const text =
+    err instanceof Error
+      ? `${err.message} ${(err as { logs?: string[] }).logs ?? ''}`
+      : JSON.stringify(err);
+  return /"Custom":3006\b/.test(text) || /custom program error: 0xbbe\b/i.test(text);
+}
 
 describe('back-to-back passkey transactions', () => {
   let ctx: TestContext;
@@ -57,39 +83,82 @@ describe('back-to-back passkey transactions', () => {
     ]);
   });
 
-  /** One lamport out of the vault, signed by the passkey, with `floor` on its reads. */
-  async function payOut(floor?: { minContextSlot?: number }) {
-    const { instructions } = await client.execute({
+  /**
+   * One lamport out of the vault, signed by the passkey through `lk`, with
+   * `floor` on its reads. Answers as soon as the RPC accepts it, as the wallet
+   * and relayer did; preflight runs at the Connection's commitment.
+   */
+  async function payOut(
+    floor?: { minContextSlot?: number; commitment?: 'processed' | 'confirmed' },
+    lk: LazorKitClient = client,
+    connection: Connection = ctx.connection,
+  ): Promise<Sent> {
+    const { instructions } = await lk.execute({
       payer: ctx.payer.publicKey,
       walletPda,
       signer: secp256r1(signer, floor),
       instructions: [SystemProgram.transfer({ fromPubkey: vaultPda, toPubkey: sink, lamports: 1 })],
     });
-    const { blockhash, lastValidBlockHeight } = await ctx.connection.getLatestBlockhash('confirmed');
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     const tx = new Transaction({ feePayer: ctx.payer.publicKey, blockhash, lastValidBlockHeight }).add(
       ...instructions,
     );
     tx.sign(ctx.payer);
-    // Answer as soon as the RPC accepts it, as the wallet and relayer do.
-    const signature = await ctx.connection.sendRawTransaction(tx.serialize());
+    const signature = await connection.sendRawTransaction(tx.serialize());
     return { signature, blockhash, lastValidBlockHeight };
   }
 
-  it("tx2 prepared at tx1's landing slot signs the next counter and lands", async () => {
+  /** How tx2 ends: `null` once confirmed without error, else its error (preflight or landed). */
+  async function outcome(
+    send: () => Promise<Sent>,
+    connection: Connection = ctx.connection,
+  ): Promise<TransactionError | Error | null> {
+    let sent: Sent;
+    try {
+      sent = await send();
+    } catch (e) {
+      return e as Error;
+    }
+    return (await connection.confirmTransaction(sent, 'confirmed')).value.err;
+  }
+
+  it('negative control: without a floor, tx2 read right after tx1 is processed signs the spent counter (3006)', async () => {
+    let spent = 0;
+    for (let round = 0; round < 3; round++) {
+      const tx1 = await payOut();
+      expect((await ctx.connection.confirmTransaction(tx1, 'processed')).value.err).toBeNull();
+
+      // No floor: the reads are at 'confirmed', which has not seen tx1 yet.
+      const err2 = await outcome(() => payOut());
+      if (err2 === null) continue; // the confirmed bank caught up first: no stale read this round
+      expect(isSpentCounter(err2), JSON.stringify(err2)).toBe(true);
+      spent++;
+
+      // The next round starts from a counter every bank agrees on.
+      await ctx.connection.confirmTransaction(tx1, 'confirmed');
+    }
+    expect(spent).toBeGreaterThan(0);
+  });
+
+  it("tx2 floored at tx1's slot lands, though tx1 was only seen processed", async () => {
     const before = await client.readCounter(authorityPda);
 
-    const tx1 = await payOut();
-    // What the fix asks of the caller: confirm tx1, then floor tx2's reads at its slot.
-    await ctx.connection.confirmTransaction(tx1, 'confirmed');
-    const {
-      value: [status1],
-    } = await ctx.connection.getSignatureStatuses([tx1.signature]);
-    expect(status1?.err).toBeNull();
+    for (let round = 0; round < 3; round++) {
+      const tx1 = await payOut();
+      const confirmed1 = await ctx.connection.confirmTransaction(tx1, 'processed');
+      expect(confirmed1.value.err).toBeNull();
+      const {
+        value: [status1],
+      } = await ctx.connection.getSignatureStatuses([tx1.signature]);
+      // confirmTransaction's context slot is at or after the slot tx1 landed
+      // in, so either is a floor; the README uses the former.
+      expect(confirmed1.context.slot).toBeGreaterThanOrEqual(status1!.slot);
+      const floor = round % 2 === 0 ? status1!.slot : confirmed1.context.slot;
 
-    const tx2 = await payOut({ minContextSlot: status1!.slot });
-    const confirmed2 = await ctx.connection.confirmTransaction(tx2, 'confirmed');
-    expect(confirmed2.value.err).toBeNull();
-    expect(await client.readCounter(authorityPda)).toBe(before + 2);
+      const err2 = await outcome(() => payOut({ minContextSlot: floor }));
+      expect(err2).toBeNull();
+    }
+    expect(await client.readCounter(authorityPda)).toBe(before + 6);
   });
 
   it('waits for a node that has not reached the floor yet, then reads', async () => {
@@ -115,4 +184,66 @@ describe('back-to-back passkey transactions', () => {
     expect(error).toBeInstanceOf(MinContextSlotNotReachedError);
     expect((error as MinContextSlotNotReachedError).minContextSlot).toBe(floor);
   }, 30_000);
+
+  // 1.2.0 read the challenge at the Connection's own commitment. An integrator
+  // whose Connection is at 'processed' confirms each send there and prepares
+  // the next one straight away; a 'confirmed' default would sign the spent
+  // counter every time, and not find a wallet it had just created.
+  describe("on a Connection at 'processed', with no options", () => {
+    let processed: Connection;
+    let lk: LazorKitClient;
+
+    beforeAll(() => {
+      processed = new Connection(RPC_URL, 'processed');
+      lk = makeClient(processed);
+    });
+
+    it('tx2 prepared right after tx1 confirms at processed lands', async () => {
+      const before = await client.readCounter(authorityPda, { commitment: 'processed' });
+
+      for (let round = 0; round < 3; round++) {
+        const tx1 = await payOut(undefined, lk, processed);
+        expect((await processed.confirmTransaction(tx1, 'processed')).value.err).toBeNull();
+
+        const tx2 = await payOut(undefined, lk, processed);
+        expect((await processed.confirmTransaction(tx2, 'processed')).value.err).toBeNull();
+      }
+      expect(await lk.readCounter(authorityPda)).toBe(before + 6);
+    });
+
+    it('a passkey wallet confirmed at processed is read right away', async () => {
+      const key = await generateMockSecp256r1Key();
+      const created = await lk.createWallet({
+        payer: ctx.payer.publicKey,
+        userSeed: crypto.randomBytes(32),
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: key.credentialIdHash,
+          compressedPubkey: key.publicKeyBytes,
+          rpId: key.rpId,
+        },
+      });
+      const { blockhash, lastValidBlockHeight } = await processed.getLatestBlockhash();
+      const tx = new Transaction({ feePayer: ctx.payer.publicKey, blockhash, lastValidBlockHeight }).add(
+        ...created.instructions,
+      );
+      tx.sign(ctx.payer);
+      const signature = await processed.sendRawTransaction(tx.serialize());
+      const confirmed = await processed.confirmTransaction(
+        { signature, blockhash, lastValidBlockHeight },
+        'processed',
+      );
+      expect(confirmed.value.err).toBeNull();
+
+      // Straight away: the counter and the key, as the next prepare reads them.
+      expect(await lk.readCounter(created.authorityPda)).toBe(0);
+      const { instructions } = await lk.execute({
+        payer: ctx.payer.publicKey,
+        walletPda: created.walletPda,
+        signer: secp256r1(createMockRawSigner(key)),
+        instructions: [SystemProgram.transfer({ fromPubkey: created.vaultPda, toPubkey: sink, lamports: 1 })],
+      });
+      expect(instructions.length).toBeGreaterThan(0);
+    });
+  });
 });

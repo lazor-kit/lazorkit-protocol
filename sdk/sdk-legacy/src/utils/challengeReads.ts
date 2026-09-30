@@ -20,15 +20,18 @@ import { MinContextSlotNotReachedError } from './errors';
  */
 export interface ChallengeReadOptions {
   /**
-   * Commitment for the reads. Default `'confirmed'`, whatever the
-   * Connection's own default (a Connection built without one reads at
-   * `finalized`, seconds behind).
+   * Commitment for the reads. Default `'confirmed'`, or `'processed'` when
+   * the Connection's own commitment is `'processed'`: never staler than the
+   * Connection. A Connection built without a commitment, or at `finalized`,
+   * would read seconds behind; one at `processed` confirms its sends there,
+   * and a `confirmed` read right after would miss them.
    */
   commitment?: Commitment;
   /**
    * Answer only from a node at or past this slot: pass the slot the
    * authority's previous transaction landed in (`getSignatureStatuses` →
-   * `slot`, once it is confirmed). While the node answers that it has not
+   * `slot`, once it is confirmed), or `confirmTransaction` → `context.slot`,
+   * which is at or after it. While the node answers that it has not
    * reached it yet (-32016), the read is retried with a short backoff for up
    * to 10 s, then fails with `MinContextSlotNotReachedError`.
    */
@@ -36,12 +39,27 @@ export interface ChallengeReadOptions {
 }
 
 /**
- * Commitment for the challenge reads when the caller names none, whatever the
- * Connection's own default. `confirmed` sees a transaction about a slot after
- * it lands; `finalized` (what a Connection built without a commitment asks
- * for) lags by seconds, and a counter read there after a send is stale.
+ * Commitment for the challenge reads when the caller names none and the
+ * Connection is not at `processed`. `confirmed` sees a transaction about a
+ * slot after it lands; `finalized` (what a Connection built without a
+ * commitment asks for) lags by seconds, and a counter read there after a send
+ * is stale.
  */
 export const CHALLENGE_READ_COMMITMENT: Commitment = 'confirmed';
+
+/**
+ * The commitment a challenge read uses when the caller names none: `'processed'`
+ * on a Connection at `'processed'` (or its old alias `'recent'`), otherwise
+ * {@link CHALLENGE_READ_COMMITMENT}. Never staler than the Connection: an
+ * integrator whose Connection is at `processed` confirms the previous
+ * transaction there, and a `confirmed` read right after it still holds the
+ * counter that transaction used (3006), or no authority at all when that
+ * transaction created it.
+ */
+export function defaultChallengeCommitment(connection: Connection): Commitment {
+  const own = connection.commitment;
+  return own === 'processed' || own === 'recent' ? 'processed' : CHALLENGE_READ_COMMITMENT;
+}
 
 /**
  * How long a challenge read keeps retrying while the RPC node answers that it
@@ -50,13 +68,19 @@ export const CHALLENGE_READ_COMMITMENT: Commitment = 'confirmed';
  */
 export const MIN_CONTEXT_SLOT_WAIT_MS = 10_000;
 
-/** The web3.js read config for `opts`, with the default commitment applied. */
-export function challengeReadConfig(opts?: ChallengeReadOptions): {
+/**
+ * The web3.js read config for `opts` on `connection`, with the default
+ * commitment ({@link defaultChallengeCommitment}) applied.
+ */
+export function challengeReadConfig(
+  connection: Connection,
+  opts?: ChallengeReadOptions,
+): {
   commitment: Commitment;
   minContextSlot?: number;
 } {
   return {
-    commitment: opts?.commitment ?? CHALLENGE_READ_COMMITMENT,
+    commitment: opts?.commitment ?? defaultChallengeCommitment(connection),
     ...(opts?.minContextSlot != null ? { minContextSlot: opts.minContextSlot } : {}),
   };
 }
@@ -119,7 +143,7 @@ export async function readChallengeSlot(
   opts?: ChallengeReadOptions,
 ): Promise<bigint> {
   const slot = await atOrAfterContextSlot(
-    () => connection.getSlot(challengeReadConfig(opts)),
+    () => connection.getSlot(challengeReadConfig(connection, opts)),
     opts?.minContextSlot,
     'the slot',
   );

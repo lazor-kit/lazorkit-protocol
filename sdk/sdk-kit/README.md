@@ -379,18 +379,24 @@ A passkey challenge signs the authority's counter + 1, read when you call
 authority has been sent but not yet executed by the node you read from, that
 read returns the counter it is about to use, and the new signature fails with
 `SignatureReused` (3006) — after the user has approved it. Wait for the
-previous transaction to confirm and pass the slot it landed in:
+previous transaction to confirm, then pass the slot it landed in:
 
 ```ts
-const { value: [status] } = await rpc.getSignatureStatuses([signature]).send();
+// tx1: wait for it first. sendAndConfirmTransactionFactory throws if it failed.
+await sendAndConfirmTransaction(signedTx1, { commitment: 'confirmed' });
+
+const { value: [status] } = await rpc.getSignatureStatuses([signature1]).send();
+// null: this node has not seen tx1 yet (another node behind a load balancer
+// answered). Ask again; do not prepare without the floor.
+if (!status) throw new Error('tx1 not visible on this RPC node yet, retry');
 
 const prepared = await lk.prepareExecute({
   payer,
   walletPda,
   secp256r1: {
     credentialIdHash,
-    minContextSlot: status!.slot, // read from a node that has executed it
-    // commitment: 'confirmed',   // the default
+    minContextSlot: status.slot, // read from a node that has executed tx1
+    // commitment: 'confirmed',  // the default
   },
   instructions,
 });
@@ -402,6 +408,13 @@ on `readCounter`, and apply to the counter, key and slot reads alike. A node
 behind the floor answers -32016; the SDK retries with a short backoff for up to
 10 s, then throws `MinContextSlotNotReachedError`. Same behaviour as
 `@lazorkit/sdk-legacy`, where `minContextSlot` is a `number`.
+
+Without `minContextSlot` the reads are at `confirmed`, whatever the RPC's own
+default. That is enough only when the node answering them has executed the
+previous transaction; behind a load-balanced endpoint it may not have, even
+after tx1 confirmed on another node, so pass the floor anyway. If you confirm
+at `processed`, read at `processed` too (`commitment: 'processed'`, and send
+with a `processed` preflight): a `confirmed` read right after misses tx1.
 
 ## Package layout
 

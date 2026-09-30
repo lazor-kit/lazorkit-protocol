@@ -718,9 +718,9 @@ export class LazorKitClient {
 
   /**
    * The authority's odometer counter: the next passkey challenge signs one
-   * more. Read at `opts.commitment` (default `'confirmed'`) and, with
-   * `opts.minContextSlot`, from a node at or past that slot — see
-   * {@link Secp256r1Params.minContextSlot}.
+   * more. Read at `opts.commitment` (default `'confirmed'`, or `'processed'`
+   * on a Connection at `'processed'`) and, with `opts.minContextSlot`, from a
+   * node at or past that slot — see {@link Secp256r1Params.minContextSlot}.
    */
   async readCounter(authorityPda: PublicKey, opts?: ChallengeReadOptions): Promise<number> {
     return readAuthorityCounter(this.connection, authorityPda, opts);
@@ -2907,7 +2907,8 @@ export class LazorKitClient {
     minContextSlot?: number;
     /**
      * Passkey owner only: commitment for those two reads (default
-     * `'confirmed'`). The migration's other reads are unaffected.
+     * `'confirmed'`, or `'processed'` on a Connection at `'processed'`). The
+     * migration's other reads are unaffected.
      */
     commitment?: Commitment;
   }): Promise<{
