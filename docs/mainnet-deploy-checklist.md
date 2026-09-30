@@ -160,8 +160,9 @@ files. Nothing below deploys a path that a later build could overwrite.
       `check-release-hashes.sh` rebuilds mainnet, mainnet-v1, devnet and
       devnet-v1 in its own fresh target dir with the same flags, refuses any
       cargo-build-sbf but 4.1.0, and compares size and SHA-256 with
-      `scripts/release-hashes.txt`, which the SBF cluster check also enforces
-      in CI, on a macOS runner. The two `target/artifacts` builds above must hash the
+      `scripts/release-hashes.txt`, which the SBF cluster check also runs in
+      CI, on a macOS runner (job `release-hashes`: a red check, which blocks a
+      merge only if the repository makes it required). The two `target/artifacts` builds above must hash the
       same as its `mainnet` and `mainnet-v1` lines. A mismatch on a release
       commit whose program did not change means this machine does not
       reproduce the build: stop.

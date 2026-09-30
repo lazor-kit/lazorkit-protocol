@@ -7,11 +7,13 @@
 # sbf-toolchain.sh).
 #
 # scripts/check-release-hashes.sh rebuilds and compares; the SBF cluster check
-# runs it on a macOS arm64 runner on every change to the program, so a change
-# that moves a binary fails CI until this file (and the tables in
-# docs/mainnet-deploy-checklist.md) record the new hashes. A mismatch with no
-# program change means the build is not reproducible on that machine: stop and
-# find out why before deploying.
+# runs it (job release-hashes) on a macOS arm64 runner on every change to the
+# program, on every push to main and develop, and weekly, so a change that
+# moves a binary turns that check red until this file (and the tables in
+# docs/mainnet-deploy-checklist.md) record the new hashes. A red check stops a
+# merge only where the repository makes release-hashes a required check. A
+# mismatch with no program change means the build is not reproducible on that
+# machine: stop and find out why before deploying.
 #
 # feature      bytes   sha256
 mainnet        150776  4cb8030466d269efa867f0ab2bc989cccd1857c2a753e67578267e4a6b144b12
