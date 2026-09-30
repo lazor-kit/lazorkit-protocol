@@ -13,16 +13,18 @@ name: SBF cluster feature check
 #      `compile_error!` (otherwise nothing prevents an unflagged build
 #      from silently embedding whichever ID happens to be the default).
 #
-#   5. (job release-hashes, on ubuntu and on macOS arm64) The release
-#      artifacts — mainnet, mainnet-v1, devnet, devnet-v1 — rebuilt in a fresh
-#      target dir, hash to what scripts/release-hashes.txt records
-#      (scripts/check-release-hashes.sh). A program change that moves a binary
-#      fails here until the record is updated, and a toolchain, dependency or
-#      host drift that moves one fails here instead of at deploy time. The
-#      script builds with GITHUB_SHA and GITHUB_REF_NAME unset: security.txt
-#      compiles both in, Actions sets both, and the recorded artifacts have
-#      them empty. (So the hashes the cluster-check job prints below are this
-#      CI commit's, not the release ones.)
+#   5. (job release-hashes, on macOS arm64) The release artifacts — mainnet,
+#      mainnet-v1, devnet, devnet-v1 — rebuilt in a fresh target dir, hash to
+#      what scripts/release-hashes.txt records (scripts/check-release-hashes.sh).
+#      A program change that moves a binary fails here until the record is
+#      updated, and a toolchain or dependency drift that moves one fails here
+#      instead of at deploy time. Two more inputs are fixed for it: the script
+#      builds with GITHUB_SHA and GITHUB_REF_NAME unset (security.txt compiles
+#      both in, Actions sets both, the recorded artifacts have them empty), and
+#      it runs on macOS on Apple silicon, the host the record is for:
+#      platform-tools' std embeds the paths it was built under, and the Linux
+#      package builds other bytes. (So the hashes the ubuntu cluster-check job
+#      prints below are neither the release ones nor comparable to them.)
 #
 # The toolchain is pinned (scripts/sbf-toolchain.sh: Agave v4.2.2, whose
 # cargo-build-sbf is 4.1.0, and platform-tools v1.53), not the stable
@@ -208,18 +210,13 @@ jobs:
           fi
           echo "✓ both-features build correctly rejected"
 
-  # The release artifacts, rebuilt on a Linux and a macOS (Apple silicon)
-  # runner, must hash as recorded: the record was made on a Mac, and a second
-  # machine has to reproduce it. No cache: the script builds in a fresh target
-  # dir anyway, so nothing from another toolchain can leak into what it hashes.
+  # The release artifacts, rebuilt on a second machine of the host the record
+  # is for (macOS, Apple silicon), must hash as recorded. No cache: the script
+  # builds in a fresh target dir anyway, so nothing from another toolchain can
+  # leak into what it hashes.
   release-hashes:
-    name: release hashes (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v4
 
@@ -227,7 +224,7 @@ jobs:
         run: |
           . scripts/sbf-toolchain.sh
           echo "SBF_AGAVE_RELEASE=$SBF_AGAVE_RELEASE" >> "$GITHUB_ENV"
-          echo "host: $(sbf_host)"
+          echo "host: $(sbf_host), release host: $SBF_RELEASE_HOST"
 
       - name: Install Solana toolchain (pinned)
         run: |

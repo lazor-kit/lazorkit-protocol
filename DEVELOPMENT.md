@@ -59,8 +59,9 @@ cargo build-sbf --features devnet-v1 --tools-version v1.53 --arch v0    # 4h3XoN
 ```
 
 The release toolchain is pinned in `scripts/sbf-toolchain.sh`: Agave v4.2.2
-(`cargo-build-sbf --version` says 4.1.0), platform-tools v1.53, SBPF v0, and
-`GITHUB_SHA` / `GITHUB_REF_NAME` unset. All of it changes the bytes:
+(`cargo-build-sbf --version` says 4.1.0), platform-tools v1.53, SBPF v0,
+`GITHUB_SHA` / `GITHUB_REF_NAME` unset, and macOS on Apple silicon. All of it
+changes the bytes:
 
 - **cargo-build-sbf 4.1.0.** 4.4.0 (what the stable installer brings since
   2026-09-22) disables LTO for a crate that is both `cdylib` and `lib`, as this
@@ -77,11 +78,19 @@ The release toolchain is pinned in `scripts/sbf-toolchain.sh`: Agave v4.2.2
   The recorded artifacts have both empty; GitHub Actions sets both, and a
   build there is 48 bytes larger. `sbf_release_env` in the pin file unsets
   them.
+- **macOS on Apple silicon.** platform-tools is a separate package per host,
+  and its precompiled std embeds the paths it was built under
+  (`/Users/runner/work/platform-tools/…` on macOS, `/home/runner/…` on Linux)
+  in panic locations. A Linux build of the same commit with everything else
+  equal hashes otherwise (mainnet `f655b300…`, a 45848-byte sunset). The
+  record was made on an Apple-silicon Mac, and GitHub's `macos-15` runner
+  rebuilds it byte for byte.
 
 `./scripts/check-release-hashes.sh` rebuilds mainnet, mainnet-v1, devnet and
 devnet-v1 that way in a fresh target dir and compares each with
-`scripts/release-hashes.txt`; it refuses to run on another cargo-build-sbf. CI
-runs it on ubuntu and on macOS (Apple silicon), where the record was made. A
+`scripts/release-hashes.txt`; it refuses to run on another cargo-build-sbf or
+another host (`SBF_ANY_HOST=1` compares anyway). CI runs it on a `macos-15`
+runner. A
 change that moves a binary must update that file (and the tables in
 `docs/mainnet-deploy-checklist.md`) — the SBF cluster check fails until it does.
 The build scripts (`build-all.sh`, `build-repro-fixtures.sh`,
@@ -171,9 +180,9 @@ the program, its crates, `Cargo.lock`, the toolchain pin or the hash record,
 and on pushes to `main` / `develop`. It installs the pinned toolchain (Agave
 v4.2.2, and checks cargo-build-sbf is 4.1.0), builds both mainnet and devnet
 SBF binaries, verifies they differ, verifies invalid feature selections fail at
-compile time; a second job runs `scripts/check-release-hashes.sh` on ubuntu
-and on macOS: the four release artifacts, rebuilt in a fresh target dir, must
-match `scripts/release-hashes.txt`. The `program litesvm integration` job of
+compile time; a second job runs `scripts/check-release-hashes.sh` on a
+`macos-15` (Apple silicon) runner: the four release artifacts, rebuilt in a
+fresh target dir, must match `scripts/release-hashes.txt`. The `program litesvm integration` job of
 `lint` uses the same pinned toolchain.
 
 Local-validator integration tests are still a manual release/audit check:

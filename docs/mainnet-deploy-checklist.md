@@ -119,7 +119,7 @@ files. Nothing below deploys a path that a later build could overwrite.
 
 - [ ] **The pinned toolchain** (`scripts/sbf-toolchain.sh`): Agave **v4.2.2**,
       whose `cargo-build-sbf` is **4.1.0**, with platform-tools **v1.53** and
-      `--arch v0`. Not the stable installer:
+      `--arch v0`, **on a Mac with Apple silicon**. Not the stable installer:
       ```bash
       sh -c "$(curl -sSfL https://release.anza.xyz/v4.2.2/install)"   # or: agave-install init v4.2.2
       cargo-build-sbf --version   # must print "cargo-build-sbf 4.1.0"; anything else: stop
@@ -138,6 +138,15 @@ files. Nothing below deploys a path that a later build could overwrite.
       and the recorded artifacts have both empty. They are unset in a normal
       shell; GitHub Actions sets both, and a build there is 48 bytes larger
       with other hashes. `check-release-hashes.sh` unsets them itself.
+      ⚠️ **Build on macOS (Apple silicon), not Linux.** platform-tools is a
+      separate package per host, and its precompiled std embeds the paths it
+      was built under (`/Users/runner/work/platform-tools/…` on macOS,
+      `/home/runner/…` on Linux) in the program's panic locations. With
+      everything else equal, the Linux package builds this commit as mainnet
+      `f655b300…` (150776 bytes), mainnet-v1 `044cdc08…` (45848), devnet
+      `cd253e68…`, devnet-v1 `7cc0c17a…`. The tables below are macOS builds,
+      and GitHub's `macos-15` runner reproduces them byte for byte. (Intel
+      macOS is not checked.)
 - [ ] Build from the pinned release commit, **each into its own directory**:
       ```bash
       T=$(mktemp -d)   # a fresh target dir: see the --tools-version note below
@@ -152,7 +161,7 @@ files. Nothing below deploys a path that a later build could overwrite.
       devnet-v1 in its own fresh target dir with the same flags, refuses any
       cargo-build-sbf but 4.1.0, and compares size and SHA-256 with
       `scripts/release-hashes.txt`, which the SBF cluster check also enforces
-      in CI, on ubuntu and on macOS. The two `target/artifacts` builds above must hash the
+      in CI, on a macOS runner. The two `target/artifacts` builds above must hash the
       same as its `mainnet` and `mainnet-v1` lines. A mismatch on a release
       commit whose program did not change means this machine does not
       reproduce the build: stop.
@@ -187,9 +196,9 @@ files. Nothing below deploys a path that a later build could overwrite.
       artifact over 100 KB is the wrong file; stop.
 - [ ] Record the toolchain and all three SHA-256 hashes in the deploy log.
       Builds are only trustworthy if reproducible — a second machine must
-      produce the same hashes, and CI is two: the SBF cluster check installs
-      Agave v4.2.2 on an ubuntu and a macOS runner and holds the four builds
-      to `scripts/release-hashes.txt` on each.
+      produce the same hashes, and CI is one: the SBF cluster check installs
+      Agave v4.2.2 on a `macos-15` runner and holds the four builds to
+      `scripts/release-hashes.txt`.
       ⚠️ **The toolchain moved twice since the 2026-09-11 rehearsal.** That run
       used solana-cli 4.0.3 with platform-tools v1.53. The tables below were
       built with solana-cli 4.2.2 (cargo-build-sbf 4.1.0) and v1.53 on
