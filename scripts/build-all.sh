@@ -60,4 +60,5 @@ cd "$SDK_DIR"
 npm run build
 
 echo "--- ✅ Done ($CLUSTER) ---"
-echo "Deploy:  solana program deploy target/deploy/lazorkit_program.so -u $([ "$CLUSTER" = "mainnet" ] && echo m || echo d)"
+echo "Built:   target/deploy/lazorkit_program.so (a dev build: deploy only what docs/upgrade-procedure.md §6"
+echo "         or DEVELOPMENT.md \"Deploy to Devnet\" build, never this file)"

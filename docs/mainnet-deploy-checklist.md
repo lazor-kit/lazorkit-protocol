@@ -1048,7 +1048,7 @@ What it found, and what carries to mainnet:
 With a real multisig, members approve from their own wallets:
 
 ```bash
-solana program write-buffer lazorkit_program.so -um
+solana program write-buffer target/artifacts/sunset/lazorkit_program.so -um   # §2's artifact for LazorjRF…, re-hashed
 solana program set-buffer-authority <buffer> --new-buffer-authority <vault> -um
 PROPOSE_ONLY=1 RPC_URL=<mainnet-rpc> PROGRAM_ID=LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi \
   PAYER=<payer.json> MEMBERS=<proposer.json> MULTISIG=<multisig address> \

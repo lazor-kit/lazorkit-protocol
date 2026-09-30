@@ -189,16 +189,36 @@ swept to the owner-approved destination and the v1 wallet + authority closed.
 
 ### 6. Deploy
 
+Deploy only a file built from the release commit that matches the `mainnet`
+line of `scripts/release-hashes.txt`. The program change (step 2) records its
+new hash there; the SBF cluster check's `release-hashes` job is red until it
+does. `check-release-hashes.sh` builds that file the release way — the pinned
+toolchain (`scripts/sbf-toolchain.sh`: cargo-build-sbf 4.1.0 from Agave
+v4.2.2, platform-tools v1.53, `--arch v0`) in a fresh target dir, with
+`GITHUB_SHA` / `GITHUB_REF_NAME` unset — checks that it is SBPF v0, and
+compares it with the record. With `OUT` it keeps the file it checked, and it
+exits non-zero on any mismatch, so the deploy after `&&` runs only on a match.
+Put the size and hash its `ok` line prints in the deploy log.
+
 ```bash
-# The pinned toolchain (scripts/sbf-toolchain.sh): cargo-build-sbf 4.1.0 from
-# Agave v4.2.2, platform-tools v1.53; v3 is the default from cargo-build-sbf 4.4.0,
-# which also drops LTO for this crate. mainnet-deploy-checklist.md §2 has the
-# fresh-target-dir form and scripts/check-release-hashes.sh the recorded hashes.
-cargo build-sbf --features mainnet --tools-version v1.53 --arch v0
-./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
-sha256sum target/deploy/lazorkit_program.so     # record it
-solana program deploy target/deploy/lazorkit_program.so -u m
+OUT=target/artifacts ./scripts/check-release-hashes.sh mainnet &&
+  solana program deploy target/artifacts/mainnet/lazorkit_program.so \
+    --program-id LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8 \
+    --upgrade-authority <upgrade-authority.json> \
+    --url <mainnet-rpc>
 ```
+
+Never a bare `cargo build-sbf` and `target/deploy/lazorkit_program.so`: with
+`CARGO_TARGET_DIR` set (the `cargo` wrapper on the deploy machine points it at
+`.git/shared-target`), the build writes there and `target/deploy/` keeps
+whatever was last copied into it, and in a reused target dir neither
+`--tools-version` nor unsetting `GITHUB_SHA` triggers a rebuild. Every check
+would then pass on the wrong file. A mismatch on the release commit means the
+record was not updated with the program change, or this machine does not
+reproduce the build: stop. `mainnet` is pinned to the v2 id, so a build for a
+new id needs its own cluster feature and a record line of its own, and its
+first deploy signs with that id's keypair (checklist §4). With the upgrade
+authority in the Squads vault, `write-buffer` this same file instead (below).
 
 Then re-initialise: `InitializeProtocol`, `InitializeTreasuryShard` per shard.
 A `PROTOCOL_VERSION` bump moves those PDAs, so they are fresh accounts, not
