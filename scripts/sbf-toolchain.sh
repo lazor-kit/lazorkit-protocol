@@ -24,6 +24,20 @@ SBF_AGAVE_RELEASE=v4.2.2
 SBF_CARGO_BUILD_SBF_VERSION=4.1.0
 SBF_PLATFORM_TOOLS_VERSION=v1.53
 
+# The host the release hashes (scripts/release-hashes.txt) are for: macOS on
+# Apple silicon. platform-tools is a separate build per host, and its
+# precompiled std carries the absolute paths it was built under into every
+# program's panic locations (/Users/runner/work/platform-tools/… in the macOS
+# package). The Linux v1.53 package builds this source 48 bytes larger
+# (40 for a sunset binary) with other hashes, the same cargo-build-sbf and
+# flags notwithstanding. Build and check release artifacts on this host.
+SBF_RELEASE_HOST="Darwin arm64"
+
+# "Darwin arm64", "Linux x86_64", …
+sbf_host() {
+  echo "$(uname -s) $(uname -m)"
+}
+
 # The version cargo-build-sbf on PATH reports ("cargo-build-sbf 4.1.0" -> 4.1.0),
 # or nothing when it is not installed.
 sbf_cargo_build_sbf_version() {

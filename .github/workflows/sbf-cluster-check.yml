@@ -13,11 +13,15 @@ name: SBF cluster feature check
 #      `compile_error!` (otherwise nothing prevents an unflagged build
 #      from silently embedding whichever ID happens to be the default).
 #
-#   5. The release artifacts — mainnet, mainnet-v1, devnet, devnet-v1 —
-#      rebuilt in a fresh target dir, hash to what scripts/release-hashes.txt
-#      records (scripts/check-release-hashes.sh). A program change that moves
-#      a binary fails here until the record is updated, and a toolchain or
-#      dependency drift that moves one fails here instead of at deploy time.
+#   5. (job release-hashes, on macOS arm64) The release artifacts — mainnet,
+#      mainnet-v1, devnet, devnet-v1 — rebuilt in a fresh target dir, hash to
+#      what scripts/release-hashes.txt records (scripts/check-release-hashes.sh).
+#      A program change that moves a binary fails here until the record is
+#      updated, and a toolchain or dependency drift that moves one fails here
+#      instead of at deploy time. macOS on Apple silicon because the record is
+#      for that host: platform-tools is a separate build per host, its std
+#      carries the paths it was built under, and the Linux package builds this
+#      program 48 bytes larger (see scripts/sbf-toolchain.sh).
 #
 # The toolchain is pinned (scripts/sbf-toolchain.sh: Agave v4.2.2, whose
 # cargo-build-sbf is 4.1.0, and platform-tools v1.53), not the stable
@@ -90,6 +94,11 @@ jobs:
       - name: Build mainnet binary
         working-directory: program
         run: cargo build-sbf --features mainnet --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0
+
+      # Information only: why a Linux build does not hash like the release
+      # record (macOS). platform-tools' precompiled std names its own sources.
+      - name: Host-specific paths in the Linux build
+        run: strings -n 8 target/deploy/lazorkit_program.so | grep '^/' || true
 
       - name: Record mainnet hash
         id: mainnet
@@ -203,8 +212,31 @@ jobs:
           fi
           echo "✓ both-features build correctly rejected"
 
-      # Last, so the checks above report even when this one fails. Its own
-      # fresh target dir (the script makes one): nothing from the cache above
-      # can leak into the artifacts it hashes.
+  # The release artifacts, rebuilt on the host the record is for, must hash as
+  # recorded. No cache: the script builds in a fresh target dir anyway, and
+  # nothing from another toolchain can leak into what it hashes.
+  release-hashes:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the toolchain pin
+        run: |
+          . scripts/sbf-toolchain.sh
+          echo "SBF_AGAVE_RELEASE=$SBF_AGAVE_RELEASE" >> "$GITHUB_ENV"
+          echo "host: $(sbf_host), release host: $SBF_RELEASE_HOST"
+
+      - name: Install Solana toolchain (pinned)
+        run: |
+          sh -c "$(curl -sSfL "https://release.anza.xyz/$SBF_AGAVE_RELEASE/install")"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Check cargo-build-sbf is the pinned version
+        run: |
+          cargo-build-sbf --version
+          . scripts/sbf-toolchain.sh
+          sbf_toolchain_check strict
+
       - name: Release artifacts match scripts/release-hashes.txt
         run: ./scripts/check-release-hashes.sh mainnet mainnet-v1 devnet devnet-v1
