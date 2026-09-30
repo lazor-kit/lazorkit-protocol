@@ -407,15 +407,24 @@ The same `minContextSlot` / `commitment` go on a signer config
 on `readCounter`, and apply to the counter, key and slot reads alike. A node
 behind the floor answers -32016; the SDK retries with a short backoff for up to
 10 s, then throws `MinContextSlotNotReachedError` (its `commitment` says which
-bank was behind). If one of the three reads fails for another reason, the call
-rejects with that error at once and the other two stop retrying. Same
-behaviour as `@lazorkit/sdk-legacy`, where `minContextSlot` is a `number`.
+bank was behind). If one of the three reads fails for another reason (or, in
+`prepareExecute`, the protocol-fee read beside them), the call rejects with
+that error at once and the challenge reads stop retrying. Same behaviour as
+`@lazorkit/sdk-legacy`, where `minContextSlot` is a `number`.
 
 With `commitment: 'finalized'`, `minContextSlot` is a slot the node must have
-*finalized*, about 32 slots (13 s on mainnet) after it was confirmed. The reads
-then wait up to 30 s, so a floor at a just-confirmed tx1 costs that much before
-the passkey prompt. Unless you need finalized reads, keep the default:
-`confirmed` with the floor is enough to sign the right counter.
+*finalized*. How long after its confirmation that happens depends on the
+cluster: 31 slots (16.5 s) on a local test validator (Agave 4.2.2), and no time
+at all on devnet on 2026-09-30, where the finalized slot was the confirmed one.
+The reads wait up to 30 s for it, so where finalization lags, a floor at a
+just-confirmed tx1 costs that lag before the passkey prompt. The challenge's
+slot is read at `finalized` too, so it is already that many slots old when the
+prompt appears, and the program accepts a challenge only until its slot is 150
+slots old (about a minute): a 31-slot lag leaves about 119 slots to approve,
+send and land it. It is not read at `confirmed` instead because the program
+also refuses a slot newer than the one it runs in, so a relayer simulating at
+`finalized` would refuse the challenge. Unless you need finalized reads, keep
+the default: `confirmed` with the floor is enough to sign the right counter.
 
 Without `minContextSlot` the reads are at `confirmed`, whatever the RPC's own
 default. That is enough only when the node answering them has executed the

@@ -136,7 +136,7 @@ import {
   readAuthorityCounter,
   type ChallengeReadOptions,
 } from './secp256r1/secp256r1.js';
-import { readChallengeInputs } from './secp256r1/challengeReads.js';
+import { ChallengeReadGroup, readChallengeInputs } from './secp256r1/challengeReads.js';
 import {
   buildCompactLayout,
   computeAccountsHash,
@@ -910,7 +910,11 @@ export class LazorKit {
 
   // ─── Secp256r1 prepare/finalize plumbing ─────────────────────────
 
-  private async resolveSecp256r1(walletPda: Address, p: Secp256r1Params) {
+  /**
+   * `group`: when another read runs beside these, in it too (see
+   * `prepareExecute`); by default the challenge reads get one of their own.
+   */
+  private async resolveSecp256r1(walletPda: Address, p: Secp256r1Params, group?: ChallengeReadGroup) {
     assertByteLength(p.credentialIdHash, 32, 'credentialIdHash');
     if (p.publicKeyBytes) assertByteLength(p.publicKeyBytes, 33, 'publicKeyBytes');
     const authorityPda =
@@ -922,10 +926,13 @@ export class LazorKit {
     // consumed, and the signature fails with SignatureReused (3006). If one
     // read fails, the others stop waiting for the floor.
     const reads: ChallengeReadOptions = { commitment: p.commitment, minContextSlot: p.minContextSlot };
-    const { publicKeyBytes, slot, counter } = await readChallengeInputs(this.rpc, authorityPda, reads, {
-      publicKeyBytes: p.publicKeyBytes,
-      slotOverride: p.slotOverride,
-    });
+    const { publicKeyBytes, slot, counter } = await readChallengeInputs(
+      this.rpc,
+      authorityPda,
+      reads,
+      { publicKeyBytes: p.publicKeyBytes, slotOverride: p.slotOverride },
+      group,
+    );
 
     return { authorityPda, publicKeyBytes, slot, counter };
   }
@@ -2489,9 +2496,14 @@ export class LazorKit {
     feePayer?: Address;
   }): Promise<PreparedExecute> {
     const [vaultPda] = await this.findVault(params.walletPda);
+    // The challenge reads and the protocol-fee read, in parallel and in one
+    // read group: if the fee read fails, the call rejects with its error, and
+    // the challenge reads must not go on polling -32016 for the floor after
+    // that (nor start: the authority's address is derived first).
+    const reads = new ChallengeReadGroup();
     const [resolved, fee] = await Promise.all([
-      this.resolveSecp256r1(params.walletPda, params.secp256r1),
-      this.resolveProtocolFeeWithRegister(params.payer),
+      this.resolveSecp256r1(params.walletPda, params.secp256r1, reads),
+      reads.run(this.resolveProtocolFeeWithRegister(params.payer)),
     ]);
     const { authorityPda, publicKeyBytes, slot, counter } = resolved;
     const protocolFee = fee?.accounts;

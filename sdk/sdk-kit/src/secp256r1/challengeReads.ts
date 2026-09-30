@@ -39,8 +39,12 @@ export interface ChallengeReadOptions {
    * `'processed'` reads at `'processed'` too.
    *
    * With `'finalized'` and a `minContextSlot`, the reads wait until that slot
-   * is finalized on the node — about 32 slots (13 s) after it was confirmed —
-   * for up to 30 s rather than 10 s.
+   * is finalized on the node — how long after its confirmation depends on the
+   * cluster (31 slots on a local test validator, none on devnet on
+   * 2026-09-30) — for up to 30 s rather than 10 s. The slot is read at the
+   * same commitment, so the challenge carries a finalized slot: where
+   * finalization lags, that much of the program's 150-slot window is gone
+   * before the prompt (see the README).
    */
   commitment?: Commitment;
   /**
@@ -64,9 +68,12 @@ export interface ChallengeReadOptions {
  * and the signature commits to the counter, so nothing can repair it after the
  * user has approved. Retry, or read from a node that has caught up.
  *
- * At `'finalized'` the floor is the slot being finalized, which happens about
- * 32 slots (13 s) after it is confirmed; the read waits up to 30 s for that
- * (10 s at the other commitments), and the message says so.
+ * At `'finalized'` the floor is the slot being finalized. How long after its
+ * confirmation that happens is the cluster's: 31 slots (16.5 s) on a local
+ * test validator (Agave 4.2.2), none on devnet on 2026-09-30, where the
+ * finalized slot was the confirmed one. The read waits up to 30 s for it
+ * (10 s at the other commitments), and the message names both causes of a
+ * timeout there: a slot not finalized yet, or a node that is behind.
  */
 export class MinContextSlotNotReachedError extends Error {
   /** The slot the read had to be answered at or after. */
@@ -87,11 +94,13 @@ export class MinContextSlotNotReachedError extends Error {
     super(
       commitment === 'finalized'
         ? `Slot ${minContextSlot} is not finalized on the RPC node after ${waitedMs} ms ` +
-            `(reading ${what} for a passkey challenge at 'finalized'). A slot is finalized ` +
-            `about 32 slots (13 s) after it is confirmed. Wait for the previous transaction ` +
-            `to be finalized before preparing, or read at 'confirmed' (the default) with the ` +
-            `same minContextSlot. Reading older state instead would sign a counter that ` +
-            `transaction may have spent: SignatureReused (3006).`
+            `(reading ${what} for a passkey challenge at 'finalized'). Either the cluster ` +
+            `has not finalized it yet (how long that takes after confirmation depends on ` +
+            `the cluster) or this node is behind. Wait for the previous transaction to be ` +
+            `finalized before preparing, read at 'confirmed' (the default) with the same ` +
+            `minContextSlot, or retry on an RPC endpoint that has caught up. Reading older ` +
+            `state instead would sign a counter that transaction may have spent: ` +
+            `SignatureReused (3006).`
         : `RPC node has not reached slot ${minContextSlot}` +
             `${commitment ? ` at '${commitment}'` : ''} after ${waitedMs} ms ` +
             `(reading ${what} for a passkey challenge). The authority's previous ` +
@@ -109,8 +118,8 @@ export class MinContextSlotNotReachedError extends Error {
 
 /**
  * Commitment for the challenge reads when the caller names none. `confirmed`
- * sees a transaction about a slot after it lands; `finalized` lags by seconds,
- * and a counter read there after a send is stale.
+ * sees a transaction about a slot after it lands; `finalized` can lag by
+ * seconds, and a counter read there after a send is then stale.
  */
 export const CHALLENGE_READ_COMMITMENT: Commitment = 'confirmed';
 
@@ -122,11 +131,13 @@ export const CHALLENGE_READ_COMMITMENT: Commitment = 'confirmed';
 export const MIN_CONTEXT_SLOT_WAIT_MS = 10_000;
 
 /**
- * The same wait at `finalized`. A node's finalized slot trails its confirmed
- * one by about 32 slots (13 s at 400 ms a slot), so a floor at a slot that was
- * just confirmed cannot be finalized within {@link MIN_CONTEXT_SLOT_WAIT_MS}:
- * every such read used to end in `MinContextSlotNotReachedError`. This covers
- * the lag with room for slow slots.
+ * The same wait at `finalized`. Where a node's finalized slot trails its
+ * confirmed one by about 32 slots (a local test validator: 31 slots, 16.5 s),
+ * a floor at a slot that was just confirmed — what the README tells callers to
+ * pass — cannot be finalized within {@link MIN_CONTEXT_SLOT_WAIT_MS}: every
+ * such read used to end in `MinContextSlotNotReachedError`. This covers that
+ * lag with room for slow slots. (On devnet on 2026-09-30 the finalized slot
+ * was the confirmed one, and a floor there is reached at once.)
  */
 export const FINALIZED_MIN_CONTEXT_SLOT_WAIT_MS = 30_000;
 
@@ -155,11 +166,16 @@ export function challengeReadConfig(opts?: ChallengeReadOptions): {
  * stops the group when the read it wraps fails, and a read waiting for the
  * floor gives up at once (its sleep ends early) instead of polling again.
  *
- * One group per challenge, created by the caller of the reads and never
- * shared: the SDK keeps no state between calls.
+ * A read that runs beside the challenge's in the same `Promise.all` goes in
+ * the group too — `prepareExecute`'s protocol-fee read — so that its failure
+ * stops them as well: the call rejects with it just the same.
+ *
+ * One group per call, created by the caller of the reads and never shared
+ * between calls: the SDK keeps no state between calls.
  */
 export class ChallengeReadGroup {
   private isStopped = false;
+  private firstFailure: unknown;
   private readonly sleepers = new Set<() => void>();
 
   /** Whether a read in the group has failed. */
@@ -167,17 +183,23 @@ export class ChallengeReadGroup {
     return this.isStopped;
   }
 
+  /** What the first read to fail threw, once the group has stopped. */
+  get failure(): unknown {
+    return this.firstFailure;
+  }
+
   /** Stop every read in the group; one asleep between retries wakes now. */
-  stop(): void {
+  stop(failure: unknown): void {
     if (this.isStopped) return;
     this.isStopped = true;
+    this.firstFailure = failure;
     for (const wake of [...this.sleepers]) wake();
   }
 
   /** `read`, stopping the group if it fails. */
   run<T>(read: Promise<T>): Promise<T> {
     return read.catch((e: unknown) => {
-      this.stop();
+      this.stop(e);
       throw e;
     });
   }
@@ -319,15 +341,20 @@ export async function readChallengeSlot(
  * its counter + 1 — read side by side at one commitment and floor, skipping
  * what the caller already has (`publicKeyBytes`, `slotOverride`). If one read
  * fails, the call rejects with its error and the others stop retrying at
- * once (see {@link ChallengeReadGroup}).
+ * once (see {@link ChallengeReadGroup}). Pass `group` when another read runs
+ * beside these (`prepareExecute`'s protocol fee) and is in it too; if it has
+ * already failed, nothing is read and its error is thrown again.
  */
 export async function readChallengeInputs(
   rpc: Rpc<GetAccountInfoApi & GetSlotApi>,
   authorityPda: Address,
   opts: ChallengeReadOptions,
   have: { publicKeyBytes?: Uint8Array; slotOverride?: bigint } = {},
+  group: ChallengeReadGroup = new ChallengeReadGroup(),
 ): Promise<{ publicKeyBytes: Uint8Array; slot: bigint; counter: number }> {
-  const group = new ChallengeReadGroup();
+  // A read beside these failed while the caller was still deriving the
+  // authority's address: the call has rejected already, so start no polling.
+  if (group.stopped) throw group.failure;
   const [publicKeyBytes, slot, counter] = await Promise.all([
     have.publicKeyBytes
       ? Promise.resolve(have.publicKeyBytes)

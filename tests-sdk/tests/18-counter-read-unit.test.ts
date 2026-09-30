@@ -380,11 +380,12 @@ describe('challenge reads — a node behind the floor', () => {
   });
 });
 
-// A floor at 'finalized' is the slot being finalized, about 32 slots (13 s)
-// after it was confirmed. With the 10 s wait of the other commitments, a
-// finalized read floored at a just-confirmed slot — what the README tells a
-// caller to pass — always ended in MinContextSlotNotReachedError, with a
-// message that blamed the RPC endpoint.
+// A floor at 'finalized' is the slot being finalized. Where finalization
+// trails confirmation by about 32 slots (a local test validator: 31 slots,
+// 16.5 s), the 10 s wait of the other commitments made a finalized read
+// floored at a just-confirmed slot — what the README tells a caller to pass —
+// always end in MinContextSlotNotReachedError. Where it trails by nothing
+// (devnet on 2026-09-30), a timeout there means a node that is behind.
 describe("challenge reads — a floor at 'finalized'", () => {
   const authorityPda = Keypair.generate().publicKey;
   const atFinalized = { commitment: 'finalized' as const, minContextSlot: 5_000 };
@@ -469,7 +470,10 @@ describe("challenge reads — a floor at 'finalized'", () => {
     expect(e.waitedMs).toBeLessThanOrEqual(30_000);
     expect(e.message).toContain('Slot 5000 is not finalized');
     expect(e.message).toContain("read at 'confirmed'");
-    expect(e.message).not.toContain('use an RPC endpoint that has caught up');
+    // How far finalization trails is the cluster's (devnet: not at all), so
+    // the message names no figure, and a node that is behind stays a cause.
+    expect(e.message).not.toMatch(/\b32 slots\b|\b13 s\b/);
+    expect(e.message).toContain('an RPC endpoint that has caught up');
   });
 
   it("'confirmed' still gives up after 10 s, and names its commitment", async () => {
@@ -580,6 +584,88 @@ describe('challenge reads — one fails, the others stop', () => {
       timersAtReject: 0,
       readsAfterReject: 0,
     });
+  });
+});
+
+// prepareExecute also resolves the protocol fee, beside the challenge reads
+// and outside their group: when the fee read was the one that failed, the
+// call rejected but the challenge reads went on polling -32016 (28 more
+// authority reads and 14 slot reads in the next 11 s).
+describe('challenge reads — the protocol-fee read beside them fails', () => {
+  const credentialIdHash = new Uint8Array(32).fill(0x3f);
+
+  it('prepareExecute rejects with the fee error, and no challenge read polls on', async () => {
+    vi.useFakeTimers();
+    const walletPda = Keypair.generate().publicKey;
+    let authority: PublicKey | undefined;
+    let challengeReads = 0;
+    const connection = contextual({
+      getAccountInfo: async (key: PublicKey) => {
+        // The authority (key and counter): a node behind the floor ...
+        if (authority && key.equals(authority)) {
+          challengeReads++;
+          throw notReached();
+        }
+        // ... while the protocol config, read for the fee, fails outright.
+        throw new SolanaJSONRPCError({ code: -32005, message: 'Node is unhealthy' }, 'failed to get info about account');
+      },
+      getSlot: async () => {
+        challengeReads++;
+        throw notReached('failed to get slot');
+      },
+      getMultipleAccountsInfo: async (keys: PublicKey[]) => keys.map(() => null),
+    });
+    const client = new LazorKitClient(connection, PROGRAM_ID);
+    authority = client.findAuthority(walletPda, credentialIdHash)[0];
+
+    const outcome = client
+      .prepareExecute({
+        payer: Keypair.generate().publicKey,
+        walletPda,
+        secp256r1: { credentialIdHash, minContextSlot: 5_000 },
+        instructions: [],
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(String(await outcome)).toContain('Node is unhealthy');
+
+    const readsAtReject = challengeReads;
+    const timersAtReject = vi.getTimerCount();
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect({ timersAtReject, readsAfterReject: challengeReads - readsAtReject }).toEqual({
+      timersAtReject: 0,
+      readsAfterReject: 0,
+    });
+  });
+
+  // Which of the two fails first is a race (the kit SDK derives the
+  // authority's address asynchronously before its reads start): when the fee
+  // read has already failed, the challenge reads must not start at all.
+  it('with the group already stopped, the challenge reads start nothing and rethrow its failure', async () => {
+    const { ChallengeReadGroup, readChallengeInputs } = await import(
+      '../../sdk/sdk-legacy/src/utils/challengeReads'
+    );
+    let reads = 0;
+    const connection = contextual({
+      getAccountInfo: async () => {
+        reads++;
+        return authorityAccount();
+      },
+      getSlot: async () => {
+        reads++;
+        return 1_000;
+      },
+    });
+    const group = new ChallengeReadGroup();
+    const feeFailure = new Error('fee read failed');
+    await expect(group.run(Promise.reject(feeFailure))).rejects.toBe(feeFailure);
+    await expect(
+      readChallengeInputs(connection, Keypair.generate().publicKey, { minContextSlot: 5_000 }, {}, group),
+    ).rejects.toBe(feeFailure);
+    expect(reads).toBe(0);
   });
 });
 
