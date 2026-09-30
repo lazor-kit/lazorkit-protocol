@@ -6,6 +6,71 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — review follow-ups: a failed fee read, the finalized lag, the deploy commands
+
+**SDKs** (`@lazorkit/sdk-legacy` 1.3.1, `@lazorkit/sdk` 1.0.0-rc.5)
+
+- `prepareExecute` resolves the protocol fee beside the passkey challenge
+  reads. When that read failed (a 5xx, an unhealthy node) while the challenge
+  reads waited for their floor, the call rejected with its error, but the
+  challenge reads went on polling -32016 for the rest of their wait (10 s, or
+  30 s at `finalized`): 1.3.0 / rc.4 stopped them only when one of the three
+  challenge reads failed. The fee read now runs in the same read group, and a
+  challenge read that has not started yet when it fails (the kit SDK derives
+  the authority's address first) is never started.
+- How long a slot takes to be finalized after it is confirmed is the
+  cluster's: 31 slots (16.5 s) on a local test validator (Agave 4.2.2), none on
+  devnet on 2026-09-30 (solana-core 4.3.0; the finalized slot was the
+  confirmed one). 1.3.0 / rc.4 said "about 32 slots (13 s)" in the JSDoc, the
+  READMEs and the `MinContextSlotNotReachedError` message, and at `finalized`
+  the message dropped the advice about a node that is behind — on devnet the
+  likelier cause. The message now names both causes (a slot not finalized
+  yet, or a node behind) and adds "retry on an RPC endpoint that has caught
+  up"; the docs give the measured lags instead of a figure.
+- READMEs: at `finalized` the challenge carries a finalized slot, already as
+  old as the cluster's finalization lag when the prompt appears, and the
+  program accepts a challenge until its slot is 150 slots old: a 31-slot lag
+  leaves about 119. The slot is still read at the reads' commitment, on
+  purpose: the program refuses a slot newer than the one it runs in, which a
+  relayer simulating at `finalized` would hit.
+- Tests (unit, both packages), each failing on 1.3.0 / rc.4: a fee read that
+  fails while the challenge reads wait on the floor leaves no retry timer and
+  no read after the rejection (before: 40 more reads in the next 11 s, in each
+  package); a read group that has already stopped starts no read and rethrows
+  its failure; the `finalized` timeout message states no fixed lag and keeps
+  the lagging-node advice.
+
+**Deploy docs and CI**
+
+- `docs/upgrade-procedure.md` §6 deployed `target/deploy/lazorkit_program.so`
+  after a bare `cargo build-sbf` and never compared it with
+  `scripts/release-hashes.txt`. With `CARGO_TARGET_DIR` set (the deploy
+  machine's `cargo` wrapper) that build writes elsewhere and `target/deploy/`
+  keeps an old file, which the v0 check and the hash print then pass: the
+  2026-09-27 near-miss the checklist records. §6 now builds with
+  `OUT=target/artifacts ./scripts/check-release-hashes.sh mainnet` and deploys
+  that file only when the script exits 0 (it matches the record), naming
+  `--program-id`, `--upgrade-authority` and `--url`. `DEVELOPMENT.md`'s devnet
+  deploy builds into a fresh target dir with `--sbf-out-dir`, the checklist's
+  multisig `write-buffer` example names the sunset artifact, and
+  `build-all.sh` no longer prints a deploy command for `target/deploy/`. Run on
+  this commit, the §6 build gives mainnet `4cb80304…` and the devnet one
+  `3584aec7…`, as recorded.
+- `check-release-hashes.sh` with a relative `OUT` wrote the binaries under
+  `program/` and then failed to find them; it now makes `OUT` absolute.
+- New `scripts/deploy-docs-lint.cjs`, in the lint workflow: every
+  `solana program deploy` / `write-buffer` in a fenced block of a doc that is
+  not history must name a file under `target/artifacts/`. Before this change
+  it failed three commands (§6, `DEVELOPMENT.md`, the multisig example).
+- The SBF cluster check also runs on changes to `.cargo/**` and
+  `rust-toolchain.toml`: a repo-root `.cargo/config.toml` with
+  `overflow-checks = true` alone makes the sunset 49896 bytes instead of
+  45856, and no path in the filter matched it. It also runs weekly, for drift
+  from outside the repository. The `release-hashes` job is a red check, not a
+  required one (main requires neither it nor `cluster-check`, and develop is
+  not protected), so the record and the checklist no longer say it blocks a
+  merge. Making it required is a repository setting, left to the maintainers.
+
 ### Added — a passkey's public key, recovered from two assertions
 
 **SDKs** (`@lazorkit/sdk-legacy` 1.3.0, `@lazorkit/sdk` 1.0.0-rc.4)
@@ -122,11 +187,12 @@ fails in the relayer's simulation, or on chain after the sponsor paid the fee.
   never reaches ends in `MinContextSlotNotReachedError`, and, on a
   sdk-legacy Connection at `processed`, tx2 prepared with no options right
   after tx1 confirms there lands and a wallet just created is found.
-- A floor at `commitment: 'finalized'` waited 10 s like the others, but a slot
-  is finalized about 32 slots (13 s) after it is confirmed, so a finalized read
-  floored at a just-confirmed tx1 — what the README says to pass — always
-  ended in `MinContextSlotNotReachedError`, with a message blaming the RPC
-  endpoint. A finalized read now waits up to 30 s for its floor; if the slot is
+- A floor at `commitment: 'finalized'` waited 10 s like the others, but where
+  a slot is finalized about 32 slots after it is confirmed (a local test
+  validator: 31 slots, 16.5 s; the lag is the cluster's, see the follow-up
+  above), a finalized read floored at a just-confirmed tx1 — what the README
+  says to pass — always ended in `MinContextSlotNotReachedError`, with a
+  message blaming the RPC endpoint. A finalized read now waits up to 30 s for its floor; if the slot is
   still not finalized, the error says so and suggests waiting for tx1 to
   finalize or reading at `confirmed`. The error has a new `commitment` field,
   and names the commitment in its message at the other commitments too.
