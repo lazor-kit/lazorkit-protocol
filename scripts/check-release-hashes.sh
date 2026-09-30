@@ -16,8 +16,13 @@
 # artifacts have them empty (CI sets both). Each binary is checked to be
 # SBPF v0, then against the record.
 #
+# The record is for macOS on Apple silicon ($SBF_RELEASE_HOST): platform-tools'
+# std embeds the paths it was built under, and its Linux package builds other
+# bytes (sbf-toolchain.sh has the figures). On another host the script refuses
+# to run; SBF_ANY_HOST=1 builds and compares anyway (expect a mismatch).
+#
 # Exit status: 0 all match, 1 a mismatch or a failed build, 2 usage,
-# 3 not the pinned cargo-build-sbf.
+# 3 not the pinned cargo-build-sbf, or not the release host.
 
 set -euo pipefail
 
@@ -38,6 +43,13 @@ for f in "${features[@]}"; do
 done
 
 sbf_toolchain_check strict || exit 3
+if [ "$(sbf_host)" != "$SBF_RELEASE_HOST" ] && [ "${SBF_ANY_HOST:-}" != 1 ]; then
+  echo "error: the recorded hashes are for $SBF_RELEASE_HOST builds; this host is $(sbf_host)." >&2
+  echo "       platform-tools $SBF_PLATFORM_TOOLS_VERSION is a separate package per host, and its std embeds" >&2
+  echo "       the paths it was built under (/home/runner/… on Linux, /Users/runner/… on macOS), so this" >&2
+  echo "       host builds other bytes. SBF_ANY_HOST=1 builds and compares anyway." >&2
+  exit 3
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

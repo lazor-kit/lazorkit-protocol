@@ -160,21 +160,27 @@ turns link-time optimisation off for a crate that is both `cdylib` and `lib`
 release artifacts: a 140200-byte mainnet-v1 sunset instead of 45856, which
 §2's size check would stop. The release toolchain is now named in one place,
 `scripts/sbf-toolchain.sh`: Agave v4.2.2 (cargo-build-sbf 4.1.0) with
-platform-tools v1.53 and `--arch v0`. One more input turned up on the way:
+platform-tools v1.53 and `--arch v0`. Two more inputs turned up on the way.
 `security_txt!` compiles in `GITHUB_SHA` and `GITHUB_REF_NAME`, which GitHub
 Actions sets and the recorded artifacts have empty, so release builds and the
 hash check unset them (a CI build with them set is 48 bytes larger; with the
-same two values a local build is byte-identical to it).
+same two values a local build is byte-identical to it). And the host:
+platform-tools' precompiled std embeds the paths it was built under
+(`/Users/runner/…` in the macOS package, `/home/runner/…` in the Linux one),
+so a Linux build of the same commit hashes otherwise (mainnet `f655b300…`, a
+45848-byte sunset). The record and the tables are macOS (Apple silicon)
+builds, and release builds stay there.
 - Both CI jobs that build SBF install that release instead of `stable`, check
   `cargo-build-sbf --version`, pass `--tools-version`, and key their cargo
   cache on the toolchain (`--tools-version` does not invalidate cargo's cache).
 - New `scripts/check-release-hashes.sh` rebuilds mainnet, mainnet-v1, devnet
   and devnet-v1 in a fresh target dir, refuses any other cargo-build-sbf, and
-  compares size and SHA-256 with the new `scripts/release-hashes.txt`. The SBF
-  cluster check runs it on an ubuntu and a macOS (Apple silicon) runner, so a
-  change that moves a binary fails until the record is updated, and toolchain
-  drift fails in CI rather than at deploy time. It also runs on changes to
-  `Cargo.lock`, `no-padding/`, the pin and the record.
+  compares size and SHA-256 with the new `scripts/release-hashes.txt`; it
+  refuses another host unless `SBF_ANY_HOST=1`. The SBF cluster check runs it
+  on a `macos-15` (Apple silicon) runner, where it reproduces all four hashes,
+  so a change that moves a binary fails until the record is updated, and
+  toolchain drift fails in CI rather than at deploy time. It also runs on
+  changes to `Cargo.lock`, `no-padding/`, the pin and the record.
 - `build-all.sh`, `build-repro-fixtures.sh`, `start-validator.sh` and
   `test-program.sh` use the pin and warn on another cargo-build-sbf; §2 of the
   checklist, `DEVELOPMENT.md`, `CONTRIBUTING.md` and `upgrade-procedure.md`
