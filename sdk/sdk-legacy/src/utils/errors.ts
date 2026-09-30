@@ -108,9 +108,12 @@ export function extractErrorCode(err: unknown): number | null {
  * and the signature commits to the counter, so nothing can repair it after the
  * user has approved. Retry, or read from a node that has caught up.
  *
- * At `'finalized'` the floor is the slot being finalized, which happens about
- * 32 slots (13 s) after it is confirmed; the read waits up to 30 s for that
- * (10 s at the other commitments), and the message says so.
+ * At `'finalized'` the floor is the slot being finalized. How long after its
+ * confirmation that happens is the cluster's: 31 slots (16.5 s) on a local
+ * test validator (Agave 4.2.2), none on devnet on 2026-09-30, where the
+ * finalized slot was the confirmed one. The read waits up to 30 s for it
+ * (10 s at the other commitments), and the message names both causes of a
+ * timeout there: a slot not finalized yet, or a node that is behind.
  */
 export class MinContextSlotNotReachedError extends Error {
   /** The slot the read had to be answered at or after. */
@@ -132,11 +135,13 @@ export class MinContextSlotNotReachedError extends Error {
     super(
       finalized
         ? `Slot ${minContextSlot} is not finalized on the RPC node after ${waitedMs} ms ` +
-            `(reading ${what} for a passkey challenge at 'finalized'). A slot is finalized ` +
-            `about 32 slots (13 s) after it is confirmed. Wait for the previous transaction ` +
-            `to be finalized before preparing, or read at 'confirmed' (the default) with the ` +
-            `same minContextSlot. Reading older state instead would sign a counter that ` +
-            `transaction may have spent: SignatureReused (3006).`
+            `(reading ${what} for a passkey challenge at 'finalized'). Either the cluster ` +
+            `has not finalized it yet (how long that takes after confirmation depends on ` +
+            `the cluster) or this node is behind. Wait for the previous transaction to be ` +
+            `finalized before preparing, read at 'confirmed' (the default) with the same ` +
+            `minContextSlot, or retry on an RPC endpoint that has caught up. Reading older ` +
+            `state instead would sign a counter that transaction may have spent: ` +
+            `SignatureReused (3006).`
         : `RPC node has not reached slot ${minContextSlot}` +
             `${commitment ? ` at '${commitment}'` : ''} after ${waitedMs} ms ` +
             `(reading ${what} for a passkey challenge). The authority's previous ` +

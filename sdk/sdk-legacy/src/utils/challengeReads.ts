@@ -30,8 +30,12 @@ export interface ChallengeReadOptions {
    * and a `confirmed` read right after would miss them.
    *
    * With `'finalized'` and a `minContextSlot`, the reads wait until that slot
-   * is finalized on the node — about 32 slots (13 s) after it was confirmed —
-   * for up to 30 s rather than 10 s.
+   * is finalized on the node — how long after its confirmation depends on the
+   * cluster (31 slots on a local test validator, none on devnet on
+   * 2026-09-30) — for up to 30 s rather than 10 s. The slot is read at the
+   * same commitment, so the challenge carries a finalized slot: where
+   * finalization lags, that much of the program's 150-slot window is gone
+   * before the prompt (see the README).
    */
   commitment?: Commitment;
   /**
@@ -50,8 +54,8 @@ export interface ChallengeReadOptions {
  * Commitment for the challenge reads when the caller names none and the
  * Connection is not at `processed`. `confirmed` sees a transaction about a
  * slot after it lands; `finalized` (what a Connection built without a
- * commitment asks for) lags by seconds, and a counter read there after a send
- * is stale.
+ * commitment asks for) can lag by seconds, and a counter read there after a
+ * send is then stale.
  */
 export const CHALLENGE_READ_COMMITMENT: Commitment = 'confirmed';
 
@@ -77,12 +81,13 @@ export function defaultChallengeCommitment(connection: Connection): Commitment {
 export const MIN_CONTEXT_SLOT_WAIT_MS = 10_000;
 
 /**
- * The same wait at `finalized`. A node's finalized slot trails its confirmed
- * one by about 32 slots (13 s at 400 ms a slot), so a floor at a slot that was
- * just confirmed — what the README tells callers to pass — cannot be finalized
- * within {@link MIN_CONTEXT_SLOT_WAIT_MS}: every such read used to end in
- * `MinContextSlotNotReachedError`. This covers the lag with room for slow
- * slots.
+ * The same wait at `finalized`. Where a node's finalized slot trails its
+ * confirmed one by about 32 slots (a local test validator: 31 slots, 16.5 s),
+ * a floor at a slot that was just confirmed — what the README tells callers to
+ * pass — cannot be finalized within {@link MIN_CONTEXT_SLOT_WAIT_MS}: every
+ * such read used to end in `MinContextSlotNotReachedError`. This covers that
+ * lag with room for slow slots. (On devnet on 2026-09-30 the finalized slot
+ * was the confirmed one, and a floor there is reached at once.)
  */
 export const FINALIZED_MIN_CONTEXT_SLOT_WAIT_MS = 30_000;
 
@@ -119,11 +124,16 @@ export function challengeReadConfig(
  * stops the group when the read it wraps fails, and a read waiting for the
  * floor gives up at once (its sleep ends early) instead of polling again.
  *
- * One group per challenge, created by the caller of the reads and never
- * shared: the SDK keeps no state between calls.
+ * A read that runs beside the challenge's in the same `Promise.all` goes in
+ * the group too — `prepareExecute`'s protocol-fee read — so that its failure
+ * stops them as well: the call rejects with it just the same.
+ *
+ * One group per call, created by the caller of the reads and never shared
+ * between calls: the SDK keeps no state between calls.
  */
 export class ChallengeReadGroup {
   private isStopped = false;
+  private firstFailure: unknown;
   private readonly sleepers = new Set<() => void>();
 
   /** Whether a read in the group has failed. */
@@ -131,17 +141,23 @@ export class ChallengeReadGroup {
     return this.isStopped;
   }
 
+  /** What the first read to fail threw, once the group has stopped. */
+  get failure(): unknown {
+    return this.firstFailure;
+  }
+
   /** Stop every read in the group; one asleep between retries wakes now. */
-  stop(): void {
+  stop(failure: unknown): void {
     if (this.isStopped) return;
     this.isStopped = true;
+    this.firstFailure = failure;
     for (const wake of [...this.sleepers]) wake();
   }
 
   /** `read`, stopping the group if it fails. */
   run<T>(read: Promise<T>): Promise<T> {
     return read.catch((e: unknown) => {
-      this.stop();
+      this.stop(e);
       throw e;
     });
   }
@@ -316,15 +332,20 @@ export async function readChallengeSlot(
  * its counter + 1 — read side by side at one commitment and floor, skipping
  * what the caller already has (`publicKeyBytes`, `slotOverride`). If one read
  * fails, the call rejects with its error and the others stop retrying at
- * once (see {@link ChallengeReadGroup}).
+ * once (see {@link ChallengeReadGroup}). Pass `group` when another read runs
+ * beside these (`prepareExecute`'s protocol fee) and is in it too; if it has
+ * already failed, nothing is read and its error is thrown again.
  */
 export async function readChallengeInputs(
   connection: Connection,
   authorityPda: PublicKey,
   opts: ChallengeReadOptions,
   have: { publicKeyBytes?: Uint8Array; slotOverride?: bigint } = {},
+  group: ChallengeReadGroup = new ChallengeReadGroup(),
 ): Promise<{ publicKeyBytes: Uint8Array; slot: bigint; counter: number }> {
-  const group = new ChallengeReadGroup();
+  // A read beside these failed while the caller was still deriving the
+  // authority's address: the call has rejected already, so start no polling.
+  if (group.stopped) throw group.failure;
   const [publicKeyBytes, slot, counter] = await Promise.all([
     have.publicKeyBytes
       ? Promise.resolve(have.publicKeyBytes)

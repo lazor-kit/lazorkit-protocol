@@ -215,8 +215,9 @@ export interface Secp256r1Params {
    * While the node answers that it has not reached the slot (-32016), the reads
    * are retried with a short backoff for up to 10 s (30 s at `'finalized'`),
    * then the prepare call throws `MinContextSlotNotReachedError`. If one of
-   * the reads fails for another reason, the call rejects with that error and
-   * the other reads stop at once.
+   * the reads fails for another reason (or, in `prepareExecute`, the
+   * protocol-fee read beside them), the call rejects with that error and the
+   * other reads stop at once.
    */
   minContextSlot?: number;
   /**
@@ -226,7 +227,10 @@ export interface Secp256r1Params {
    * seconds behind the transaction it just sent.)
    *
    * `'finalized'` with a `minContextSlot` waits for that slot to be
-   * finalized: about 32 slots (13 s) after it was confirmed.
+   * finalized, which takes as long after its confirmation as the cluster's
+   * finalization lags (31 slots on a local test validator, none on devnet on
+   * 2026-09-30). The challenge then carries a finalized slot, older by that
+   * lag, and the program accepts it for 150 slots from that slot.
    */
   commitment?: Commitment;
 }

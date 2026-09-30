@@ -47,7 +47,7 @@ import {
   createAssociatedTokenAccountIdempotentIx,
 } from './spl';
 import { type ChallengeReadOptions, readAuthorityCounter } from './secp256r1';
-import { readChallengeInputs } from './challengeReads';
+import { ChallengeReadGroup, readChallengeInputs } from './challengeReads';
 import {
   packCompactInstructions,
   computeAccountsHash,
@@ -728,7 +728,11 @@ export class LazorKitClient {
 
   // ─── Secp256r1 prepare/finalize helpers ─────────────────────────────
 
-  private async resolveSecp256r1(walletPda: PublicKey, p: Secp256r1Params) {
+  /**
+   * `group`: when another read runs beside these, in it too (see
+   * `prepareExecute`); by default the challenge reads get one of their own.
+   */
+  private async resolveSecp256r1(walletPda: PublicKey, p: Secp256r1Params, group?: ChallengeReadGroup) {
     assertByteLength(p.credentialIdHash, 32, 'credentialIdHash');
     if (p.publicKeyBytes) {
       assertByteLength(p.publicKeyBytes, 33, 'publicKeyBytes');
@@ -747,6 +751,7 @@ export class LazorKitClient {
       authorityPda,
       reads,
       { publicKeyBytes: p.publicKeyBytes, slotOverride: p.slotOverride },
+      group,
     );
 
     return { authorityPda, publicKeyBytes, slot, counter };
@@ -822,10 +827,14 @@ export class LazorKitClient {
     feePayer?: PublicKey;
   }): Promise<PreparedExecute> {
     const [vaultPda] = this.findVault(params.walletPda);
-    // resolveSecp256r1 and protocol-fee resolution are fully independent — run them in parallel.
+    // resolveSecp256r1 and protocol-fee resolution are fully independent — run
+    // them in parallel, in one read group: if the fee read fails, the call
+    // rejects with its error, and the challenge reads must not go on polling
+    // -32016 for the floor after that.
+    const reads = new ChallengeReadGroup();
     const [resolved, fee] = await Promise.all([
-      this.resolveSecp256r1(params.walletPda, params.secp256r1),
-      this.resolveProtocolFeeWithRegister(params.payer),
+      this.resolveSecp256r1(params.walletPda, params.secp256r1, reads),
+      reads.run(this.resolveProtocolFeeWithRegister(params.payer)),
     ]);
     const { authorityPda, publicKeyBytes, slot, counter } = resolved;
     const protocolFee = fee?.accounts;
