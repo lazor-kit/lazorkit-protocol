@@ -56,8 +56,11 @@ if pgrep -f solana-test-validator >/dev/null 2>&1; then
   fi
 fi
 
-# 2. Build the SBF artifact the validator is about to preload.
-( cd "$REPO_ROOT/program" && cargo build-sbf --features devnet ) || exit 1
+# 2. Build the SBF artifact the validator is about to preload. `--arch v0`, as
+#    the program deploys: cargo-build-sbf 4.4.0 made v3 the default, and a local
+#    validator would load a v3 build without complaint, so the SDK suites would
+#    test a binary that never ships.
+( cd "$REPO_ROOT/program" && cargo build-sbf --features devnet --arch v0 ) || exit 1
 
 # `cargo build-sbf` and `cargo test` do not always agree on the target
 # directory — depending on how the shell was invoked, CARGO_TARGET_DIR may point
@@ -71,6 +74,7 @@ if [ -z "$SO" ] || [ ! -f "$SO" ]; then
   echo "error: no lazorkit_program.so produced by cargo build-sbf" >&2
   exit 1
 fi
+"$REPO_ROOT/scripts/assert-sbpf-v0.sh" "$SO" || exit 1
 echo "using $SO"
 
 # 3. Launch detached. `--reset` wipes the shared ledger, which is what makes it

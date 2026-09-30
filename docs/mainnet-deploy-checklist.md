@@ -120,11 +120,19 @@ files. Nothing below deploys a path that a later build could overwrite.
 - [ ] Build from the pinned release commit, **each into its own directory**:
       ```bash
       T=$(mktemp -d)   # a fresh target dir: see the --tools-version note below
-      ( cd program && CARGO_TARGET_DIR=$T command cargo build-sbf --features mainnet    --tools-version v1.53 --sbf-out-dir ../target/artifacts/v2 )
-      ( cd program && CARGO_TARGET_DIR=$T command cargo build-sbf --features mainnet-v1 --tools-version v1.53 --sbf-out-dir ../target/artifacts/sunset )
+      ( cd program && CARGO_TARGET_DIR=$T command cargo build-sbf --features mainnet    --tools-version v1.53 --arch v0 --sbf-out-dir ../target/artifacts/v2 )
+      ( cd program && CARGO_TARGET_DIR=$T command cargo build-sbf --features mainnet-v1 --tools-version v1.53 --arch v0 --sbf-out-dir ../target/artifacts/sunset )
       solana program dump LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi target/artifacts/v1-live.so --url <mainnet-rpc>
+      ./scripts/assert-sbpf-v0.sh target/artifacts/v2/lazorkit_program.so target/artifacts/sunset/lazorkit_program.so target/artifacts/v1-live.so
       shasum -a 256 target/artifacts/v2/lazorkit_program.so target/artifacts/sunset/lazorkit_program.so target/artifacts/v1-live.so
       ```
+      ⚠️ **Always pass `--arch v0`.** cargo-build-sbf 4.4.0 (2026-09-22, what
+      the stable installer brings) builds SBPF v3 when no `--arch` is given.
+      Nothing else here would notice: the v3 sizes pass the check below
+      (mainnet 144576 and mainnet-v1 42680 bytes with 4.1.0 and v1.53), and the
+      §3 validator deploys v3. `assert-sbpf-v0.sh` reads the version from the
+      ELF header (e_flags 0 for v0, 3 for v3) and refuses anything but v0; the
+      v1 dump is v0 too.
       ⚠️ **Always pass `--sbf-out-dir`.** On the deploy machine a `cargo` wrapper
       in `~/.zshrc` points `CARGO_TARGET_DIR` at `.git/shared-target`, so a bare
       `cargo build-sbf` writes there and leaves `target/deploy/lazorkit_program.so`
@@ -154,12 +162,13 @@ files. Nothing below deploys a path that a later build could overwrite.
       solana-cli 4.0.3 with platform-tools v1.53; the machine now has
       `cargo-build-sbf` 4.2.2. Pin `--tools-version v1.53` as above, record what
       you get, and rehearse (§3) with the files you are actually going to deploy.
-- [ ] **SBPF version.** These builds are SBPFv0. Mainnet deploys v0 today —
+- [ ] **SBPF version.** These builds are SBPFv0 because of `--arch v0`, and
+      `assert-sbpf-v0.sh` above has checked it. Mainnet deploys v0 today —
       SIMD-0500 ("disable deployment of SBPF v0, v1 and v2 programs",
       feature `B8JJXCy5…`) was not even proposed on mainnet or devnet on
       2026-09-27 — but Agave 4.2's test validator activates it at genesis. If it
-      is scheduled before either phase, rebuild with `--arch v3`, re-hash, and
-      rehearse that artifact: a v0 binary will fail to deploy with *Detected
+      is scheduled before either phase, rebuild with `--arch v3` (and skip the
+      v0 check for that build), re-hash, and rehearse that artifact: a v0 binary will fail to deploy with *Detected
       sbpf_version required by the executable which are not enabled*. (It keeps
       running; only new deploys and upgrades are refused. That includes a
       rollback to the v1 dump, which is v0.)
