@@ -13,6 +13,11 @@ name: SBF cluster feature check
 #      `compile_error!` (otherwise nothing prevents an unflagged build
 #      from silently embedding whichever ID happens to be the default).
 #
+# Every build that succeeds passes `--arch v0` and is checked to be SBPF v0
+# (scripts/assert-sbpf-v0.sh): the program deploys as v0, and the stable
+# installer's cargo-build-sbf 4.4.0 builds v3 by default, which this job
+# recorded without noticing until 2026-09-30.
+#
 # Runs on every PR touching the program / assertions crate or this workflow.
 
 on:
@@ -51,33 +56,36 @@ jobs:
 
       - name: Build mainnet binary
         working-directory: program
-        run: cargo build-sbf --features mainnet
+        run: cargo build-sbf --features mainnet --arch v0
 
       - name: Record mainnet hash
         id: mainnet
         run: |
+          ./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
           M=$(shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}')
           echo "sha=$M" >> "$GITHUB_OUTPUT"
           echo "mainnet SBF: $M"
 
       - name: Build devnet binary
         working-directory: program
-        run: cargo build-sbf --features devnet
+        run: cargo build-sbf --features devnet --arch v0
 
       - name: Record devnet hash
         id: devnet
         run: |
+          ./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
           D=$(shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}')
           echo "sha=$D" >> "$GITHUB_OUTPUT"
           echo "devnet SBF: $D"
 
       - name: Build sunset binary (mainnet-v1)
         working-directory: program
-        run: cargo build-sbf --features mainnet-v1
+        run: cargo build-sbf --features mainnet-v1 --arch v0
 
       - name: Record sunset hash
         id: sunset
         run: |
+          ./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
           S=$(shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}')
           echo "sha=$S" >> "$GITHUB_OUTPUT"
           echo "mainnet-v1 sunset SBF: $S ($(stat -c %s target/deploy/lazorkit_program.so) bytes)"
@@ -91,8 +99,9 @@ jobs:
         working-directory: program
         run: |
           set -euo pipefail
-          cargo build-sbf --features rehearsal --sbf-out-dir /tmp/sbf-rehearsal
-          cargo build-sbf --features rehearsal-v1 --sbf-out-dir /tmp/sbf-rehearsal-v1
+          cargo build-sbf --features rehearsal --arch v0 --sbf-out-dir /tmp/sbf-rehearsal
+          cargo build-sbf --features rehearsal-v1 --arch v0 --sbf-out-dir /tmp/sbf-rehearsal-v1
+          ../scripts/assert-sbpf-v0.sh /tmp/sbf-rehearsal/lazorkit_program.so /tmp/sbf-rehearsal-v1/lazorkit_program.so
           shasum -a 256 /tmp/sbf-rehearsal/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal.sha
           shasum -a 256 /tmp/sbf-rehearsal-v1/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal-v1.sha
           echo "rehearsal    $(cat /tmp/rehearsal.sha) ($(stat -c %s /tmp/sbf-rehearsal/lazorkit_program.so) bytes)"

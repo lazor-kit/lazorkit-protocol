@@ -143,6 +143,17 @@ that loads the program. The fixture script, `scripts/test-program.sh` and the
 workflow's sunset build now pass `--arch v0` — what the program deploys as —
 and the test harness refuses a non-v0 artifact with a message saying so.
 
+**Build** — the same default reached every other build: the release commands
+in `docs/mainnet-deploy-checklist.md` §2, `docs/upgrade-procedure.md`,
+`DEVELOPMENT.md`, `scripts/build-all.sh`, `scripts/start-validator.sh` (the SDK
+suites' validator) and the SBF cluster check, which recorded v3 hashes
+(mainnet `80e68083…`). A v3 build passes the size check and loads on a local
+validator, so nothing noticed. They all pass `--arch v0` now, and the new
+`scripts/assert-sbpf-v0.sh` refuses a binary whose ELF header is not v0; the
+checklist, `build-all.sh`, `start-validator.sh` and the cluster check run it.
+The §2 commands rebuild to the table's hashes (mainnet `4cb80304…`, sunset
+`6080da9f…`, devnet `3584aec7…`).
+
 ### Fixed — the passkey challenge names the wallet
 
 **Program**

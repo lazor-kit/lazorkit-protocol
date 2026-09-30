@@ -29,9 +29,12 @@ echo "--- 🚀 LazorKit build (cluster: $CLUSTER) ---"
 
 # Step 1: Build Rust Program with the chosen cluster feature.
 # This embeds the right declare_id! at compile time via assertions/src/lib.rs.
-echo "[1/3] Building Rust Program (cargo build-sbf --features $CLUSTER)..."
+# --arch v0: the program deploys as SBPF v0, and cargo-build-sbf 4.4.0 made v3
+# the default. The check refuses a binary that came out as anything else.
+echo "[1/3] Building Rust Program (cargo build-sbf --features $CLUSTER --arch v0)..."
 cd "$PROGRAM_DIR"
-cargo build-sbf --features "$CLUSTER" --sbf-out-dir "$ROOT_DIR/target/deploy"
+cargo build-sbf --features "$CLUSTER" --arch v0 --sbf-out-dir "$ROOT_DIR/target/deploy"
+"$ROOT_DIR/scripts/assert-sbpf-v0.sh" "$ROOT_DIR/target/deploy/lazorkit_program.so"
 
 # Step 2: Generate IDL using Shank, picking the program ID from the keypair
 # the build emitted at target/deploy/lazorkit_program-keypair.json.

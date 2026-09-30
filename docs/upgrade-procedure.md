@@ -190,7 +190,8 @@ swept to the owner-approved destination and the v1 wallet + authority closed.
 ### 6. Deploy
 
 ```bash
-cargo build-sbf --features mainnet
+cargo build-sbf --features mainnet --arch v0    # v3 is the default from cargo-build-sbf 4.4.0
+./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
 sha256sum target/deploy/lazorkit_program.so     # record it
 solana program deploy target/deploy/lazorkit_program.so -u m
 ```

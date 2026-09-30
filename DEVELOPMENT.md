@@ -43,16 +43,22 @@ unflagged build fails with "pick exactly one cluster feature".
 
 ```bash
 # v2 on devnet — embeds 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv
-cargo build-sbf --features devnet
+cargo build-sbf --features devnet --arch v0
 
 # v2 on mainnet — embeds LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8
-cargo build-sbf --features mainnet
+cargo build-sbf --features mainnet --arch v0
 
 # The v1 ids build only as the sunset binary (MigrateWallet, ReclaimDeferred,
 # CloseExpiredSession; everything else 4018 RetiredDeployment):
-cargo build-sbf --features mainnet-v1   # LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi
-cargo build-sbf --features devnet-v1    # 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
+cargo build-sbf --features mainnet-v1 --arch v0   # LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi
+cargo build-sbf --features devnet-v1 --arch v0    # 4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS
 ```
+
+Always pass `--arch v0`: the program deploys as SBPF v0, and cargo-build-sbf
+4.4.0 and later build v3 by default. A v3 binary loads on a local test
+validator and passes the size check, but litesvm refuses it and it is not the
+artifact the release hashes describe. `./scripts/assert-sbpf-v0.sh <file.so>`
+checks a binary.
 
 For anything you will deploy, add `--sbf-out-dir <dir>` and deploy from that
 directory. A `CARGO_TARGET_DIR` override (the maintainer's shell sets one) makes
@@ -115,7 +121,8 @@ shank idl -o . --out-filename idl.json -p "$PROGRAM_ID"
 ### G. Deploy to Devnet
 
 ```bash
-cargo build-sbf --features devnet
+cargo build-sbf --features devnet --arch v0
+./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
 solana program deploy target/deploy/lazorkit_program.so -u d
 ```
 
