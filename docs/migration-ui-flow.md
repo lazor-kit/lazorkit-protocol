@@ -262,6 +262,27 @@ Two consequences for the app:
   | Passkey, new v2 wallet + ATA setup + migrate | 1182 with none, 1356 with one | 0: SOL only |
   | Ed25519, migrate only | 470 with none, 602 with one, +100 each | 7 |
   | Setup only: new v2 wallet + ATAs | 559 with none, 697 with one, +74 each | 8 |
+
+  Transaction v1 (SIMD-0385: 4096 bytes, 64 addresses, no lookup tables) is
+  active on devnet. In it the address cap binds before the byte cap in every
+  shape: each token adds three addresses (four for the first, which brings the
+  token program) and 100 bytes (111 with its ATA setup). Computed 2026-09-30
+  from the sdk-legacy 1.3.1 builders, with a 20-byte config:
+
+  | Shape | Tokens that fit in one v1 transaction | Size at that count |
+  |---|---|---|
+  | Passkey, migrate only | 18 | 2,673 bytes / 64 addresses (2,782 when Chrome pads clientDataJSON) |
+  | Passkey, new v2 wallet + ATA setup + migrate | 15 | 2,930 bytes / 63 addresses |
+  | Ed25519, migrate only | 18 | 2,321 bytes |
+  | Ed25519, new v2 wallet + ATA setup + migrate | 15 | 2,578 bytes |
+
+  Mixing Token and Token-2022 costs one more address: 17 tokens for migrate
+  only, still 15 with the setup. These counts are computed, not landed: as of
+  2026-09-30 devnet's v1 id `4h3XoNRe…` does not run the sunset binary (it
+  answers `MigrateWallet` with `InvalidInstructionData`), so the compute per
+  token and the sunset binary at 18 tokens are not measured yet. A v1 migrate
+  has to set its compute-unit and loaded-data limits, from a simulation (see
+  [Architecture](Architecture.md#transaction-v1-simd-0385)).
 - **Prioritise the active, high-value wallets** — value is concentrated, so
   reaching a handful of users covers most of it. Dormant wallets migrate whenever
   their owner returns; their funds wait safely in v1 until then.

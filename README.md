@@ -8,7 +8,7 @@ A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r
   spend. A wallet may have several Owners, which is how a second device revokes a
   lost first one.
 - **Session keys with policies** — ephemeral signers restricted by per-tx / per-window / lifetime SOL + token caps, and program whitelists.
-- **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps).
+- **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps in a v0 transaction, capped at 1232 bytes). Under transaction v1 (SIMD-0385: 4096 bytes, 64 addresses; active on devnet) it is no longer a size workaround: the measured Jupiter routes each fit one passkey Execute, and tx2 is held to the same 64 addresses. What it still gives is signing now and sending later, or from another sender. See [docs/Architecture.md](docs/Architecture.md#transaction-v1-simd-0385).
 - **Returning users, found safely** — `findOwnPasskeyWallet` finds a passkey user's own wallet from one assertion, with no `walletPda` stored: it adopts a wallet only if the passkey proves the key stored there, it is the one wallet the passkey has signed for, and nothing untrusted can spend from it; anything else goes to the user to confirm. (`findWalletsByAuthority` is a raw lookup by credential hash or public key — the hash is public, and anyone can plant a wallet that lists it.)
 - **Parallel execution** — different authorities on the same wallet never block each other.
 

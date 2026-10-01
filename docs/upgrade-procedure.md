@@ -224,7 +224,7 @@ Then re-initialise: `InitializeProtocol`, `InitializeTreasuryShard` per shard.
 A `PROTOCOL_VERSION` bump moves those PDAs, so they are fresh accounts, not
 existing ones — which is the whole point.
 
-Two things the deploy command hides:
+Three things the deploy command hides:
 
 - **The loader extends by at least 10240 bytes.** `solana program deploy` grows
   the program data first when the new binary is larger, and the loader refuses
@@ -242,6 +242,27 @@ Two things the deploy command hides:
   longer a known feature. `scripts/rehearse/squads-upgrade.cjs` has `extend` as
   a separate command for that reason; the steps and a devnet run are in
   [`mainnet-deploy-checklist.md`](mainnet-deploy-checklist.md#multisig-rehearsal).
+- **A bigger programdata raises every transaction's loaded data.** A
+  transaction v1 (SIMD-0385) states a loaded-accounts-data limit, and the
+  runtime counts the program's programdata account in it at the account's full
+  data length, which grows with every extend, whether or not the new binary
+  fills it ([Architecture](Architecture.md#transaction-v1-simd-0385)). On
+  devnet that is almost all of the 160,992–161,337 bytes any LazorKit
+  transaction loads (measured 2026-09-30 at `57bTNW…`). The wallet packages'
+  v1 path (`txVersion: 'v1'` in `@lazorkit/wallet` and
+  `@lazorkit/wallet-mobile-adapter`, experimental and devnet-only) assumes a
+  limit of at least 196,608 bytes (6 × 32 KiB): it sizes the limit from a
+  simulation, never below that floor, and accepts nothing lower from a caller.
+  The floor leaves 196,608 − 161,337 = 35,271 bytes of headroom. An upgrade
+  that grows the programdata by more than about 35 KB, through the deploy's
+  own extension or `solana program extend`, needs that floor raised in a
+  wallet release first. Otherwise a transaction sent at the floor (a caller's
+  limit, or one sized from a simulation taken just before the upgrade landed)
+  fails at load with `MaxLoadedAccountsDataSizeExceeded`, the error that, with
+  the limit unset, landed on devnet as a fee-only failure and charged the fee
+  payer in full. After the deploy, simulate a passkey Execute on that cluster
+  and read `loadedAccountsDataSize`: the numbers above are devnet's, and the
+  mainnet v2 programdata is whatever its first deploy allocates.
 
 ### 7. Publish the SDKs, and move the dist-tags last
 
