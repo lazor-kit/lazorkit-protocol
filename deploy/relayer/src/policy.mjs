@@ -9,6 +9,8 @@
 //
 // A failure throws PolicyError; its message is what the client sees, so every
 // message names the instruction and the rule.
+//
+// A v1 transaction (SIMD-0385) also has to pass inspectTxV1, inside stage 1.
 
 import {
   ALLOWED_PROGRAMS,
@@ -18,9 +20,16 @@ import {
   SYSTEM_PROGRAM,
   TOKEN_PROGRAM,
   TOKEN_2022_PROGRAM,
+  COMPUTE_BUDGET_PROGRAM,
   ALT_PROGRAM,
   programLabel,
 } from './allowlist.mjs';
+import {
+  TX_V1_MAX_BYTES,
+  TX_V1_MAX_ADDRESSES,
+  MAX_COMPUTE_UNIT_LIMIT,
+  MAX_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
+} from './txv1.mjs';
 
 export class PolicyError extends Error {
   constructor(code, message, data) {
@@ -37,6 +46,10 @@ export const ERR = {
   SIMULATION_FAILED: -32004,
   SEND_FAILED: -32005, // refused at send, failed on chain, or expired unlanded
   RATE_LIMITED: -32029,
+  // A v1 transaction, and this relayer runs without --tx-v1. Answered before
+  // anything is decoded, simulated or signed. Wallets with v1 support do not
+  // retry it, and send their later transactions to this paymaster as v0.
+  TX_V1_DISABLED: -32051,
 };
 
 // Every RPC request the relayer makes gives up after this long, so a node that
@@ -115,9 +128,10 @@ const SYSTEM_FEE_PAYER_ALLOWED = new Set([0, 2, 3]);
 
 /**
  * Static checks. Returns a summary used for logging and for the next stage.
+ * `raw` (the wire bytes) and `maxPriorityFeeLamports` are read for v1 only.
  * @param {import('@solana/web3.js').VersionedTransaction} tx
  */
-export function inspectTransaction(tx, { relayer, signerKey, maxSignatures, requireLazorkit }) {
+export function inspectTransaction(tx, { relayer, signerKey, maxSignatures, requireLazorkit, raw, maxPriorityFeeLamports = 0 }) {
   const msg = tx.message;
   const keys = msg.staticAccountKeys;
   const feePayer = keys[0]?.toBase58();
@@ -209,7 +223,123 @@ export function inspectTransaction(tx, { relayer, signerKey, maxSignatures, requ
     );
   }
 
-  return { feePayer, numSigs, programs, version: tx.version };
+  const summary = { feePayer, numSigs, programs, version: tx.version };
+  if (tx.version === 1) summary.txV1 = inspectTxV1(tx, raw, { maxPriorityFeeLamports });
+  return summary;
+}
+
+/**
+ * The rules for a v1 transaction (SIMD-0385), all checked before anything is
+ * signed. Returns its config, for the log.
+ *
+ * A v1 transaction carries its compute budget in its config, and a field it
+ * does not set is 0, not a default. With no compute-unit limit the LazorKit
+ * instruction fails "exceeded CUs meter"; with no loaded-accounts-data limit
+ * the transaction fails MaxLoadedAccountsDataSizeExceeded. Both land, and this
+ * relayer pays the fee. So it refuses a transaction that:
+ * - leaves the compute-unit or the loaded-accounts-data limit unset or 0, or
+ *   sets one over its maximum (1,400,000 CU; 64 MiB);
+ * - requests a heap. The LazorKit program's heap is a fixed 32 KiB, and the
+ *   request only costs compute;
+ * - pays a priority fee over --max-priority-fee-lamports (default 0). In v1 it
+ *   is a total in lamports, and the fee payer pays it;
+ * - has any top-level ComputeBudget instruction. v1 ignores those for its
+ *   limits but still runs them (150 CU each), and one between the Secp256r1
+ *   precompile and the LazorKit instruction breaks the passkey check;
+ * - has a Secp256r1 instruction that is not followed directly by a LazorKit v2
+ *   instruction, the one it authorizes;
+ * - is over 4,096 bytes or 64 addresses. The cluster refuses those anyway.
+ */
+export function inspectTxV1(tx, raw, { maxPriorityFeeLamports = 0 } = {}) {
+  const reject = (rule, message, data) => {
+    throw new PolicyError(ERR.REJECTED, `relayer rejected: ${message}`, { rule, ...data });
+  };
+  const msg = tx.message;
+  const keys = msg.staticAccountKeys;
+
+  if (!raw || raw.length > TX_V1_MAX_BYTES) {
+    reject('tx_v1_size', `the v1 transaction is ${raw?.length} bytes, over the ${TX_V1_MAX_BYTES}-byte limit.`, { bytes: raw?.length ?? null });
+  }
+  if (keys.length > TX_V1_MAX_ADDRESSES) {
+    reject('tx_v1_size', `the v1 transaction has ${keys.length} addresses, over the limit of ${TX_V1_MAX_ADDRESSES}.`, { addresses: keys.length });
+  }
+  // inspectTransaction checked that address 0 is the relayer. It must also be a
+  // writable signer, or the relayer's signature would go in no slot.
+  const { numRequiredSignatures, numReadonlySignedAccounts } = msg.header;
+  if (numRequiredSignatures < 1 || numReadonlySignedAccounts >= numRequiredSignatures) {
+    reject('fee_payer', 'the fee payer (address 0) is not a writable signer of the v1 transaction.');
+  }
+
+  const config = msg.transactionConfig;
+  const limit = (value, max, field, rule, name) => {
+    if (value == null || value === 0 || value > max) {
+      const why =
+        value == null
+          ? `sets no ${name}`
+          : value === 0
+            ? `sets its ${name} to 0`
+            : `sets its ${name} to ${value}, over the maximum of ${max}`;
+      reject(
+        rule,
+        `the v1 transaction ${why}. ${value == null || value === 0 ? 'Unset or 0, it would fail on chain and this relayer would pay the fee. ' : ''}` +
+          `Set ${field} in the transaction config (1 to ${max}).`,
+        { [field]: value },
+      );
+    }
+  };
+  limit(config.computeUnitLimit, MAX_COMPUTE_UNIT_LIMIT, 'computeUnitLimit', 'tx_v1_compute_unit_limit', 'compute-unit limit');
+  limit(
+    config.loadedAccountsDataSizeLimit,
+    MAX_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
+    'loadedAccountsDataSizeLimit',
+    'tx_v1_loaded_accounts_data_size_limit',
+    'loaded-accounts-data size limit',
+  );
+  if (config.heapSize != null) {
+    reject(
+      'tx_v1_heap_size',
+      `the v1 transaction requests a ${config.heapSize}-byte heap. Heap requests are not sponsored: the LazorKit program's heap is a fixed 32 KiB, and the request only costs compute.`,
+      { heapSize: config.heapSize },
+    );
+  }
+  const priorityFee = config.priorityFee ?? 0;
+  if (priorityFee > maxPriorityFeeLamports) {
+    reject(
+      'tx_v1_priority_fee',
+      `the v1 transaction pays a priority fee of ${priorityFee} lamport${priorityFee === 1 ? '' : 's'}, over this relayer's cap of ${maxPriorityFeeLamports} (--max-priority-fee-lamports).`,
+      { priorityFee, maxPriorityFeeLamports },
+    );
+  }
+
+  const program = (ix) => (ix ? keys[ix.programIdIndex]?.toBase58() : undefined);
+  const ixs = msg.compiledInstructions;
+  ixs.forEach((ix, i) => {
+    if (program(ix) === COMPUTE_BUDGET_PROGRAM) {
+      reject(
+        'tx_v1_compute_budget_instruction',
+        `instruction #${i} is a ComputeBudget instruction. A v1 transaction sets its limits in its config; v1 ignores the instruction for that but still runs it, and between the Secp256r1 precompile and the LazorKit instruction it breaks the passkey check.`,
+        { index: i },
+      );
+    }
+  });
+  ixs.forEach((ix, i) => {
+    if (program(ix) !== SECP256R1_PROGRAM) return;
+    const next = program(ixs[i + 1]);
+    if (next !== LAZORKIT_V2_DEVNET) {
+      reject(
+        'tx_v1_precompile_order',
+        `instruction #${i} is the Secp256r1 precompile, and ${next ? `instruction #${i + 1} calls ${programLabel(next)}` : 'it is the last instruction'}. ` +
+          `It must be followed directly by the LazorKit v2 instruction it authorizes (${LAZORKIT_V2_DEVNET}).`,
+        { index: i },
+      );
+    }
+  });
+
+  return {
+    computeUnitLimit: config.computeUnitLimit,
+    loadedAccountsDataSizeLimit: config.loadedAccountsDataSizeLimit,
+    priorityFee,
+  };
 }
 
 // One JSON-RPC call. Public devnet answers bursts with HTTP 429 ("Connection rate

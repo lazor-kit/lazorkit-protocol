@@ -13,6 +13,10 @@
 // the transaction is confirmed, like Kora's default (respond_after "confirmed"):
 // @lazorkit/wallet 3.0.2 does not confirm on its own, and a passkey's next
 // signature reads the authority counter this one advances. See README.md.
+//
+// SIMD-0385 v1 transactions are signed only with --tx-v1, at the byte level
+// (src/txv1.mjs), after the v1 rules in policy.mjs. Without the flag they are
+// refused with -32051 before anything else happens.
 
 import http from 'node:http';
 import os from 'node:os';
@@ -39,6 +43,7 @@ import {
   RPC_TIMEOUT_MS,
   MIN_CONTEXT_SLOT_NOT_REACHED,
 } from './policy.mjs';
+import { isTxV1, signTxV1AsFeePayer, txV1Signature } from './txv1.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -63,6 +68,11 @@ const HELP = `Usage: npm start -- [options]
   --cors-origin <list>    Comma-separated allowed browser origins, or '*' for any
                           (default: pages served from this machine: localhost, 127.0.0.1, ::1, its own IPs)
   --any-cluster           Allow a non-devnet RPC (e.g. a local validator). Mainnet is always refused.
+  --tx-v1                 Also sign SIMD-0385 v1 transactions (env RELAYER_TX_V1=1). Off by default: a v1
+                          transaction is then refused with code -32051 before anything is signed.
+  --max-priority-fee-lamports <n>
+                          v1 only: the largest priority fee (total lamports, paid by the fee payer) a v1
+                          transaction may carry (default 0, env RELAYER_MAX_PRIORITY_FEE_LAMPORTS)
   -h, --help              Show this help
 `;
 
@@ -83,6 +93,8 @@ try {
       'api-key': { type: 'string' },
       'cors-origin': { type: 'string' },
       'any-cluster': { type: 'boolean', default: false },
+      'tx-v1': { type: 'boolean', default: false },
+      'max-priority-fee-lamports': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     strict: true,
@@ -124,6 +136,8 @@ const cfg = {
   corsOrigins: args['cors-origin'] ? args['cors-origin'].split(',').map((s) => s.trim()).filter(Boolean) : null,
   anyCluster: args['any-cluster'],
   maxSignatures: 4, // kora.devnet.toml max_signatures
+  txV1: args['tx-v1'] || env.RELAYER_TX_V1 === '1',
+  maxPriorityFeeLamports: int('max-priority-fee-lamports', args['max-priority-fee-lamports'] ?? env.RELAYER_MAX_PRIORITY_FEE_LAMPORTS, 0),
 };
 if (cfg.port < 1 || cfg.port > 65535) fail(`--port must be 1-65535`);
 if (cfg.confirmTimeoutMs < 1000 || cfg.confirmTimeoutMs > 300_000) fail(`--confirm-timeout must be 1-300 (seconds)`);
@@ -168,6 +182,11 @@ const ts = () => new Date().toISOString().replace('T', ' ').replace('Z', '');
 const log = (...parts) => console.log([ts(), ...parts.filter((p) => p !== '' && p != null)].join('  '));
 const labels = (ids) => `[${ids.map(programLabel).join(', ')}]`;
 const ver = (v) => (v == null ? '' : v === 'legacy' ? 'legacy' : `v${v}`);
+// A v1 transaction's config is logged with its version: what the relayer agreed to pay for.
+const txV1Text = (c) =>
+  `v1 cu=${c.computeUnitLimit ?? 'unset'} lad=${c.loadedAccountsDataSizeLimit ?? 'unset'} fee=${c.priorityFee ?? 0}` +
+  (c.heapSize != null ? ` heap=${c.heapSize}` : '');
+const versionText = (ctx) => (ctx.txV1Config ? txV1Text(ctx.txV1Config) : ver(ctx.version));
 const sol = (lamports) => `${(lamports / 1e9).toFixed(6)} SOL`;
 
 // ─── Rate limit (Kora usage_limit: transaction rule, global here) ───────────
@@ -186,32 +205,46 @@ function takeRateSlot() {
 }
 
 // ─── The sign path shared by signTransaction and signAndSendTransaction ─────
-function decodeParams(params) {
+// Returns the decoded transaction and its wire bytes as received (`raw`).
+function decodeParams(params, ctx) {
   if (!params || typeof params !== 'object' || Array.isArray(params) || typeof params.transaction !== 'string') {
     throw new PolicyError(ERR.INVALID_PARAMS, 'invalid params: expected { transaction: <base64>, signer_key?: <address> }');
   }
+  const raw = Buffer.from(params.transaction, 'base64');
+  // A v1 transaction starts with 0x81. Without --tx-v1 it is refused here,
+  // before it is decoded, inspected, simulated or signed, with a code of its
+  // own: wallets with v1 support do not retry it, and send later ones as v0.
+  if (isTxV1(raw) && !cfg.txV1) {
+    ctx.version = 1;
+    throw new PolicyError(ERR.TX_V1_DISABLED, 'transaction version 1 is not enabled on this paymaster', { rule: 'tx_v1_disabled' });
+  }
   let tx;
   try {
-    tx = VersionedTransaction.deserialize(Buffer.from(params.transaction, 'base64'));
+    tx = VersionedTransaction.deserialize(raw);
   } catch (e) {
     throw new PolicyError(ERR.INVALID_PARAMS, `invalid params: transaction is not a base64 Solana transaction (${e.message})`);
   }
-  return { tx, signerKey: params.signer_key ?? null };
+  return { tx, raw, signerKey: params.signer_key ?? null };
 }
 
 async function vetAndSign(params, ctx) {
-  const { tx, signerKey } = decodeParams(params);
+  const { tx, raw, signerKey } = decodeParams(params, ctx);
   // For the log line, whatever the verdict.
   ctx.version = tx.version;
+  if (tx.version === 1) ctx.txV1Config = tx.message.transactionConfig;
   ctx.programs = tx.message.compiledInstructions.map((ix) => tx.message.staticAccountKeys[ix.programIdIndex]?.toBase58() ?? '(lookup)');
   inspectTransaction(tx, {
     relayer,
     signerKey,
     maxSignatures: cfg.maxSignatures,
     requireLazorkit: cfg.requireLazorkit,
+    raw,
+    maxPriorityFeeLamports: cfg.maxPriorityFeeLamports,
   });
 
-  const txBase64 = Buffer.from(tx.serialize()).toString('base64');
+  // v1: the bytes as received, which are the ones signed below (web3.js cannot
+  // serialize a v1 message). Legacy and v0: re-serialized from the decoded message.
+  const txBase64 = Buffer.from(tx.version === 1 ? raw : tx.serialize()).toString('base64');
   // From a bank at or past slotFloor, like the simulation, so both see the
   // relayer's own last transaction (its fee and rent) or neither does.
   let preBalance;
@@ -239,7 +272,7 @@ async function vetAndSign(params, ctx) {
       signedSlot: passkeySignedSlot(tx),
     });
   } catch (e) {
-    if (e instanceof PolicyError && e.data?.rule === 'simulation' && e.data.err) await explainIfAlreadySent(tx, e, ctx.programs);
+    if (e instanceof PolicyError && e.data?.rule === 'simulation' && e.data.err) await explainIfAlreadySent(tx, raw, e, ctx.programs);
     throw e;
   }
   ctx.inner = sim.innerPrograms;
@@ -248,8 +281,20 @@ async function vetAndSign(params, ctx) {
   ctx.contextSlot = sim.contextSlot;
 
   takeRateSlot();
+  return signAsFeePayer(tx, raw);
+}
+
+// Adds the relayer's signature as fee payer and returns { tx, raw, signature }:
+// the decoded transaction, the signed wire bytes and the signature in base58.
+// Legacy and v0: web3.js signs `tx` and re-serializes it. v1: a signed copy of
+// the bytes as received; `tx` and `raw` are left as they are.
+function signAsFeePayer(tx, raw) {
+  if (tx.version === 1) {
+    const signed = signTxV1AsFeePayer(raw, payer);
+    return { tx, raw: signed, signature: bs58.encode(txV1Signature(signed, 0)) };
+  }
   tx.sign([payer]);
-  return tx;
+  return { tx, raw: tx.serialize(), signature: bs58.encode(tx.signatures[0]) };
 }
 
 // A client resends the same bytes when it never got the first answer (a
@@ -262,17 +307,18 @@ async function vetAndSign(params, ctx) {
 // the transaction, and signAndSendTransaction answers with its signature as a
 // success. Landed and failed: the same -32005 transaction_failed. Nothing new
 // is signed for the caller or sent, and only a signature that is already
-// public on chain is ever given out.
-async function explainIfAlreadySent(tx, e, programs) {
+// public on chain is ever given out. A v1 transaction is signed at the byte
+// level here too, so it gets the same answer.
+async function explainIfAlreadySent(tx, raw, e, programs) {
   try {
-    const copy = VersionedTransaction.deserialize(tx.serialize());
-    copy.sign([payer]);
-    const signature = bs58.encode(copy.signatures[0]);
+    // A signed copy: `tx` stays unsigned (v1 always signs a copy).
+    const copy = signAsFeePayer(tx.version === 1 ? tx : VersionedTransaction.deserialize(tx.serialize()), raw);
+    const { signature } = copy;
     const st = await lookUp(signature);
     if (!st) return;
     if (!st.err) {
       const confirmed = st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized';
-      e.landed = { tx: copy, signature, slot: st.slot, confirmed };
+      e.landed = { signed: copy, signature, slot: st.slot, confirmed };
       return;
     }
     e.code = ERR.SEND_FAILED;
@@ -292,7 +338,7 @@ async function vetAndSignOrLanded(params, ctx) {
     if (e?.data?.rule === 'transaction_failed') ctx.sent = true; // landed earlier, and failed
     if (!e?.landed) throw e;
     ctx.resent = { slot: e.landed.slot, confirmed: e.landed.confirmed };
-    return e.landed.tx;
+    return e.landed.signed;
   }
 }
 
@@ -455,9 +501,9 @@ const methods = {
     return { blockhash };
   },
   async signTransaction(params, ctx) {
-    const tx = await vetAndSignOrLanded(params, ctx);
-    ctx.signature = bs58.encode(tx.signatures[0]);
-    return { signed_transaction: Buffer.from(tx.serialize()).toString('base64'), signer_pubkey: relayer };
+    const signed = await vetAndSignOrLanded(params, ctx);
+    ctx.signature = signed.signature;
+    return { signed_transaction: Buffer.from(signed.raw).toString('base64'), signer_pubkey: relayer };
   },
   async signAndSendTransaction(params, ctx) {
     // Kora's respond_after: 'confirmed' (the default), 'sent', or 'signed'.
@@ -466,9 +512,7 @@ const methods = {
       throw new PolicyError(ERR.INVALID_PARAMS, `invalid params: respond_after must be one of ${RESPOND_AFTER.join(', ')}`);
     }
     ctx.respondAfter = respondAfter;
-    const tx = await vetAndSignOrLanded(params, ctx);
-    const raw = tx.serialize();
-    const signature = bs58.encode(tx.signatures[0]);
+    const { tx, raw, signature } = await vetAndSignOrLanded(params, ctx);
     ctx.signature = signature;
     const result = { signature, signed_transaction: Buffer.from(raw).toString('base64'), signer_pubkey: relayer };
 
@@ -617,6 +661,8 @@ async function status() {
     respond_after_default: 'confirmed',
     confirm_timeout_ms: cfg.confirmTimeoutMs,
     api_key_required: Boolean(cfg.apiKey),
+    tx_v1: cfg.txV1,
+    max_priority_fee_lamports: cfg.maxPriorityFeeLamports,
   };
 }
 
@@ -695,7 +741,7 @@ async function handle(req, res) {
       log(
         peer,
         method,
-        ver(ctx.version),
+        versionText(ctx),
         labels(ctx.programs),
         ctx.inner?.length ? `inner=${labels(ctx.inner)}` : 'inner=[]',
         typeof ctx.payerDelta === 'number' ? `payer ${ctx.payerDelta <= 0 ? '-' : '+'}${sol(Math.abs(ctx.payerDelta))}` : '',
@@ -718,7 +764,7 @@ async function handle(req, res) {
     const code = e instanceof PolicyError ? e.code : -32000;
     const message = e instanceof PolicyError ? e.message : `internal error: ${e.message}`;
     // FAILED: sent, then failed on chain, expired, or timed out. REJECTED: nothing was sent.
-    log(peer, method, ver(ctx.version), ctx.programs ? labels(ctx.programs) : '', ctx.sent ? 'FAILED' : 'REJECTED', message);
+    log(peer, method, versionText(ctx), ctx.programs ? labels(ctx.programs) : '', ctx.sent ? 'FAILED' : 'REJECTED', message);
     return send(res, req, 200, { jsonrpc: '2.0', id, error: { code, message, ...(e.data ? { data: e.data } : {}) } });
   }
 }
@@ -826,6 +872,11 @@ LazorKit devnet relayer (local Kora stand-in)
   allowlist    ${[...ALLOWED_PROGRAMS.values()].join(', ')}
   policy       fee payer = relayer; max ${sol(cfg.maxLamports)} out of the fee payer per tx; max ${cfg.maxSignatures} signatures;
                no durable nonces; ${cfg.maxTxPerHour} signed tx/hour; require LazorKit v2: ${cfg.requireLazorkit ? 'yes' : 'NO (--allow-plain)'}
+  tx v1        ${
+    cfg.txV1
+      ? `on (--tx-v1): compute-unit and loaded-data limits required, priority fee at most ${cfg.maxPriorityFeeLamports} lamports,\n               no heap request, no ComputeBudget instruction, Secp256r1 followed directly by LazorKit v2`
+      : 'off: v1 transactions are refused with -32051 before anything is signed (--tx-v1 turns them on)'
+  }
   sends        signAndSendTransaction answers once the tx is confirmed (after ${cfg.confirmTimeoutMs / 1000} s unconfirmed: with the signature, for the caller to confirm)
   api key      ${cfg.apiKey ? 'required (x-api-key)' : 'not required'}
   cors         ${corsAny ? 'any origin (--cors-origin *)' : cfg.corsOrigins ? cfg.corsOrigins.join(', ') : 'pages served from this machine only (localhost, 127.0.0.1, ::1, its own IPs; any port)'}

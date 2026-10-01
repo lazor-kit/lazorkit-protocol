@@ -2,7 +2,7 @@
 
 A small local fee payer that speaks the Kora JSON-RPC the released SDKs call
 (`@lazorkit/wallet` 3.0.2 on the web, `@lazorkit/wallet-mobile-adapter` 2.0.0 on
-mobile), so the playground apps can run gasless transactions against LazorKit v2 on
+mobile), so apps such as the devnet playground's can run gasless transactions against LazorKit v2 on
 devnet (`57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv`).
 
 It exists because the hosted devnet Kora (`https://kora.devnet.lazorkit.com`) does
@@ -16,7 +16,12 @@ npm start -- --lan         # also the Wi-Fi address, for a phone on the same net
 ```
 
 By default every sponsored transaction must call LazorKit v2, and browsers can
-reach the relayer only from pages served by this Mac. See "Who can reach it" below.
+reach the relayer only from pages served by this machine. See "Who can reach it" below.
+
+It also signs SIMD-0385 **v1 transactions** (up to 4,096 bytes and 64 addresses,
+limits in the message), but only when started with `--tx-v1`. Without it, a v1
+transaction is refused with code -32051 before anything is signed. See
+"Transaction v1 (SIMD-0385)" below.
 
 On start it prints the fee payer, its balance, the policy and the URLs to use:
 
@@ -35,7 +40,7 @@ Stop it with Ctrl-C.
 
 | App runs on | `paymasterUrl` |
 |---|---|
-| Web app in a browser on this Mac | `http://127.0.0.1:8787` (or `http://localhost:8787`) |
+| Web app in a browser on this machine | `http://127.0.0.1:8787` (or `http://localhost:8787`) |
 | Phone (Expo / browser) on the same Wi-Fi | `http://<LAN IP printed at start>:8787`, relayer started with `--lan` |
 | Hosted devnet Kora (once it allows 57bTNW…) | `https://kora.devnet.lazorkit.com` |
 
@@ -54,12 +59,15 @@ that config object. Both SDKs send it as `x-api-key`.
 
 ## The fee payer key
 
-- `relayer-keypair.json` belongs to this relayer only: `BJRfvkLaLEgnB8dWg6QJAekgdXM4MyRbdgrdwwqap3Wq`.
-  It was created with `solana-keygen new --no-bip39-passphrase --silent` and has mode `600`.
-  It is listed in `.gitignore`. Do not copy it anywhere.
-- It was funded with 2 devnet SOL from the CLI default wallet. To top it up:
-  `solana transfer BJRfvkLaLEgnB8dWg6QJAekgdXM4MyRbdgrdwwqap3Wq 1 -u devnet`.
-  Each wallet creation costs it about 0.004 SOL (rent). Each execute costs about 0.00001 SOL.
+- The relayer signs with its own keypair, `relayer-keypair.json` next to `package.json`
+  unless `--keypair` says otherwise. No key comes with the code: `.gitignore` keeps keypair
+  files out of git. Create one with mode `600`:
+  `solana-keygen new --no-bip39-passphrase --silent -o relayer-keypair.json && chmod 600 relayer-keypair.json`.
+  Do not copy it anywhere, and never use a key that holds anything outside devnet.
+- Fund it with devnet SOL from the faucet (`solana airdrop 1 <address> -u devnet`, or
+  https://faucet.solana.com). Each wallet creation costs it about 0.004 SOL (rent). Each
+  execute costs about 0.00001 SOL.
+- The devnet playground's instance runs on `BJRfvkLaLEgnB8dWg6QJAekgdXM4MyRbdgrdwwqap3Wq`.
 - The relayer checks these at startup and refuses to run if any of them fails:
   - the keypair path is `~/.config/solana/id.json` or anything under a `keys/` directory
   - the keypair file can be read by group or others (it must be `chmod 600`)
@@ -79,9 +87,9 @@ only `getPayerSigner` and then `signAndSendTransaction`.
 | `signTransaction` | `{ transaction: base64, signer_key? }` | `{ signed_transaction: base64, signer_pubkey }` (not sent) |
 | `signAndSendTransaction` | `{ transaction: base64, signer_key?, fee_token?, respond_after? }` | `{ signature, signed_transaction, signer_pubkey }` |
 
-Legacy and v0 transactions both work. The relayer returns a transaction in the same
-format it received. `fee_token` is ignored, because sponsorship is free, as in
-`price.type = "free"`.
+Legacy and v0 transactions both work, and v1 with `--tx-v1`. The relayer returns a
+transaction in the same format it received. `fee_token` is ignored, because sponsorship
+is free, as in `price.type = "free"`.
 
 **`signAndSendTransaction` answers only once the transaction is confirmed.** This is
 Kora's default (`respond_after: "confirmed"`). The relayer sends with preflight, then
@@ -151,16 +159,16 @@ second transaction reads the counter the first one advanced.
 
 `GET /health` (or `GET /`) returns the relayer address, its balance, the allowlist and
 the limits as JSON. Open it in the phone's browser to check that the phone can reach
-the Mac. `POST` requests must have `content-type: application/json`. Both SDKs send that.
+this machine. `POST` requests must have `content-type: application/json`. Both SDKs send that.
 
 ### Who can reach it
 
 The relayer holds real (devnet) SOL and signs for anyone it accepts, so it limits who
-can talk to it. A web page open in any browser on this Mac could otherwise call
+can talk to it. A web page open in any browser on this machine could otherwise call
 `127.0.0.1:8787`.
 
 - **Browsers: only pages served from this machine.** CORS allows an origin only if its
-  host is `localhost`, `127.0.0.1`, `::1` or one of this Mac's own IP addresses, on any
+  host is `localhost`, `127.0.0.1`, `::1` or one of this machine's own IP addresses, on any
   port, over http or https. That covers the Vite app on `localhost:5173`, `:4173` or
   `https://<LAN IP>:5173`. Any other origin gets no `Access-Control-Allow-Origin` and
   no Private-Network-Access answer, so the browser never sends its request. The
@@ -173,7 +181,7 @@ can talk to it. A web page open in any browser on this Mac could otherwise call
   `localhost`, `127.0.0.1`, `::1`, and with `--lan` the LAN IP. Anything else gets
   HTTP 421. This stops a page whose domain later resolves to `127.0.0.1`.
 - **Not a browser: whoever reaches the port.** `curl`, the phone app and anything else
-  on the network need no Origin. Without `--lan` that is only this Mac. With `--lan`,
+  on the network need no Origin. Without `--lan` that is only this machine. With `--lan`,
   or through the web app's `dev:lan` proxy, it is everyone on the Wi-Fi.
 
 What such a caller can still get, with the default policy: a transaction must call
@@ -190,10 +198,11 @@ failed, and `error.data.rule` holds the machine-readable rule name:
 | Code | Meaning |
 |---|---|
 | -32700 / -32600 / -32601 / -32602 | parse error / bad request (batches unsupported) / unknown method / bad params |
-| -32003 | the policy refused to sign (`program_not_allowed`, `fee_payer`, `signer_key`, `fee_payer_policy`, `durable_nonce`, `max_allowed_lamports`, `max_signatures`, `require_one_of_programs`) |
+| -32003 | the policy refused to sign (`program_not_allowed`, `fee_payer`, `signer_key`, `fee_payer_policy`, `durable_nonce`, `max_allowed_lamports`, `max_signatures`, `require_one_of_programs`, and for v1 the `tx_v1_*` rules below) |
 | -32004 | simulation failed. The message includes the program error and the last log lines. A LazorKit 3006 also sets `data.reason = "stale_counter"`. `data.reason = "rpc_behind"`: the relayer's RPC stayed behind the slot it needed, and the same bytes may pass later |
 | -32005 | the RPC refused to send (`send`, preflight, logs included), the transaction failed on chain (`transaction_failed`), or its blockhash expired before it landed (`blockhash_expired`). The last two carry `data.signature` |
 | -32029 | the rate limit was hit |
+| -32051 | a v1 transaction, and the relayer runs without `--tx-v1` (`tx_v1_disabled`). Nothing was decoded, simulated or signed. See "Transaction v1 (SIMD-0385)" |
 | -32001 (HTTP 401) | `--api-key` is set and the request did not carry it |
 | -32600 (HTTP 415) | the POST was not `content-type: application/json` |
 | -32600 (HTTP 421) | the `Host` header is not an address the relayer listens on (DNS rebinding guard) |
@@ -239,6 +248,50 @@ How it differs from `kora.devnet.toml`, and why:
 - **No reCAPTCHA, no Redis, no metrics port, no Lighthouse.** The rate limit is one
   counter in memory.
 
+## Transaction v1 (SIMD-0385)
+
+A v1 transaction starts with the byte `0x81`, holds up to 4,096 bytes and 64 addresses,
+has no lookup tables, and carries its compute budget in the message (a config mask and
+values) instead of ComputeBudget instructions. Its signatures come last. The v1 support
+being added to `@lazorkit/wallet` 3.3.0 and `@lazorkit/wallet-mobile-adapter` 2.3.0 (not
+released yet) sends one only when the app asks for `txVersion: 'v1'` and declares
+`acceptsTxV1: true` on this paymaster, and only to the devnet program.
+
+**Off by default.** Without `--tx-v1` (or `RELAYER_TX_V1=1`), a transaction whose first
+byte is `0x81` is answered with error -32051, `transaction version 1 is not enabled on this
+paymaster` (`data.rule = "tx_v1_disabled"`), before it is decoded, simulated or signed, and
+without an RPC call. Those wallet versions do not retry a -32051: they remember it for the
+page or app session and send their later transactions to this paymaster as v0. So
+restarting the relayer without `--tx-v1` is a kill switch that needs no app change.
+
+**With `--tx-v1`** a v1 transaction goes through every rule in "What it will sign", and
+also through these, all before anything is signed (-32003, `data.rule` in brackets):
+
+| Refused when | Rule | Why |
+|---|---|---|
+| the compute-unit limit (config bit 2) is unset, 0 or over 1,400,000 | `tx_v1_compute_unit_limit` | In v1 an unset limit is 0, not a default. The LazorKit instruction then fails "exceeded CUs meter" on chain, and the relayer pays the fee |
+| the loaded-accounts-data limit (bit 3) is unset, 0 or over 64 MiB | `tx_v1_loaded_accounts_data_size_limit` | The same: `MaxLoadedAccountsDataSizeExceeded` on chain, fee charged |
+| a heap size is requested (bit 4) | `tx_v1_heap_size` | The LazorKit program's heap is a fixed 32 KiB; the request only costs compute |
+| the priority fee (bits 0-1, a total in lamports) is over `--max-priority-fee-lamports` (default 0) | `tx_v1_priority_fee` | The fee payer pays it |
+| any top-level instruction calls ComputeBudget | `tx_v1_compute_budget_instruction` | v1 ignores it for limits but runs it (150 CU), and between the Secp256r1 precompile and the LazorKit instruction it breaks the passkey check |
+| a Secp256r1 instruction is not followed directly by a LazorKit v2 instruction | `tx_v1_precompile_order` | The precompile authorizes the instruction right after it |
+| the transaction is over 4,096 bytes or 64 addresses | `tx_v1_size` | The cluster refuses it anyway |
+| the fee payer is not a writable signer | `fee_payer` | Its signature would have no slot |
+
+A transaction with a single priority-fee bit, or a config bit SIMD-0385 does not define,
+does not decode (-32602).
+
+**How it is signed.** web3.js 1.99 reads v1 but cannot write it, so the relayer signs the
+bytes it received: ed25519 over the message (everything before the signatures), written into
+the fee payer's slot, the first one after the message (`src/txv1.mjs`). It simulates those
+same bytes, so it signs exactly what it checked. Every other byte, the other signers'
+signatures included, is returned and sent unchanged. The signature is deterministic, so a
+resend of the same bytes gets the same transaction id, and the "already landed" answer
+works for v1 as for v0. Legacy and v0 transactions are signed by web3.js exactly as before.
+
+The payer-loss cap (`--max-lamports`) already includes a v1 priority fee, because it is
+read from the simulation. Mainnet is refused at startup whatever the flags.
+
 ## Options
 
 | Flag | Env | Default |
@@ -256,6 +309,8 @@ How it differs from `kora.devnet.toml`, and why:
 | `--api-key <key>` | `RELAYER_API_KEY` | none |
 | `--cors-origin <a,b>` or `'*'` | | pages served from this machine (localhost, 127.0.0.1, ::1, its own IPs; any port) |
 | `--any-cluster` | | off. Mainnet is refused regardless |
+| `--tx-v1` | `RELAYER_TX_V1=1` | off. v1 transactions are refused with -32051 |
+| `--max-priority-fee-lamports <n>` | `RELAYER_MAX_PRIORITY_FEE_LAMPORTS` | `0`. v1 only: the largest priority fee, in lamports, a v1 transaction may make the fee payer pay |
 
 With `npm start`, put flags after `--`, for example `npm start -- --lan --api-key <key>`.
 `npm run start:lan` is `--lan` on its own.
@@ -278,6 +333,16 @@ answered with its signature; a second line follows once it confirms or fails:
 12:23:13.598  confirmed  56JTGcAW…  slot 505527901
 ```
 
+A v1 transaction's version is followed by its config: `cu` (compute-unit limit), `lad`
+(loaded-accounts-data limit), `fee` (priority fee, lamports) and `heap` when requested. An
+unset field shows as `unset`. Without `--tx-v1` the line just says `v1  REJECTED`:
+
+```
+03:37:24.456  127.0.0.1  signAndSendTransaction  v1 cu=unset lad=196608 fee=0  [Secp256r1, LazorKit v2]  REJECTED  relayer rejected: the v1 transaction sets no compute-unit limit. …
+03:37:25.502  127.0.0.1  signAndSendTransaction  v1 cu=20591 lad=196608 fee=0  [Secp256r1, LazorKit v2]  inner=[System]  payer -0.000010 SOL  12992 CU  CONFIRMED 2Sunv66U…  slot 144 (0.5 s after send)
+03:37:14.842  127.0.0.1  signAndSendTransaction  v1  REJECTED  transaction version 1 is not enabled on this paymaster
+```
+
 A resend of bytes that had already landed is logged as `CONFIRMED … (a resend of bytes
 that had landed: nothing sent again)`.
 
@@ -289,14 +354,49 @@ and 2 s), so a rejection appears three times in the log.
 
 ## Tests
 
-Run these with the relayer running:
+No CI job runs these. Run them by hand.
+
+**Offline (no cluster, no funds, no running relayer):**
+
+```bash
+npm ci
+npm test                                                   # node --test test/*.test.mjs
+TXV1_ORACLE_DIR=<lazor-kit>/tools/txv1-oracle npm test    # also the @solana/kit 8.4.0 check
+```
+
+- `test/txv1.test.mjs` holds the v1 signing and policy to the golden vectors the wallets'
+  v1 writer is tested against (`test/fixtures/txv1-vectors.json`, a verbatim copy of
+  lazor-kit `test-vectors/txv1.json`; `TXV1_VECTORS=<path>` uses another copy). The
+  relayer's signature on what a wallet sends must equal the writer's, byte for byte; every
+  signature slot of the v1 transactions in the file that landed on devnet must verify over
+  the message the relayer signs; every v1 rule above refuses what it should, and passes the
+  shapes that landed. With kit 8.4.0 present (lazor-kit's private `tools/txv1-oracle`
+  package pins it), kit's `partiallySignTransaction` must give the relayer's bytes. Without
+  it that one test is skipped, and says so.
+- `test/server.test.mjs` runs the relayer itself against a stub JSON-RPC node: -32051 and
+  no RPC call at all without `--tx-v1`; with it, every v1 refusal before the balance read,
+  the simulation and the signature; the bytes simulated, returned and sent; the resend of
+  landed bytes; legacy and v0 signed and sent exactly as web3.js signs them, with and
+  without `--tx-v1`; the priority-fee cap; mainnet refused at startup.
+- `scripts/txv1-build.mjs` builds the v1 transactions the tests and `smoke:txv1` need, the
+  way the wallets' writer does; the tests check it reproduces every vector.
+
+**Against a running relayer** (devnet, or a local validator with `--any-cluster`):
 
 ```bash
 npm run smoke              # every method, the reachability guards, one rejection per rule
 npm run smoke -- --skip-send
 npm run smoke:lazorkit     # a real LazorKit v2 CreateWallet + two back-to-back passkey Executes, sponsored
+npm run smoke:txv1         # v1: -32051 without --tx-v1; with it, every refusal, then passkey Executes as v1
 npm run smoke -- --url http://192.168.100.130:8787 --api-key <key>   # over the LAN / with a key
 ```
+
+All three take `--url <relayer>` and `--rpc <cluster RPC>`. For a local validator, load
+the LazorKit v2 program at `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv` from a release
+artifact (`solana-test-validator --upgradeable-program 57bTNW… <lazorkit_program.so>
+<authority>`), fund the relayer key from the validator's faucet, and start the relayer with
+`--any-cluster --rpc http://127.0.0.1:8899`. The protocol does not need to be initialized.
+Never run a script that stops every validator on the machine.
 
 - `smoke` checks the reachability guards first. A preflight from `http://localhost:5173`
   is allowed. A preflight from `https://evil.example` is refused (unless the relayer runs
@@ -327,6 +427,32 @@ npm run smoke -- --url http://192.168.100.130:8787 --api-key <key>   # over the 
   that the relayer carries real v2 traffic (Secp256r1 precompile, wallet-bound
   challenge, protocol CPIs). It does not test the real portal or a real device passkey.
   The web and mobile apps cover those.
+- `smoke:txv1` reads `tx_v1` from `/health`. Against a relayer without `--tx-v1` it sends
+  one v1 transaction, which must be refused with -32051 while the fee payer's balance stays
+  the same, and stops there. With `--tx-v1` it first sends one v1 transaction per refusal
+  (limits unset or 0, a priority fee, a heap request, a ComputeBudget instruction, a
+  Secp256r1 instruction followed by System, 4,097 bytes): each must be refused, and the
+  fee payer's balance must not move. Then it creates a passkey wallet (legacy, as the
+  wallets do) and sends two back-to-back passkey Executes as v1, with no ComputeBudget
+  instruction and limits sized from one simulation the way the wallets size them. Both
+  must land, read back as version 1 with that config and a fee of 10,000 lamports, exactly
+  as the relayer signed them. Last, it sends the first one's bytes again: the same
+  signature, nothing moves. It costs the relayer about 0.006 SOL.
+
+Results on 2026-10-01 (a local `solana-test-validator` 4.2.2 with SIMD-0385 active and the
+devnet LazorKit v2 artifact loaded, sha256 `3584aec7…b470`), after v1 support was added:
+
+- `npm test`: 34/34 on Node 22 and 24, kit 8.4.0 included (11 vectors equal kit's bytes).
+- Without `--tx-v1`: `smoke` 20/20, `smoke -- --allow-plain` 23/23, `smoke:lazorkit` passed,
+  `smoke:txv1` got -32051 with the fee payer untouched. With `--tx-v1`: the same 20/20,
+  23/23 and `smoke:lazorkit`, and `smoke:txv1` passed: every refusal before signing, and
+  two passkey Executes landed as v1 (911 bytes, `cu=20591 lad=196608`, 12,992 CU used,
+  fee 10,000 lamports), the second prepared right after the first was answered. The
+  version before v1 support gave the same 20/20, 23/23 and `smoke:lazorkit` there.
+- That version and this one, run side by side on the same key and validator, answered
+  26 legacy and v0 `signTransaction` requests (signed, refused by each static rule, refused
+  by the simulation, malformed) byte for byte the same, with and without `--allow-plain`
+  and `--tx-v1`.
 
 Results on 2026-09-30 (devnet and a scripted RPC), after the confirmation wait stopped
 answering with errors for transactions that land:
@@ -453,10 +579,17 @@ passkey Execute `5WpVEUvVHbvBiy68VAHBwr7ViqUHGzoujWPkFD45EMA4ihqhMssPVdUSAcDsVxV
   retries: its own last confirmed transaction, or the slot the passkey signed. Nothing
   was signed. Send the same transaction again in a moment. If it keeps happening, the
   wallet and the relayer are on RPCs that disagree by more than a couple of seconds.
+- **`transaction version 1 is not enabled on this paymaster` (-32051).** The app sent a v1
+  transaction and the relayer runs without `--tx-v1`. Start it with `--tx-v1`, or stop
+  declaring `acceptsTxV1` for this paymaster in the app. Nothing was signed or sent.
+- **`relayer rejected: the v1 transaction …` (-32003, `tx_v1_*`).** The v1 transaction broke
+  one of the rules in "Transaction v1 (SIMD-0385)". The wallets never build these; a
+  hand-built transaction has to set both limits, no heap, no priority fee (unless the
+  relayer allows one) and no ComputeBudget instruction.
 - **`LOW` in the start banner.** Top up the fee payer (see above).
 - **The browser says "Failed to fetch", and the relayer logs nothing.** The page's origin
   is not one of this machine's (see "Who can reach it"). Open the app by `localhost` or
-  the Mac's own IP, use `/paymaster`, or pass `--cors-origin <that origin>`.
+  this machine's own IP, use `/paymaster`, or pass `--cors-origin <that origin>`.
 - **`misdirected request: Host must be one of …` (421).** Call the relayer by the
   address it prints: `127.0.0.1`, `localhost`, or the LAN IP. A hostname such as
   `mymac.local` is refused.
