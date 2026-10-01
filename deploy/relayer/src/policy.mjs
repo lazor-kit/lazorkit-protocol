@@ -264,7 +264,7 @@ export function inspectTxV1(tx, raw, { maxPriorityFeeLamports = 0 } = {}) {
     reject('tx_v1_size', `the v1 transaction has ${keys.length} addresses, over the limit of ${TX_V1_MAX_ADDRESSES}.`, { addresses: keys.length });
   }
   // inspectTransaction checked that address 0 is the relayer. It must also be a
-  // writable signer, or the relayer's signature would go in no slot.
+  // signer, or the relayer's signature has no slot, and writable, or it cannot pay.
   const { numRequiredSignatures, numReadonlySignedAccounts } = msg.header;
   if (numRequiredSignatures < 1 || numReadonlySignedAccounts >= numRequiredSignatures) {
     reject('fee_payer', 'the fee payer (address 0) is not a writable signer of the v1 transaction.');

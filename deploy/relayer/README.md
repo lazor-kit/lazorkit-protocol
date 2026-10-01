@@ -276,7 +276,7 @@ also through these, all before anything is signed (-32003, `data.rule` in bracke
 | any top-level instruction calls ComputeBudget | `tx_v1_compute_budget_instruction` | v1 ignores it for limits but runs it (150 CU), and between the Secp256r1 precompile and the LazorKit instruction it breaks the passkey check |
 | a Secp256r1 instruction is not followed directly by a LazorKit v2 instruction | `tx_v1_precompile_order` | The precompile authorizes the instruction right after it |
 | the transaction is over 4,096 bytes or 64 addresses | `tx_v1_size` | The cluster refuses it anyway |
-| the fee payer is not a writable signer | `fee_payer` | Its signature would have no slot |
+| the fee payer is not a writable signer | `fee_payer` | Not a signer, it has no signature slot; read-only, it cannot pay the fee |
 
 A transaction with a single priority-fee bit, or a config bit SIMD-0385 does not define,
 does not decode (-32602).
