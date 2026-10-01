@@ -17,8 +17,8 @@ import {
   TransactionMessage,
   VersionedTransaction,
 } from '@solana/web3.js';
-import { isTxV1, txV1Layout, txV1Signature, signTxV1AsFeePayer } from '../src/txv1.mjs';
-import { inspectTransaction, inspectTxV1, PolicyError, ERR } from '../src/policy.mjs';
+import { isTxV1, txV1Layout, txV1Signature, signTxV1AsFeePayer, txV1PriorityFee } from '../src/txv1.mjs';
+import { inspectTransaction, inspectTxV1, checkTxV1PriorityFee, PolicyError, ERR } from '../src/policy.mjs';
 import { COMPUTE_BUDGET_PROGRAM, LAZORKIT_V2_DEVNET, SECP256R1_PROGRAM } from '../src/allowlist.mjs';
 import { buildTxV1, instructionsFromJson } from '../scripts/txv1-build.mjs';
 import { vectors, vector, fitting, testKey, walletSent, fullySigned } from './helpers/vectors.mjs';
@@ -214,6 +214,53 @@ test('Y6: a priority fee over the cap is refused (default cap 0)', () => {
   refused(v1({ config: { ...base.config, priorityFeeLamports: 1n } }), 'tx_v1_priority_fee');
   refused(v1({ config: { ...base.config, priorityFeeLamports: 5001n } }), 'tx_v1_priority_fee', { maxPriorityFeeLamports: 5000 });
   assert.equal(inspect(v1({ config: { ...base.config, priorityFeeLamports: 5000n } }), { maxPriorityFeeLamports: 5000 }).txV1.priorityFee, 5000);
+});
+
+test('Y6: the priority fee is read from the bytes as a u64, past where web3.js 1.99 can decode it', () => {
+  const config = { computeUnitLimit: 60_000, loadedAccountsDataSizeLimit: 163_840 };
+  assert.equal(txV1PriorityFee(v1({ config })), null, 'no fee bits');
+  for (const fee of [0n, 1n, 5000n, 2n ** 53n - 1n, 2n ** 53n, 2n ** 64n - 1n]) {
+    const raw = v1({ config: { ...config, priorityFeeLamports: fee } });
+    assert.equal(txV1PriorityFee(raw), fee, String(fee));
+    assert.equal(txV1PriorityFee(Buffer.from(raw)), fee, `${fee}, as a Buffer`);
+  }
+  // After 64 addresses too: the fee is the first config value, right after them.
+  const v = vector('execute-64-addresses');
+  const wide = buildTxV1({ ...v.input, config: { ...v.input.config, priorityFeeLamports: 2n ** 64n - 2n }, instructions: instructionsFromJson(v.input.instructions) }).wire;
+  assert.equal(wide[41], 64);
+  assert.equal(txV1PriorityFee(wide), 2n ** 64n - 2n);
+  // web3.js 1.99 cannot decode the fee past 2^53 - 1; the cluster takes any u64.
+  assert.equal(VersionedTransaction.deserialize(v1({ config: { ...config, priorityFeeLamports: 2n ** 53n - 1n } })).message.transactionConfig.priorityFee, 2 ** 53 - 1);
+  assert.throws(() => VersionedTransaction.deserialize(v1({ config: { ...config, priorityFeeLamports: 2n ** 53n } })), /safe integer range/);
+  // A single fee bit, bytes that end before the fee, not v1: no fee.
+  assert.equal(txV1PriorityFee(v1({ config: { ...config, priorityFeeLamports: 7n }, mask: 0b01101 })), null);
+  assert.equal(txV1PriorityFee(v1({ config: { ...config, priorityFeeLamports: 7n } }).subarray(0, 42 + 32 * 2 + 7)), null);
+  assert.equal(txV1PriorityFee(Uint8Array.of(0x80, 1, 0, 0, 3, 0, 0, 0)), null);
+});
+
+test('Y6: the fee rule takes a bigint fee, and refuses one over the cap with JSON-safe data', () => {
+  assert.doesNotThrow(() => checkTxV1PriorityFee(null, 0));
+  assert.doesNotThrow(() => checkTxV1PriorityFee(0, 0));
+  assert.doesNotThrow(() => checkTxV1PriorityFee(5000n, 5000));
+  for (const [fee, cap, shown] of [
+    [1, 0, 1],
+    [5001n, 5000, 5001],
+    [2n ** 53n, Number.MAX_SAFE_INTEGER, '9007199254740992'],
+    [2n ** 64n - 1n, 0, '18446744073709551615'],
+  ]) {
+    assert.throws(
+      () => checkTxV1PriorityFee(fee, cap),
+      (e) => {
+        assert.ok(e instanceof PolicyError);
+        assert.equal(e.code, ERR.REJECTED);
+        assert.deepEqual(e.data, { rule: 'tx_v1_priority_fee', priorityFee: shown, maxPriorityFeeLamports: cap });
+        assert.doesNotThrow(() => JSON.stringify(e.data));
+        assert.match(e.message, new RegExp(`pays a priority fee of ${fee} lamports?, over this relayer's cap of ${cap} \\(--max-priority-fee-lamports\\)`));
+        return true;
+      },
+      String(fee),
+    );
+  }
 });
 
 test('Y6: any top-level ComputeBudget instruction is refused', () => {

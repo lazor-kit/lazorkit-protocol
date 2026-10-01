@@ -303,13 +303,7 @@ export function inspectTxV1(tx, raw, { maxPriorityFeeLamports = 0 } = {}) {
     );
   }
   const priorityFee = config.priorityFee ?? 0;
-  if (priorityFee > maxPriorityFeeLamports) {
-    reject(
-      'tx_v1_priority_fee',
-      `the v1 transaction pays a priority fee of ${priorityFee} lamport${priorityFee === 1 ? '' : 's'}, over this relayer's cap of ${maxPriorityFeeLamports} (--max-priority-fee-lamports).`,
-      { priorityFee, maxPriorityFeeLamports },
-    );
-  }
+  checkTxV1PriorityFee(priorityFee, maxPriorityFeeLamports);
 
   const program = (ix) => (ix ? keys[ix.programIdIndex]?.toBase58() : undefined);
   const ixs = msg.compiledInstructions;
@@ -340,6 +334,28 @@ export function inspectTxV1(tx, raw, { maxPriorityFeeLamports = 0 } = {}) {
     loadedAccountsDataSizeLimit: config.loadedAccountsDataSizeLimit,
     priorityFee,
   };
+}
+
+/**
+ * The v1 priority-fee rule: refuses a fee over `maxPriorityFeeLamports`
+ * (tx_v1_priority_fee). `priorityFee` is a number, or a bigint for a fee that
+ * web3.js cannot decode (over 2^53 - 1, read from the bytes by txV1PriorityFee);
+ * null or undefined is no fee. The refusal's data shows a fee past 2^53 - 1 as
+ * a decimal string, so it stays exact and the answer can be sent as JSON.
+ */
+export function checkTxV1PriorityFee(priorityFee, maxPriorityFeeLamports = 0) {
+  if (priorityFee == null) return;
+  const fee = BigInt(priorityFee);
+  if (fee <= BigInt(maxPriorityFeeLamports)) return;
+  throw new PolicyError(
+    ERR.REJECTED,
+    `relayer rejected: the v1 transaction pays a priority fee of ${fee} lamport${fee === 1n ? '' : 's'}, over this relayer's cap of ${maxPriorityFeeLamports} (--max-priority-fee-lamports).`,
+    {
+      rule: 'tx_v1_priority_fee',
+      priorityFee: fee <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(fee) : fee.toString(),
+      maxPriorityFeeLamports,
+    },
+  );
 }
 
 // One JSON-RPC call. Public devnet answers bursts with HTTP 429 ("Connection rate

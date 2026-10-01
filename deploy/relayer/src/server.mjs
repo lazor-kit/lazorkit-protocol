@@ -36,6 +36,7 @@ import {
 import {
   inspectTransaction,
   checkSimulation,
+  checkTxV1PriorityFee,
   explainTxError,
   passkeySignedSlot,
   PolicyError,
@@ -43,7 +44,7 @@ import {
   RPC_TIMEOUT_MS,
   MIN_CONTEXT_SLOT_NOT_REACHED,
 } from './policy.mjs';
-import { isTxV1, signTxV1AsFeePayer, txV1Signature } from './txv1.mjs';
+import { isTxV1, signTxV1AsFeePayer, txV1PriorityFee, txV1Signature } from './txv1.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -222,6 +223,13 @@ function decodeParams(params, ctx) {
   try {
     tx = VersionedTransaction.deserialize(raw);
   } catch (e) {
+    // web3.js 1.99 cannot decode a v1 priority fee over 2^53 - 1, which the
+    // cluster accepts. Such a fee is over any cap this relayer takes, so it is
+    // refused by the fee rule, read from the bytes, not as undecodable.
+    if (isTxV1(raw)) {
+      ctx.version = 1;
+      checkTxV1PriorityFee(txV1PriorityFee(raw), cfg.maxPriorityFeeLamports);
+    }
     throw new PolicyError(ERR.INVALID_PARAMS, `invalid params: transaction is not a base64 Solana transaction (${e.message})`);
   }
   return { tx, raw, signerKey: params.signer_key ?? null };

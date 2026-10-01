@@ -36,6 +36,10 @@ const SIGNATURE_BYTES = 64;
 const ADDRESS_BYTES = 32;
 // 0x81, the three header bytes, the mask, the blockhash and the two counts.
 const ADDRESSES_AT = 42;
+const CONFIG_MASK_AT = 4;
+const ADDRESS_COUNT_AT = 41;
+// The priority fee's two config mask bits: both are set, or neither.
+const PRIORITY_FEE_BITS = 0b11;
 
 /** True for v1 wire bytes: the first byte is 0x81. */
 export function isTxV1(raw) {
@@ -54,6 +58,23 @@ export function txV1Layout(raw) {
     throw new Error(`txv1: ${raw.length} bytes cannot hold a message and ${signers} signatures`);
   }
   return { signers, messageLength };
+}
+
+/**
+ * The priority fee of v1 wire bytes as a bigint, or null when the config mask
+ * does not set both fee bits or the bytes end before the fee. It is the first
+ * config value: a u64 right after the addresses.
+ *
+ * web3.js 1.99 decodes it as a Number and throws on a fee over 2^53 - 1, which
+ * the cluster accepts (any u64). The relayer reads such a fee here, so that it
+ * is refused by the fee rule (policy.mjs) and not as undecodable bytes.
+ */
+export function txV1PriorityFee(raw) {
+  if (!isTxV1(raw) || raw.length < ADDRESSES_AT) return null;
+  const bytes = Buffer.from(raw.buffer, raw.byteOffset, raw.length);
+  if ((bytes.readUInt32LE(CONFIG_MASK_AT) & PRIORITY_FEE_BITS) !== PRIORITY_FEE_BITS) return null;
+  const at = ADDRESSES_AT + ADDRESS_BYTES * bytes[ADDRESS_COUNT_AT];
+  return bytes.length < at + 8 ? null : bytes.readBigUInt64LE(at);
 }
 
 /** The 64-byte signature in slot `index` (a view into `raw`). */

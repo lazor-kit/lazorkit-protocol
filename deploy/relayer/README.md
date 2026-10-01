@@ -272,7 +272,7 @@ also through these, all before anything is signed (-32003, `data.rule` in bracke
 | the compute-unit limit (config bit 2) is unset, 0 or over 1,400,000 | `tx_v1_compute_unit_limit` | In v1 an unset limit is 0, not a default. The LazorKit instruction then fails "exceeded CUs meter" on chain, and the relayer pays the fee |
 | the loaded-accounts-data limit (bit 3) is unset, 0 or over 64 MiB | `tx_v1_loaded_accounts_data_size_limit` | The same: `MaxLoadedAccountsDataSizeExceeded` on chain, fee charged |
 | a heap size is requested (bit 4) | `tx_v1_heap_size` | The LazorKit program's heap is a fixed 32 KiB; the request only costs compute |
-| the priority fee (bits 0-1, a total in lamports) is over `--max-priority-fee-lamports` (default 0) | `tx_v1_priority_fee` | The fee payer pays it |
+| the priority fee (bits 0-1, a total in lamports) is over `--max-priority-fee-lamports` (default 0) | `tx_v1_priority_fee` | The fee payer pays it. The fee is a u64: one over 2^53 - 1, which web3.js 1.99 cannot decode, is read from the bytes and refused by this rule too |
 | any top-level instruction calls ComputeBudget | `tx_v1_compute_budget_instruction` | v1 ignores it for limits but runs it (150 CU), and between the Secp256r1 precompile and the LazorKit instruction it breaks the passkey check |
 | a Secp256r1 instruction is not followed directly by a LazorKit v2 instruction | `tx_v1_precompile_order` | The precompile authorizes the instruction right after it |
 | the transaction is over 4,096 bytes or 64 addresses | `tx_v1_size` | The cluster refuses it anyway |
@@ -377,7 +377,7 @@ TXV1_ORACLE_DIR=<lazor-kit>/tools/txv1-oracle npm test    # also the @solana/kit
   no RPC call at all without `--tx-v1`; with it, every v1 refusal before the balance read,
   the simulation and the signature; the bytes simulated, returned and sent; the resend of
   landed bytes; legacy and v0 signed and sent exactly as web3.js signs them, with and
-  without `--tx-v1`; the priority-fee cap; mainnet refused at startup.
+  without `--tx-v1`; the priority-fee cap, up to fees past 2^53 - 1; mainnet refused at startup.
 - `scripts/txv1-build.mjs` builds the v1 transactions the tests and `smoke:txv1` need, the
   way the wallets' writer does; the tests check it reproduces every vector.
 

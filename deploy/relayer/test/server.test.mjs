@@ -205,6 +205,25 @@ describe('with --tx-v1', () => {
     assert.match(relayer.output(), /v1 cu=unset lad=163840 fee=0 {2}\[Secp256r1, LazorKit v2\] {2}REJECTED {2}relayer rejected: the v1 transaction sets no compute-unit limit/);
   });
 
+  test('Y6: a priority fee over 2^53 - 1 is refused by the fee rule (-32003), not as undecodable, before any RPC call', async () => {
+    // web3.js 1.99 decodes the fee as a Number and throws past 2^53 - 1; the
+    // cluster takes any u64. The relayer reads such a fee from the bytes.
+    const config = { computeUnitLimit: 60_000, loadedAccountsDataSizeLimit: 163_840 };
+    for (const fee of [2n ** 53n - 1n, 2n ** 53n, 2n ** 64n - 1n]) {
+      for (const method of ['signTransaction', 'signAndSendTransaction']) {
+        const mark = stub.calls.length;
+        const body = await call(relayer.url, method, { transaction: b64(v1({ ...config, priorityFeeLamports: fee })), signer_key: payer.publicKey.toBase58() });
+        assert.equal(body.error?.code, -32003, `${fee}: ${JSON.stringify(body)}`);
+        assert.equal(body.error.data?.rule, 'tx_v1_priority_fee', `${fee}: ${body.error.message}`);
+        assert.equal(String(body.error.data.priorityFee), String(fee));
+        assert.equal(body.error.data.maxPriorityFeeLamports, 0);
+        assert.match(body.error.message, new RegExp(`pays a priority fee of ${fee} lamports, over this relayer's cap of 0`));
+        assert.deepEqual(stub.since(mark), [], `${method}, fee ${fee}: refused before any RPC call`);
+      }
+    }
+    assert.match(relayer.output(), /signAndSendTransaction {2}v1 {2}REJECTED {2}relayer rejected: the v1 transaction pays a priority fee of 18446744073709551615 lamports/);
+  });
+
   test('Y1: a single fee bit is refused at decode (-32602), before any RPC call', async () => {
     const raw = v1({ computeUnitLimit: 60_000, loadedAccountsDataSizeLimit: 163_840 });
     raw[4] |= 0b1; // bit 0 without bit 1
@@ -238,6 +257,27 @@ describe('--max-priority-fee-lamports', () => {
       const over = await call(relayer.url, 'signTransaction', { transaction: b64(v1({ ...config, priorityFeeLamports: 5001n })) });
       assert.equal(over.error?.data?.rule, 'tx_v1_priority_fee');
       assert.match(relayer.output(), /v1 cu=60000 lad=163840 fee=5000 {2}\[Secp256r1, LazorKit v2\].*SIGNED/);
+    } finally {
+      await relayer.stop();
+      await stub.close();
+    }
+  });
+
+  test('at the largest cap, 2^53 - 1, that fee is signed and 2^53 is refused by the fee rule', async () => {
+    const stub = await startStubRpc();
+    const cap = Number.MAX_SAFE_INTEGER;
+    const relayer = await startRelayer({ rpcUrl: stub.url, keypairFile: keypair.file, args: ['--any-cluster', '--tx-v1', '--max-priority-fee-lamports', String(cap)] });
+    try {
+      const config = { computeUnitLimit: 60_000, loadedAccountsDataSizeLimit: 163_840 };
+      const at = await call(relayer.url, 'signTransaction', { transaction: b64(v1({ ...config, priorityFeeLamports: BigInt(cap) })) });
+      assert.ok(at.result?.signed_transaction, JSON.stringify(at.error));
+      const mark = stub.calls.length;
+      const over = await call(relayer.url, 'signTransaction', { transaction: b64(v1({ ...config, priorityFeeLamports: BigInt(cap) + 1n })) });
+      assert.equal(over.error?.code, -32003, JSON.stringify(over));
+      assert.equal(over.error.data?.rule, 'tx_v1_priority_fee');
+      assert.equal(over.error.data.priorityFee, '9007199254740992');
+      assert.equal(over.error.data.maxPriorityFeeLamports, cap);
+      assert.deepEqual(stub.since(mark), [], 'refused before any RPC call');
     } finally {
       await relayer.stop();
       await stub.close();
