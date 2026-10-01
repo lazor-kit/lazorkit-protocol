@@ -1,0 +1,23 @@
+{
+  "name": "lazorkit-devnet-relayer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Kora-compatible JSON-RPC fee payer for testing LazorKit v2 on Solana devnet.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "start:lan": "node src/server.mjs --lan",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:lazorkit": "node scripts/lazorkit-smoke.mjs"
+  },
+  "dependencies": {
+    "@solana/web3.js": "1.99.0",
+    "bs58": "6.0.0"
+  },
+  "devDependencies": {
+    "@lazorkit/sdk-legacy": "1.2.0"
+  }
+}
