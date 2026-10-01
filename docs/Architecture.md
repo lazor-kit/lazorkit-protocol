@@ -789,23 +789,67 @@ only LazorKit's side of the CPI loop ran, not the AMMs. The sizes include a
 compute-unit and loaded-data limits); without a priority fee it is 8 bytes
 smaller.
 
-**Program limits a v1 payload can reach.** The 1232-byte cap kept two
-ceilings out of reach. A v1 payload can hit both, and both fail the
-transaction:
+**Program limits a v1 payload can reach.** Real payloads rarely reached two
+of the program's ceilings in 1232 bytes. A v1 payload can reach both, and both
+fail the transaction:
 
 - **16 inner instructions** (`MAX_COMPACT_INSTRUCTIONS`,
   `program/src/compact.rs`). A 17th fails with `InvalidInstructionData`.
-- **A fixed 32 KiB heap.** The program runs out of memory
-  (`ProgramFailedToComplete`, "memory allocation failed, out of memory") once
-  some inner instruction has more than 64 account metas **and** Σ(1 + metas)
-  over all inner instructions exceeds 128. One instruction with 127 metas runs
-  and 128 does not; 64 + 64 runs and 70 + 70 does not; 100 + 20 runs and
-  100 + 30 does not. The rule fits about 30 measured shapes, and the source
-  explains it: the reused account-meta Vecs start at capacity 32 and double
-  past 64, the accounts-hash preimage (33 bytes per meta) doubles past 4,224
-  bytes, and the bump allocator never frees. A v1 `heapSize` request does not
-  lift it. The measured routes stay under it (BONK→WIF: 83 + 7 metas, so
-  Σ(1 + metas) = 92).
+- **A fixed 32 KiB heap.** The allocator hands out 32 KiB from the top down
+  and never frees; its cursor takes the lowest 8 bytes, which leaves 32,760.
+  A v1 `heapSize` request does not change it. A payload that needs more fails
+  with `ProgramFailedToComplete` ("memory allocation failed, out of memory").
+  What a payload needs depends on the instruction that runs it, and no rule on
+  account-meta counts alone describes it: on a passkey Execute one inner
+  instruction of 127 metas runs, while 16 inner instructions of 16 metas each
+  do not. For a passkey Execute without a policy, the program built from this
+  source (devnet's `57bTNW…` runs it as `3584aec7…`) allocates, in this order:
+  1. the parsed inner instructions, 40 bytes each;
+  2. the accounts-hash preimage: 33 bytes for each inner instruction's program
+     and for each of its metas, in a buffer that starts at 132 bytes per
+     inner instruction and doubles whenever it fills, every outgrown copy
+     kept (`accounts_hash_preimage_with`, `program/src/compact.rs`);
+  3. the signed payload (the compact instructions plus 32 bytes) and the
+     44-byte base64url challenge;
+  4. the account-meta (16 bytes each) and CPI-account (56 bytes each)
+     buffers, reused across the inner instructions: room for 32 of each,
+     and a new allocation of double the size each time an instruction has
+     more metas than they hold;
+  5. for each inner instruction, its accounts (8 bytes per meta) and their
+     signer flags (1 byte per meta).
+
+  Each byte buffer can add up to 7 bytes of alignment. ExecuteDeferred
+  skips item 3, and an Ed25519 or session Execute skips items 2 and 3. A
+  policy on the authority or session allocates more, which this does not
+  count. For k equal inner instructions, each with 12 bytes of data, the most
+  metas each can have:
+
+  | Inner instructions (k) | Passkey Execute | ExecuteDeferred | Ed25519 or session Execute |
+  |---|---|---|---|
+  | 1 | 127 | 127 | 128 |
+  | 2 | 64 | 64 | 128 |
+  | 3–5 | 63 | 63 | 128 |
+  | 6 | 32 | 32 | 128 |
+  | 7–12 | 31 | 31 | 128 |
+  | 13 | 29 | 31 | 128 |
+  | 14 | 15 | 16 | 127 |
+  | 15–16 | 15 | 15 | 118 at 15, 110 at 16 |
+
+  More instruction data leaves less room on a passkey Execute (item 3). The
+  sum agrees with every payload measured against that build, on both sides of
+  the limit. On devnet, all passkey Executes: 127 metas, 64 + 64, 100 + 20,
+  60 + 60 + 10, 80 + 5 × 8, 5 × 30 and 16 × 12 ran; 128 to 200 metas,
+  70 + 70 to 120 + 120 and 100 + 30 ran out of memory. On our own validator
+  running `3584aec7…`, 47 runs over all three paths, among them 16 × 16,
+  8 × 32 and 16 × 24, which ran out of memory on a passkey Execute and ran on
+  an Ed25519 Execute (16 × 16 also ran out on ExecuteDeferred). On the passkey
+  path it agrees to the byte: payloads that need 32,757, 32,759 and 32,760
+  bytes ran, and 32,765, 32,767 and 32,768 did not. The wallet packages' v1
+  path computes this sum (`lazorkitHeapBytes`) and refuses a payload over
+  32,760 bytes before asking for a signature. By it the measured route replays
+  need 8,756 bytes (SOL→USDC), 15,976 (JUP→POPCAT) and 25,456 (BONK→WIF,
+  83 + 7 metas) on a passkey Execute. A build that sizes these buffers exactly
+  from the parsed instructions allocates less for any payload.
 
 **Config.**
 
