@@ -2,7 +2,7 @@ use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
-    compact::{compute_accounts_hash, parse_compact_instructions_ref_with_len},
+    compact::{compute_accounts_hash, max_inner_accounts, parse_compact_instructions_ref_with_len},
     error::AuthError,
     processor::execute::actions::{
         evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
@@ -288,9 +288,16 @@ pub fn process(
     // Reuse the same Vecs across all inner CPIs — allocated once, cleared +
     // repushed each iteration. Saves 2 Vec::with_capacity allocations per
     // inner instruction vs. .collect()ing fresh Vecs each time.
-    const MAX_INNER_ACCOUNTS: usize = 32;
-    let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
-    let mut cpi_accounts: Vec<Account> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
+    //
+    // Sized to the widest inner instruction, not to a guess: the heap is a
+    // 32 KiB bump allocator that never frees, so a Vec that outgrows its
+    // capacity leaves the old buffer behind. From a fixed 32 the pair grew
+    // 32 → 64 → 128 for a 128-account instruction, 16 KiB of heap for 9 KiB
+    // of entries, and with the accounts hash an inner instruction of more
+    // than 64 accounts ran the program out of memory.
+    let widest = max_inner_accounts(&compact_instructions);
+    let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(widest);
+    let mut cpi_accounts: Vec<Account> = Vec::with_capacity(widest);
 
     // PDA signer seeds (constant across the loop)
     let vault_bump_arr = [vault_bump];
