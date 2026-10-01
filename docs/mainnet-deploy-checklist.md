@@ -145,11 +145,10 @@ files. Nothing below deploys a path that a later build could overwrite.
       `/home/runner/…` on Linux) in the program's panic locations. With
       everything else equal, the Linux package built the source before D13
       as mainnet `f655b300…` (150776 bytes), mainnet-v1 `044cdc08…` (45848),
-      devnet `cd253e68…`, devnet-v1 `7cc0c17a…` (on macOS D13 then moved both
-      v2 builds, and pinocchio 0.9.3 all four). The tables below are macOS
-      builds, and
-      GitHub's `macos-15` runner reproduces them byte for byte. (Intel macOS
-      is not checked.)
+      devnet `cd253e68…`, devnet-v1 `7cc0c17a…` (on macOS D13 and then the
+      heap-capacity fix moved both v2 builds, and pinocchio 0.9.3 all four).
+      The tables below are macOS builds, and GitHub's `macos-15` runner
+      reproduces them byte for byte. (Intel macOS is not checked.)
 - [ ] Build from the pinned release commit, **each into its own directory**:
       ```bash
       T=$(mktemp -d)   # a fresh target dir: see the --tools-version note below
@@ -368,18 +367,19 @@ rehearsal at the **mainnet ids** passed **18/18** again on them, with both SDKs
 built from the reviewed source, followed by the phase B rollback (the
 programdata dumped with `v1-live.so`'s exact bytes).
 
-**Not re-run since D13 and pinocchio 0.9.3.** D13 (a policy bounds the SOL and
-the mints it does not name) changed both v2 artifacts and neither sunset;
-pinocchio 0.9.3 (the entrypoint holds all 255 accounts the runtime can pass,
-and `Clock` and `Rent` are read through `sol_get_sysvar`) then changed all four.
-The sunset and v2 rows below give the current builds; the 18/18 runs were on
-the previous ones: v2 devnet `3584aec7…` and mainnet `4cb80304…` (150776 bytes
-each), sunset devnet-v1 `2cf15c89…` and mainnet-v1 `6080da9f…` (45856 bytes
-each). Re-run the rehearsal on the current artifacts, after PR #42 (which moves
-both v2 artifacts again) lands or is dropped, before relying on this record.
-The migration it exercises signs as an Owner, which D13 does not touch, but it
-runs through the sunset binary, whose entrypoint and sysvar reads pinocchio
-0.9.3 did change.
+**Not re-run since D13, pinocchio 0.9.3 and the heap-capacity fix.** D13 (a
+policy bounds the SOL and the mints it does not name) changed both v2 artifacts
+and neither sunset; pinocchio 0.9.3 (the entrypoint holds all 255 accounts the
+runtime can pass, and `Clock` and `Rent` are read through `sol_get_sysvar`)
+then changed all four; the heap-capacity fix (Execute and ExecuteDeferred size
+their heap buffers exactly, PR #42) then changed both v2 artifacts again and
+neither sunset. The sunset and v2 rows below give the current builds; the 18/18
+runs were on the previous ones: v2 devnet `3584aec7…` and mainnet `4cb80304…`
+(150776 bytes each), sunset devnet-v1 `2cf15c89…` and mainnet-v1 `6080da9f…`
+(45856 bytes each). Re-run the rehearsal on the current artifacts before
+relying on this record. The migration it exercises signs as an Owner, which
+neither D13 nor the heap fix touches, but it runs through the sunset binary,
+whose entrypoint and sysvar reads pinocchio 0.9.3 did change.
 
 At the **devnet ids** (`legacyProgramIdFor(57bTNW…) = 4h3XoNRe…`), the v1 dump
 preloaded at `4h3XoNRe…`, v2 at `57bTNW…`, then `4h3XoNRe…` upgraded to the
@@ -389,7 +389,7 @@ sunset build — **18/18**:
 |---|---|---|---|
 | v1 — the live mainnet program, `solana program dump` | `4h3XoNRe…` (devnet v1) | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
 | sunset — `--features devnet-v1`, platform-tools v1.53 | `4h3XoNRe…` | 45936 | `a84a234e924a4774eff031afb9c7edde0bc6f002479934414bf0b2bda8d32d56` |
-| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 152392 | `efea949f358dea5ce0ea39120d9d452385aff69a225203ddf1e36d2b5d67d47e` |
+| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 152864 | `d95e5c2b929168dc3165a83896d3097129092dc8aa68290c3ffc3afd4be9bfff` |
 
 At the **mainnet ids** (`legacyProgramIdFor(LazorFroi…) = LazorjRF…`), the v1
 dump preloaded at `LazorjRF…`, v2 at `LazorFroi…`, then `LazorjRF…` upgraded to
@@ -401,7 +401,7 @@ dumped with the dump's exact bytes.
 |---|---|---|---|
 | v1 — `solana program dump` of the live program | `LazorjRF…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
 | sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45936 | `7a86c87c46d098b247ee2de734de8aea863b15c4ba6b87c6341e7f8e6c313a2d` |
-| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 152392 | `b30ce1dfd72690fc7ee9d3ca749d1f509fb48ab526cd043ff0ea03080d3cecb9` |
+| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 152864 | `67d47162a1130147d78c96ebd6ce27a2fc9859dc08d56b40688983e907b42a03` |
 
 ```
 ok    the sunset binary refuses CreateWallet with 4018 RetiredDeployment
@@ -427,16 +427,18 @@ ok    the v1 session is closed
 ```
 
 **Devnet is behind this branch.** Devnet's v2 (`57bTNW…`) runs `3584aec7…`
-(`docs/Architecture.md`, Transaction v1): the wallet binding, but not D13. It
-verifies the same signatures as the artifact above, since D13 changes no
-account, instruction or challenge layout, but it lets a policy move SOL and
-mints the policy does not name. Upgrading it to the devnet artifact above is
-breaking for policy-bound signers: a session or Delegate whose policy has no
-`Sol*` action can no longer spend SOL or pay rent (3037), and one that names no
-mint can no longer move tokens (3038). The web wallet's `SpendingLimits` preset
-in lazor-kit names SOL only, so every session it builds would lose all token
-movement. Upgrade devnet together with the SDK release and that preset's fix,
-not before.
+(`docs/Architecture.md`, Transaction v1): the wallet binding, but neither D13
+nor the heap-capacity fix. It verifies the same signatures as the artifact
+above, since neither changes an account, instruction or challenge layout, but
+it lets a policy move SOL and mints the policy does not name, and it runs out
+of heap on payloads only a v1 transaction can carry
+(`program/tests/heap_capacity_tests.rs`). Upgrading it to the devnet artifact
+above is breaking for policy-bound signers: a session or Delegate whose policy
+has no `Sol*` action can no longer spend SOL or pay rent (3037), and one that
+names no mint can no longer move tokens (3038). The web wallet's
+`SpendingLimits` preset in lazor-kit names SOL only, so every session it builds
+would lose all token movement. Upgrade devnet together with the SDK release and
+that preset's fix, not before.
 
 Earlier runs, superseded by the one above: on 2026-09-27 at the devnet ids
 (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain devnet run

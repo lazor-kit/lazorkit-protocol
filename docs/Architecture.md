@@ -720,6 +720,31 @@ For each:
 Indexes replace 32-byte pubkeys with 1-byte references, shrinking a Secp256r1
 Execute from ~1.2KB uncompressed to ~800 bytes.
 
+**Limits inside the program.** The transaction bounds a payload first: 1232
+bytes for legacy and v0, 4096 bytes and 64 addresses for v1 (SIMD-0385).
+Execute and ExecuteDeferred add two limits that real payloads rarely reached in
+1232 bytes and can in 4096:
+
+- **16 compact instructions** (`MAX_COMPACT_INSTRUCTIONS`). A 17th fails with
+  `InvalidInstructionData` at parse, before any CPI. Kept as it is; a client
+  checks it before asking for a signature.
+- **The heap**: 32 KiB, bump-allocated, never freed. The two buffers that
+  scale with the payload, the accounts-hash preimage and the account metas
+  reused across CPIs, are sized once from the parsed instructions, so a passkey
+  Execute without a policy needs
+  `40k + 33(k + M) + (compact bytes + 32) + 44 + 72w + 9M` bytes of the
+  32760 available (32 KiB less the allocator's cursor), plus up to 7 bytes of
+  alignment after each byte buffer, for `k` inner instructions referencing `M`
+  accounts in all and `w` in the widest. ExecuteDeferred drops the
+  `compact bytes + 32` and `44` terms, and an Ed25519 or session Execute the
+  `33(k + M)` term too; a policy adds its own allocations. One inner
+  instruction can name all 255 accounts the format allows, 16 equal ones about
+  41 each. Builds before this sizing (devnet `3584aec7…`; develop's devnet
+  `efea949f…` and mainnet `b30ce1df…`) grew those buffers by doubling and ran
+  out of memory at one instruction of 128 accounts, at 70 + 70, or at 16 of 16;
+  [`program/tests/heap_capacity_tests.rs`](../program/tests/heap_capacity_tests.rs)
+  has both sides.
+
 **Bit 7 of an account index byte** requests that this account's signer privilege
 be forwarded into the inner CPI. That caps the addressable account list at 128;
 an index of 128 or above is rejected rather than masked, because masking would
