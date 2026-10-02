@@ -285,7 +285,7 @@ pub struct SessionAccount {
 }
 ```
 
-Optional **actions** buffer appended after the header (variable length, max 2048 bytes). Each action: 11-byte header `[type(1)][data_len(2 LE)][expires_at(8 LE)]` + type-specific data. Max 16 actions per session.
+Optional **actions** buffer appended after the header (variable length, max 2048 bytes). Each action: 11-byte header `[type(1)][data_len(2 LE)][expires_at(8 LE)]` + type-specific data. Max 16 actions per session or policy, whitelist and blacklist entries included; naming a mint takes one.
 
 | Type | ID | Data | Description |
 |---|---|---|---|
@@ -301,7 +301,15 @@ Optional **actions** buffer appended after the header (variable length, max 2048
 **Expired-action policy**: expired spending limits are treated as **fully exhausted** (any spend denied); expired whitelists are **hard deny**; expired blacklist entries are silently dropped.
 
 **Vault invariants**: during any policy-bearing Execute — a session with actions,
-or an authority with a policy — the program snapshots `vault.owner()`, `vault.data.len()`, and per-listed-mint token account `owner` / `delegate` / `close_authority` before the CPI loop, and rejects if any changed. This prevents escape via `System::Assign`, SPL Token `SetAuthority`, or `Approve`.
+or an authority with a policy — the program records the vault's owner and data
+length, and copies every writable vault-owned token account in the Execute,
+before the CPI loop. Afterwards the vault's owner and data length must be
+unchanged (3030 / 3031), every copied token account unchanged but for its
+balance (3032), and no SOL or mint the policy does not name may have left
+(3037 / 3038). This prevents escape via `System::Assign`, SPL Token
+`SetAuthority`, `Approve`, `CloseAccount` or `FreezeAccount`, and spending an
+asset the granter never listed. The full rule set is in
+[What a policy bounds](#what-a-policy-bounds).
 
 ### DeferredExec PDA — 176 bytes
 
@@ -470,7 +478,7 @@ Rules the diagram cannot show:
 
 An authority with `policy_len > 0` runs the same action engine a session does,
 on the same path: pre-action snapshot, execute, post-action evaluation against
-vault deltas and token-authority state. The action types are shared — `SolLimit`,
+vault deltas and the vault's token accounts. The action types are shared — `SolLimit`,
 `SolRecurringLimit`, `SolMaxPerTx`, the `Token*` equivalents,
 `ProgramWhitelist`/`ProgramBlacklist`.
 
@@ -483,16 +491,84 @@ expiry. Creating one still requires Owner/Admin authorization, but "session"
 does not imply "limited": attach actions, and the SDK should refuse to build
 a zero-action session without an explicit opt-in.
 
-**A policy bounds only the dimensions its actions cover.** The post-action
-evaluation checks the limits that are *present*: if a policy has a
-`ProgramWhitelist` but no `SolLimit`, SOL spend is not capped; if it caps SOL but
-not a token, that token is not capped. "Delegate requires a policy" means the
-buffer must be non-empty and well-formed — not that the delegate is
-spend-limited on every asset. A granter who wants a bounded delegate must write a
-value cap (`SolLimit`/`SolMaxPerTx`/`Token*`) for each asset class the delegate
-can reach; the SDK should surface this. A whitelist-only policy is a legitimate
-shape (restrict *which* programs, unlimited amount), so this is a granter choice,
-not a defect — but it is a choice, and worth stating plainly.
+#### What a policy bounds
+
+**A policy names what may leave the vault, and SOL or a mint it does not name
+may not.** Precisely: for any Execute whose signer carries a policy, the vault's
+net SOL and its net balance of each mint, measured over the token accounts it
+owned before the CPIs, cannot fall unless an action names that asset. Before
+D13 a policy bounded only what its actions covered: a `ProgramWhitelist` with no
+`SolLimit` left SOL uncapped, and a `TokenLimit(USDC)` left every other mint the
+vault held uncapped. A whitelist-only policy now moves no value at all; it can
+still call programs that move none, or that pay the vault.
+
+What the program checks, after the CPI loop, in this order (state is written
+only once all pass):
+
+| | Invariant | Error |
+|---|---|---|
+| I-0 | The vault's owner and data length are unchanged. | 3030 / 3031 |
+| I-1 | *S* is every writable token account in the Execute that the vault owned before the loop, once per key. A token account here is owned by SPL Token or Token-2022, initialised (state 1 or 2), and not a mint or multisig (SPL Token: exactly 165 bytes; Token-2022: 165, or longer, not 355, with account type 2). Read-only accounts cannot change, so they are left out. | — |
+| I-2 | Each account in *S* still has lamports, is still a token account of the same length, and has the same mint, owner, delegate, state, is_native and close authority. `delegated_amount` may fall, not rise. Its lamports may fall only by what a native (wSOL) account's `amount` fell by. `amount` is free. | 3032 |
+| I-3 | A writable token account that is vault-owned after the loop but is not in *S* carries no delegate and no close authority. | 3032 |
+| I-4 | A mint a `Token*` action names (expired or not): its outflow is its balance summed over *S* before, less after (saturating), charged against the limits as before. | 3026 / 3027 / 3029 |
+| I-5 | A mint no `Token*` action names: its balance summed over *S* may not fall. | 3038 |
+| I-6 | SOL: any `Sol*` action names it, and the limits apply as before (`SolMaxPerTx` on gross outflow, `SolLimit` and `SolRecurringLimit` on net). With no `Sol*` action, the vault's lamports may not fall. | 3023–3025 / 3037 |
+
+Consequences worth stating:
+
+- **Net, per asset.** An Execute that sends some of a mint out and gets as much
+  back passes, as does moving a mint between two vault accounts. There is no
+  netting across mints. Gross accounting for unnamed assets was considered and
+  rejected: it would refuse the temporary wSOL account a swap creates and closes
+  back to the vault.
+- **Rent is SOL.** With no `Sol*` action, the vault cannot pay rent for a new
+  account, so a policy for swaps either names SOL or relies on the output ATA
+  existing already — created in a top-level instruction the fee payer funds,
+  before the Execute.
+- **wSOL is a mint.** `SolLimit` does not cover wSOL, and `TokenLimit(wSOL)`
+  does not cover SOL. Wrapping spends SOL; unwrapping or sending wSOL spends
+  wSOL.
+- **A new vault account is spent, not kept.** Tokens moved into a token account
+  that became vault-owned during the Execute are charged, because "after" is
+  measured over *S* only. Before D13, "after" covered every account vault-owned
+  at the end, so a session could move a listed mint into an account it had just
+  initialised for the vault, uncharged, and `Approve` itself on it.
+- **Inflows always pass**, of any asset, and are never credited across assets.
+- **A delegate spending its full allowance** inside the Execute clears the
+  delegate field, which I-2 refuses. It fails closed; no session flow does it.
+
+**No opt-out.** There is no action that lifts the rule, and none is reserved:
+an escape hatch is the first thing a malicious app would ask for. A signer that
+must move arbitrary assets is an unbounded one — an Owner, an Admin, or a
+session created with no actions, which both SDKs make an explicit opt-in. A
+future opt-out would be a new action type; today's `from_u8` refuses unknown
+types with 3020, so no stored buffer could change meaning.
+
+**What it does not reach.** Any value the vault controls through its signature,
+other than its own lamports and the base fields of the token accounts it owns,
+is bounded only by the program whitelist, one call level deep (M-7). That
+includes:
+
+- mint, freeze and close authority of mints the vault controls, and Token-2022
+  authorities it holds (permanent delegate, withdraw-withheld);
+- the upgrade authority of a program;
+- stake and nonce accounts it is authority of, lamports in system accounts at
+  addresses derived with the vault as base, and Address Lookup Tables it owns;
+- positions in other programs (lending, perps, open orders), and program-owned
+  accounts whose close or rent destination the vault signs for;
+- Metaplex Core assets and compressed NFTs;
+- allowances third parties approved to the vault;
+- Token-2022 confidential balances, and extension state on its token accounts:
+  extension bytes are not compared, so owner-signed extension changes (memo
+  transfer, CPI guard, confidential-transfer configuration) pass. None of them
+  lowers the public `amount`.
+
+Value any of these releases into the vault during the Execute counts as an
+inflow, and can then leave as that asset, named or not, netting against it:
+borrowing against collateral or withdrawing stake to the vault and sending it
+on passes with no SOL or token action. Excess lamports in a token account the
+Execute does not pass writable cannot move at all.
 
 **Only a Delegate may carry a policy.** `AddAuthority` requires one for rank
 Delegate (3033) and refuses one above it (3035), and the three sites that write
@@ -567,7 +643,7 @@ sequenceDiagram
     LK->>Auth: read header (rank, type, counter, policy_len)
     Note over LK,Auth: Execute does not gate on rank.<br/>It gates on the policy, if there is one.
     LK->>LK: authenticate (Ed25519 signer check OR Secp256r1 odometer + WebAuthn)
-    LK->>LK: snapshot vault + token authorities (policy present)
+    LK->>LK: copy vault + its token accounts (policy present)
     LK->>V: invoke_signed (vault seeds; flagged signers forwarded)
     V-->>App: inner ix executes
     LK->>LK: evaluate post-actions against the deltas
@@ -802,8 +878,9 @@ fail the transaction:
   What a payload needs depends on the instruction that runs it, and no rule on
   account-meta counts alone describes it: on a passkey Execute one inner
   instruction of 127 metas runs, while 16 inner instructions of 16 metas each
-  do not. For a passkey Execute without a policy, the program built from this
-  source (devnet's `57bTNW…` runs it as `3584aec7…`) allocates, in this order:
+  do not. For a passkey Execute without a policy, the program as devnet's
+  `57bTNW…` runs it (`3584aec7…`; D13 leaves this path's allocations as they
+  were) allocates, in this order:
   1. the parsed inner instructions, 40 bytes each;
   2. the accounts-hash preimage: 33 bytes for each inner instruction's program
      and for each of its metas, in a buffer that starts at 132 bytes per
@@ -820,9 +897,13 @@ fail the transaction:
 
   Each byte buffer can add up to 7 bytes of alignment. ExecuteDeferred
   skips item 3, and an Ed25519 or session Execute skips items 2 and 3. A
-  policy on the authority or session allocates more, which this does not
-  count. For k equal inner instructions, each with 12 bytes of data, the most
-  metas each can have:
+  policy on the authority or session adds, from D13 on, `2 × 32·a + 240·t`
+  bytes: its `a` actions parsed twice (once before the CPIs, once after,
+  each sized exactly), and for each of the `t` unique writable vault-owned
+  token accounts in the Execute a 192-byte copy and at most one 48-byte mint
+  entry. At `a = 16`, `t = 8` that is 2,944 bytes. The table below does not
+  include it. For k equal inner instructions, each with 12 bytes of data, the
+  most metas each can have:
 
   | Inner instructions (k) | Passkey Execute | ExecuteDeferred | Ed25519 or session Execute |
   |---|---|---|---|
@@ -906,10 +987,29 @@ bookkeeping.
 Two v2 changes move these numbers and are not yet reflected above:
 
 - An authority carrying a policy now runs the same pre/post action engine a
-  session does, including the mint-agnostic token snapshot. Expect a
-  policy-bearing Execute to cost roughly what a session Execute costs on top of
-  its own authentication, rather than the unbounded-authority number.
+  session does. Expect a policy-bearing Execute to cost roughly what a session
+  Execute costs on top of its own authentication, rather than the
+  unbounded-authority number.
 - The accounts hash preimage grew one byte per referenced account. Negligible
   against the syscall itself, but the numbers above predate it.
 
 Re-benchmark before quoting these in anything that matters.
+
+**A policy-bound Execute, measured** (litesvm, whole transaction including the
+inner SPL Token or System call, the fee suffix and the protocol fee;
+`program/tests/policy_unlisted_assets_tests.rs`,
+`c1_compute_units_of_the_policy_path`). `t` is the number of writable
+vault-owned token accounts in the Execute:
+
+| Session policy, one transfer | develop (`3584aec7…`) | D13 |
+|---|---|---|
+| whitelist + `SolLimit`, System transfer, t = 0 | 24,128 | 23,806 |
+| `TokenLimit`, one listed transfer, t = 1 | 30,083 | 29,099 |
+| the same, t = 8 | 32,974 | 32,863 |
+| the same, t = 24 | 41,195 | 45,888 |
+
+D13 copies each vault token account once and reads it back by position, where
+develop scanned the whole account list once per listed mint before the loop and
+three times after. Each extra vault token account costs D13 more (about 810 CU
+against 510 between t = 8 and t = 24), so a route that passes many costs more
+and a typical one less. The test pins each figure at measurement + 10%.

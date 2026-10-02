@@ -7,7 +7,7 @@ A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r
   authority may manage; an optional per-authority spending policy says what it may
   spend. A wallet may have several Owners, which is how a second device revokes a
   lost first one.
-- **Session keys with policies** — ephemeral signers restricted by per-tx / per-window / lifetime SOL + token caps, and program whitelists.
+- **Session keys with policies** — ephemeral signers restricted by per-tx / per-window / lifetime SOL + token caps, and program whitelists. A policy names what may leave the vault; SOL and mints it does not name may not.
 - **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps in a v0 transaction, capped at 1232 bytes). Under transaction v1 (SIMD-0385: 4096 bytes, 64 addresses; active on devnet) it is no longer a size workaround: the measured Jupiter routes each fit one passkey Execute, and tx2 is held to the same 64 addresses. What it still gives is signing now and sending later, or from another sender. See [docs/Architecture.md](docs/Architecture.md#transaction-v1-simd-0385).
 - **Returning users, found safely** — `findOwnPasskeyWallet` finds a passkey user's own wallet from one assertion, with no `walletPda` stored: it adopts a wallet only if the passkey proves the key stored there, it is the one wallet the passkey has signed for, and nothing untrusted can spend from it; anything else goes to the user to confirm. (`findWalletsByAuthority` is a raw lookup by credential hash or public key — the hash is public, and anyone can plant a wallet that lists it.)
 - **Parallel execution** — different authorities on the same wallet never block each other.
@@ -175,8 +175,9 @@ const { instructions, sessionPda } = await client.createSession({
 **Action types**: `SolLimit`, `SolRecurringLimit`, `SolMaxPerTx`, `TokenLimit`, `TokenRecurringLimit`, `TokenMaxPerTx`, `ProgramWhitelist`, `ProgramBlacklist`.
 
 **Important scoping notes**:
-- Token limits apply **per-mint**. A session with `TokenLimit(USDC)` has unrestricted access to other token mints the vault holds. Enumerate every mint you want bounded, or use `ProgramWhitelist` to restrict which programs the session can call.
-- `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit automatically enforces vault metadata + per-listed-mint token authority invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, etc.).
+- A policy names what may leave the vault, and nothing it does not name may. With no `Sol*` action the vault's SOL may not fall (3037), rent the vault pays for a new account included; a mint with no `Token*` action may not leave the vault's token accounts (3038). The session above can move SOL but no token. Both are net over one Execute, inflows always pass, and wSOL is a mint, not SOL. A policy holds at most 16 actions, so it can name about 15 mints. For a swap, name the mint it sells, and create the output ATA in a top-level instruction the fee payer funds, before the Execute, or give the session a `SolLimit` that covers the rent.
+- What this covers is the vault's own SOL and the balances of the token accounts it owns directly. Value the vault controls any other way (stake or nonce accounts, positions in other programs, mint or upgrade authorities it holds) is bounded only by `ProgramWhitelist`; see [docs/Architecture.md](docs/Architecture.md#what-a-policy-bounds).
+- `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit enforces vault metadata and token-account invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount`, `FreezeAccount`, etc.): every vault token account the Execute passes writable must end it unchanged but for its balance.
 - Expired spending limits = **fully exhausted** (deny). Expired whitelists = **hard deny**. Expired blacklists = silently dropped.
 - Omitting `actions` creates an unrestricted session — it can do anything the wallet can until it expires.
 
@@ -222,8 +223,8 @@ Each authority has its own PDA, so different authorities on the same wallet exec
 - Fee-eligible instructions require canonical protocol fee accounts and per-payer `FeeRecord` accounting.
 - Expired session limits treated as fully exhausted (never "unlocked").
 - `SolMaxPerTx` uses per-CPI gross-outflow tracking — DeFi round-trips can't bypass the per-tx cap by returning most lamports.
-- Vault + per-listed-mint token account invariants enforced during session execute (blocks `System::Assign`, `SetAuthority`, `Approve` escapes).
-- Token balance sums across all accounts (prevents dummy-account bypass).
+- Vault and token-account invariants enforced for every signer with a policy (blocks `System::Assign`, `SetAuthority`, `Approve` escapes; a token account that becomes vault-owned during the Execute may carry no delegate or close authority).
+- A policy bounds what it names: SOL and mints it does not name may not leave the vault. Balances are summed per mint over every vault token account in the Execute, each counted once (prevents dummy-account bypass).
 
 Report vulnerabilities via [SECURITY.md](SECURITY.md).
 

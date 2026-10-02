@@ -23,6 +23,7 @@ suffix and the Secp256r1 challenge. Full struct layouts live in
 | PDA seeds | bare: `wallet`, `vault`, `authority`, … | prefixed `lk2:` — `lk2:wallet`, `lk2:vault`, … |
 | Account discriminators | 1–7 (`0x0N`) | `0x21`–`0x27` (high nibble = protocol version 2) |
 | Authority permission | one `role` field | `role` = **rank** (manage) + a **policy** buffer (spend); a Delegate must carry a policy |
+| Policy scope | a session's actions bound only what they name | a policy (session or Delegate) bounds what it names and blocks what it does not: SOL needs a `Sol*` action, each mint a `Token*` action (3037 / 3038) |
 | Wallet account | — | gains `owner_count: u32` (multi-owner) |
 | Execute accounts hash | keys only | binds one **signer/writable flags byte** per account (see §5) |
 | Fee | opt-in | **4-account suffix required** on disc 0/4/7 (see §4) |
@@ -74,7 +75,9 @@ TreasuryShard  0x27
 
 `type`: 0 = Ed25519, 1 = Secp256r1. `role` (rank): 0 = Owner, 1 = Admin, 2 =
 Delegate. `policy_len`: bytes of spend policy after the key material; `0` =
-unbounded.
+unbounded. A non-empty policy bounds every asset it does not name too: with no
+`Sol*` action no SOL may leave the vault (3037), and a mint no `Token*` action
+names may not leave its token accounts (3038).
 
 ## 4. Instruction set
 

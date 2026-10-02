@@ -70,7 +70,8 @@ graph TD
   create/revoke sessions, transfer ownership, execute, use the deferred flow.
 - **Delegate (passkey)** can: execute immediate transactions, **within its
   policy** — a lifetime or per-window SOL/token cap, a per-transaction cap, and
-  an allow-list of programs it may call.
+  an allow-list of programs it may call. An asset the policy does not name it
+  cannot spend at all: SOL needs a `Sol*` action, each mint a `Token*` action.
 
 ### Lifecycle in one picture
 
@@ -200,7 +201,9 @@ const { instructions, newAuthorityPda: spenderAuthPda } =
     },
     role: ROLE_SPENDER,
     // A Delegate must carry a policy in v2 — the client refuses one without it,
-    // and so does the program (3033 DelegateRequiresPolicy).
+    // and so does the program (3033 DelegateRequiresPolicy). This one names SOL
+    // only, so the passkey can move SOL but no token: add
+    // Actions.tokenLimit({ mint, remaining }) for each mint it may spend.
     policy: serializeActions([Actions.solMaxPerTx(500_000_000n)]),
   });
 
@@ -301,7 +304,7 @@ instead of Spender:
 
 | Need | Required rank |
 |---|---|
-| Transfer SOL/tokens, CPI to your program, anything whose inner instructions fit in about 345 B¹ | Delegate |
+| Transfer SOL and the tokens its policy names, CPI to your program, anything whose inner instructions fit in about 345 B¹ | Delegate |
 | Spend without a cap | Admin or Owner |
 | Create session keys for sub-second UX | Admin |
 | Use deferred execution (larger payloads: most Jupiter swaps, bridges, multi-step) | Admin |
@@ -311,9 +314,9 @@ instead of Spender:
 ¹ A passkey Execute takes about 887 of a v0 transaction's 1232 bytes before any inner instruction (portal clientDataJSON, no ALT); a compute-unit limit costs about 40 more and Chrome's padded clientDataJSON 109. A single-hop SOL→USDC Jupiter route from the portal is 1245 bytes even with Jupiter's ALTs (and a compute-unit limit), so in practice a Jupiter swap needs deferred execution, and so Admin. Measured 2026-09-29 with sdk-legacy 1.2.0.
 
 Switching rank means passing `ROLE_ADMIN` instead of `ROLE_SPENDER` in step 2,
-and dropping the `policy` — Admin and Owner may carry one but are not required
-to. Note the trade: an Admin is unbounded unless you give it a policy, and an
-authority that carries a policy may not create authorities at all.
+and dropping the `policy` — only a Delegate may carry one (3035). Note the
+trade: an Admin is unbounded, and an authority that carries a policy may not
+create authorities at all.
 
 The row worth pausing on is the last one. If losing the EOA should not mean
 losing the wallet, the passkey needs rank **Owner**, not Admin — an Admin cannot
