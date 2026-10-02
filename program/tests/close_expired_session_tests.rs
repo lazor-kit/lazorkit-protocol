@@ -177,8 +177,8 @@ fn a_stranger_closes_an_expired_session_and_keeps_the_rent() {
         .unwrap()
         .lamports;
     assert!(
-        after > before,
-        "the caller keeps the rent: {before} -> {after} (session held {rent})",
+        after > before && after - before <= rent,
+        "the caller keeps the session's rent",
     );
 }
 
@@ -285,8 +285,8 @@ fn a_v1_session_is_closable_too() {
         .unwrap()
         .lamports;
     assert!(
-        after > before,
-        "rent moved: {before} -> {after} (held {rent})"
+        after > before && after - before <= rent,
+        "the caller keeps the session's rent"
     );
 }
 
