@@ -142,11 +142,12 @@ files. Nothing below deploys a path that a later build could overwrite.
       separate package per host, and its precompiled std embeds the paths it
       was built under (`/Users/runner/work/platform-tools/…` on macOS,
       `/home/runner/…` on Linux) in the program's panic locations. With
-      everything else equal, the Linux package builds this commit as mainnet
-      `f655b300…` (150776 bytes), mainnet-v1 `044cdc08…` (45848), devnet
-      `cd253e68…`, devnet-v1 `7cc0c17a…`. The tables below are macOS builds,
-      and GitHub's `macos-15` runner reproduces them byte for byte. (Intel
-      macOS is not checked.)
+      everything else equal, the Linux package built the source before D13
+      as mainnet `f655b300…` (150776 bytes), mainnet-v1 `044cdc08…` (45848),
+      devnet `cd253e68…`, devnet-v1 `7cc0c17a…` (on macOS D13 moved both v2
+      builds and neither sunset). The tables below are macOS builds, and
+      GitHub's `macos-15` runner reproduces them byte for byte. (Intel macOS
+      is not checked.)
 - [ ] Build from the pinned release commit, **each into its own directory**:
       ```bash
       T=$(mktemp -d)   # a fresh target dir: see the --tools-version note below
@@ -365,6 +366,13 @@ rehearsal at the **mainnet ids** passed **18/18** again on them, with both SDKs
 built from the reviewed source, followed by the phase B rollback (the
 programdata dumped with `v1-live.so`'s exact bytes).
 
+**Not re-run since D13.** D13 (a policy bounds the SOL and the mints it does
+not name) changed both v2 artifacts and neither sunset. The v2 rows below give
+the current builds; the 18/18 runs were on the previous ones, devnet
+`3584aec7…` and mainnet `4cb80304…` (150776 bytes each). Re-run the rehearsal
+on the current v2 artifacts before relying on this record. The migration it
+exercises signs as an Owner, which D13 does not touch.
+
 At the **devnet ids** (`legacyProgramIdFor(57bTNW…) = 4h3XoNRe…`), the v1 dump
 preloaded at `4h3XoNRe…`, v2 at `57bTNW…`, then `4h3XoNRe…` upgraded to the
 sunset build — **18/18**:
@@ -373,7 +381,7 @@ sunset build — **18/18**:
 |---|---|---|---|
 | v1 — the live mainnet program, `solana program dump` | `4h3XoNRe…` (devnet v1) | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
 | sunset — `--features devnet-v1`, platform-tools v1.53 | `4h3XoNRe…` | 45856 | `2cf15c89ad3ad194e5aebcab608dc4bc75270cb7d094d342a31ecdd3306f1240` |
-| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 150776 | `3584aec70e494e27521bf3e717ccc63bda295bb9d312cdcd4f9a007db249b470` |
+| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 152264 | `384e6927749c9805c193a946d7abfb98c6dcdde1656ffe55554302240c3ccb03` |
 
 At the **mainnet ids** (`legacyProgramIdFor(LazorFroi…) = LazorjRF…`), the v1
 dump preloaded at `LazorjRF…`, v2 at `LazorFroi…`, then `LazorjRF…` upgraded to
@@ -385,7 +393,7 @@ dumped with the dump's exact bytes.
 |---|---|---|---|
 | v1 — `solana program dump` of the live program | `LazorjRF…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
 | sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45856 | `6080da9f28d194e36efbfbd6cf6d74389f2a68e232d4c323d153761c532a58a6` |
-| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 150776 | `4cb8030466d269efa867f0ab2bc989cccd1857c2a753e67578267e4a6b144b12` |
+| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 152264 | `c9f563e2393ec4b81fb65aadff87b72b20e8f08f3cc1ff013a3358b7dacba915` |
 
 ```
 ok    the sunset binary refuses CreateWallet with 4018 RetiredDeployment
@@ -410,12 +418,17 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet is behind this branch.** Devnet's v2 (`57bTNW…`) still runs the
-2026-09-27 artifact (`8c3952a5…`, upgraded in `24qPWFCY…`, slot 504832702),
-which predates the wallet binding: SDKs built from this branch fail every
-passkey signature against it with 3005, and SDKs from before it fail against
-the artifact above. Upgrade devnet's v2 to the devnet artifact above together
-with the SDK release, not before.
+**Devnet is behind this branch.** Devnet's v2 (`57bTNW…`) runs `3584aec7…`
+(`docs/Architecture.md`, Transaction v1): the wallet binding, but not D13. It
+verifies the same signatures as the artifact above, since D13 changes no
+account, instruction or challenge layout, but it lets a policy move SOL and
+mints the policy does not name. Upgrading it to the devnet artifact above is
+breaking for policy-bound signers: a session or Delegate whose policy has no
+`Sol*` action can no longer spend SOL or pay rent (3037), and one that names no
+mint can no longer move tokens (3038). The web wallet's `SpendingLimits` preset
+in lazor-kit names SOL only, so every session it builds would lose all token
+movement. Upgrade devnet together with the SDK release and that preset's fix,
+not before.
 
 Earlier runs, superseded by the one above: on 2026-09-27 at the devnet ids
 (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain devnet run
