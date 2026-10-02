@@ -1,8 +1,12 @@
-//! Session action evaluation for the Execute instruction.
+//! Policy evaluation for the Execute instruction.
 //!
-//! Provides pre-CPI and post-CPI checks for session-based execution.
+//! Provides pre-CPI and post-CPI checks for an Execute whose signer carries a
+//! policy: a session with actions, or a Delegate authority.
 //! Pre-CPI: program whitelist/blacklist enforcement.
-//! Post-CPI: spending limit enforcement with balance diffing.
+//! Post-CPI: spending limit enforcement with balance diffing, and the rule
+//! that an asset the policy does not name may not leave. The vault's net SOL,
+//! and its net balance of each mint over the token accounts it owned before
+//! the CPIs, may fall only where an action names that asset (D13).
 //!
 //! Security model (learned from Swig wallet):
 //! - Saturating arithmetic throughout to prevent overflow/underflow
@@ -23,42 +27,49 @@ use crate::{
     },
 };
 
-// ─── Token Account Layout (SPL Token) ────────────────────────────────
-// mint:            bytes 0..32
-// owner:           bytes 32..64    (the authority for Transfer/Burn — changed by SetAuthority(AccountOwner))
-// amount:          bytes 64..72
-// delegate_coi:    bytes 72..108   (COption<Pubkey> — changed by Approve/Revoke)
-// close_authority: bytes 129..165  (COption<Pubkey> — changed by SetAuthority(CloseAccount))
+// ─── Token Account Layout (SPL Token and Token-2022) ─────────────────
+// mint 0..32 · owner 32..64 · amount 64..72 · delegate 72..108 (COption, 4-byte tag)
+// state 108 · is_native 109..121 (COption<u64>) · delegated_amount 121..129
+// close_authority 129..165 (COption). Token-2022, when longer: account type at 165
+// (2 = Account), TLV extensions from 166. A multisig is 355 bytes and Token-2022
+// never sizes an account to 355.
 
 const TOKEN_MINT_OFFSET: usize = 0;
 const TOKEN_OWNER_OFFSET: usize = 32;
 const TOKEN_AMOUNT_OFFSET: usize = 64;
 const TOKEN_DELEGATE_OFFSET: usize = 72;
+const TOKEN_STATE_OFFSET: usize = 108;
+const TOKEN_IS_NATIVE_OFFSET: usize = 109;
+const TOKEN_DELEGATED_AMOUNT_OFFSET: usize = 121;
 const TOKEN_CLOSE_AUTHORITY_OFFSET: usize = 129;
-const TOKEN_ACCOUNT_MIN_SIZE: usize = 165;
+const TOKEN_ACCOUNT_LEN: usize = 165;
+const TOKEN_ACCOUNT_TYPE_OFFSET: usize = 165;
+const TOKEN_2022_ACCOUNT_TYPE_ACCOUNT: u8 = 2;
+const TOKEN_MULTISIG_LEN: usize = 355;
+const COPTION_TAG_LEN: usize = 4;
 
-/// A snapshot of a token account balance for a specific mint.
-pub struct TokenSnapshot {
-    pub mint: [u8; 32],
-    pub amount: u64,
+/// One vault-owned token account as it stood before the CPI loop.
+pub struct VaultTokenSnapshot {
+    /// Position in Execute's account list; re-read by index, not searched for.
+    pub index: usize,
+    pub data_len: usize,
+    pub lamports: u64,
+    /// Bytes 0..165: every field of the base layout.
+    pub base: [u8; TOKEN_ACCOUNT_LEN],
 }
 
-/// Per-token-account snapshot of authority-related fields, captured BEFORE the
-/// CPI loop in a session+actions execute.
-///
-/// Detects SetAuthority attacks (changing owner/close_authority to attacker) and
-/// Approve-delegation attacks (granting delegate to attacker who drains outside
-/// the session). All three fields are frozen for vault-owned token accounts on
-/// listed mints while a session is executing.
-pub struct TokenAuthoritySnapshot {
-    /// The token account address (so we can re-find it post-CPI).
-    pub account_key: [u8; 32],
-    /// owner field bytes [32..64]
-    pub owner: [u8; 32],
-    /// delegate COption<Pubkey> bytes [72..108]
-    pub delegate: [u8; 36],
-    /// close_authority COption<Pubkey> bytes [129..165]
-    pub close_authority: [u8; 36],
+/// A mint's balance over the snapshotted accounts, before and after the loop.
+pub struct MintFlow {
+    pub mint: [u8; 32],
+    pub before: u64,
+    pub after: u64,
+}
+
+impl MintFlow {
+    /// What left the snapshotted accounts, net of what came back into them.
+    pub fn outflow(&self) -> u64 {
+        self.before.saturating_sub(self.after)
+    }
 }
 
 /// Evaluate pre-CPI actions (program whitelist/blacklist).
@@ -79,37 +90,16 @@ pub fn evaluate_pre_actions(
     let actions_buf = loc.slice(session_data);
     let actions = parse_actions(actions_buf)?;
 
-    // Collect whitelist/blacklist program IDs.
-    // Expired whitelist actions are intentionally NOT added to `whitelisted`, but they still set
-    // `has_any_whitelist_action = true`. This means if a whitelist existed but has now expired,
-    // NO program is permitted — treating an expired whitelist as a hard deny rather than open
-    // access. An expired blacklist entry, however, is silently dropped (the ban has lifted).
-    let mut whitelisted: Vec<[u8; 32]> = Vec::new();
-    let mut blacklisted: Vec<[u8; 32]> = Vec::new();
-    let mut has_any_whitelist_action = false;
-
-    for action in &actions {
-        match action.action_type {
-            ActionType::ProgramWhitelist => {
-                has_any_whitelist_action = true;
-                if !is_expired(action, current_slot) {
-                    let mut prog_id = [0u8; 32];
-                    prog_id
-                        .copy_from_slice(&actions_buf[action.data_offset..action.data_offset + 32]);
-                    whitelisted.push(prog_id);
-                }
-            },
-            ActionType::ProgramBlacklist => {
-                if !is_expired(action, current_slot) {
-                    let mut prog_id = [0u8; 32];
-                    prog_id
-                        .copy_from_slice(&actions_buf[action.data_offset..action.data_offset + 32]);
-                    blacklisted.push(prog_id);
-                }
-            },
-            _ => {},
-        }
-    }
+    // Expired whitelist actions are intentionally NOT accepted by
+    // `names_program`, but they still set `has_any_whitelist_action = true`.
+    // This means if a whitelist existed but has now expired, NO program is
+    // permitted — treating an expired whitelist as a hard deny rather than open
+    // access. An expired blacklist entry, however, is silently dropped (the ban
+    // has lifted). Read from the parsed views rather than collected into Vecs:
+    // the heap is a bump allocator that never frees.
+    let has_any_whitelist_action = actions
+        .iter()
+        .any(|a| a.action_type == ActionType::ProgramWhitelist);
 
     // Enforce program restrictions on each instruction
     for ix in compact_instructions {
@@ -121,12 +111,26 @@ pub fn evaluate_pre_actions(
 
         // Whitelist: if any whitelist action EVER existed (even expired), program must be in the
         // active set. An expired whitelist = deny all programs.
-        if has_any_whitelist_action && !whitelisted.iter().any(|p| p == target_program.as_ref()) {
+        if has_any_whitelist_action
+            && !names_program(
+                &actions,
+                actions_buf,
+                ActionType::ProgramWhitelist,
+                target_program,
+                current_slot,
+            )
+        {
             return Err(AuthError::ActionProgramNotWhitelisted.into());
         }
 
-        // Blacklist: program must NOT be in the active set (expired entries already dropped above).
-        if blacklisted.iter().any(|p| p == target_program.as_ref()) {
+        // Blacklist: program must NOT be in the active set (expired entries do not count).
+        if names_program(
+            &actions,
+            actions_buf,
+            ActionType::ProgramBlacklist,
+            target_program,
+            current_slot,
+        ) {
             return Err(AuthError::ActionProgramBlacklisted.into());
         }
     }
@@ -134,173 +138,178 @@ pub fn evaluate_pre_actions(
     Ok(())
 }
 
-/// Snapshot token balances for mints referenced in token actions.
-pub fn snapshot_token_balances(
-    session_data: &[u8],
-    loc: PolicyLocation,
-    accounts: &[AccountInfo],
-    vault_key: &Pubkey,
-) -> Result<Vec<TokenSnapshot>, ProgramError> {
-    if !loc.is_present(session_data) {
-        return Ok(Vec::new());
-    }
-
-    let actions_buf = loc.slice(session_data);
-    let actions = parse_actions(actions_buf)?;
-
-    let mut mints: Vec<[u8; 32]> = Vec::new();
-    for action in &actions {
-        match action.action_type {
-            ActionType::TokenLimit
-            | ActionType::TokenRecurringLimit
-            | ActionType::TokenMaxPerTx => {
-                let mut mint = [0u8; 32];
-                mint.copy_from_slice(&actions_buf[action.data_offset..action.data_offset + 32]);
-                if !mints.iter().any(|m| m == &mint) {
-                    mints.push(mint);
-                }
-            },
-            _ => {},
-        }
-    }
-
-    if mints.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut snapshots = Vec::new();
-    for mint in &mints {
-        if let Some(amount) = find_token_balance(accounts, vault_key, mint) {
-            snapshots.push(TokenSnapshot {
-                mint: *mint,
-                amount,
-            });
-        }
-    }
-
-    Ok(snapshots)
+/// Whether an unexpired action of `action_type` names `program`.
+fn names_program(
+    actions: &[ActionView],
+    actions_buf: &[u8],
+    action_type: ActionType,
+    program: &Pubkey,
+    current_slot: u64,
+) -> bool {
+    actions.iter().any(|a| {
+        a.action_type == action_type
+            && !is_expired(a, current_slot)
+            && actions_buf[a.data_offset..a.data_offset + 32] == program[..]
+    })
 }
 
-/// Snapshot per-token-account authority fields for every vault-owned token
-/// account in the account list.
+/// Copy every writable, vault-owned token account in `accounts`, once per key.
 ///
-/// Paired with `verify_token_authorities_unchanged` post-CPI. Together they
-/// prevent `SetAuthority` and `Approve`-style escapes where the session key
-/// would otherwise reassign control of vault-owned token accounts without
-/// moving any lamports (so the balance-based limits would miss it).
+/// Called before the CPI loop when the signer carries a policy. After the loop,
+/// [`verify_vault_token_accounts`] holds each copy to everything but its
+/// balance, and [`mint_flows`] measures each mint's balance over exactly these
+/// accounts. Together they keep a policy-bound signer from doing either of two
+/// things the lamport and balance limits cannot see:
 ///
-/// Coverage is deliberately mint-agnostic. An earlier version gathered the
-/// mints named by `TokenLimit` / `TokenRecurringLimit` / `TokenMaxPerTx` and
-/// returned early when there were none — which meant the most common session
-/// shape (a SOL allowance plus a program whitelist, no token action) got no
-/// protection at all. A session that never mentions a mint is not a session
-/// that consented to hand that mint's account away, so every vault-owned token
-/// account is frozen for the duration of the CPI loop.
+/// - Reassigning control of a vault token account without moving a token:
+///   `SetAuthority`, `Approve`, `Revoke`, `CloseAccount`, `FreezeAccount`,
+///   `WithdrawExcessLamports`, `Reallocate`. The copy is deliberately
+///   mint-agnostic: a policy that never mentions a mint is not a policy that
+///   consented to hand that mint's account away (H-4).
+/// - Moving value out under cover of a new account. "Before" and "after" are
+///   measured over the same accounts, so a transfer into a token account that
+///   becomes vault-owned during the Execute is spent, not kept, and that
+///   account may carry no delegate or close authority when the loop ends.
 ///
-/// Only `owner`, `delegate` and `close_authority` are frozen; `amount` is
-/// free to move, so ordinary transfers still work and remain governed by the
-/// balance-based limits.
-pub fn snapshot_token_authorities(
-    session_data: &[u8],
-    loc: PolicyLocation,
+/// Read-only accounts are skipped: the runtime refuses any change to an
+/// account the transaction does not lock writable, and a CPI cannot raise
+/// writability. A duplicate shares its first entry's data, so it is copied
+/// once and counted once.
+pub fn snapshot_vault_token_accounts(
     accounts: &[AccountInfo],
     vault_key: &Pubkey,
-) -> Result<Vec<TokenAuthoritySnapshot>, ProgramError> {
-    if !loc.is_present(session_data) {
-        return Ok(Vec::new());
+) -> Vec<VaultTokenSnapshot> {
+    // Positions to copy, found in one walk: each writable vault-owned token
+    // account at its first position in the list. A repeat is looked for only
+    // among the positions already found, not among every account before it.
+    // pinocchio's entrypoint hands the program at most `MAX_TX_ACCOUNTS`
+    // accounts, so a position fits a byte and the list fits the stack.
+    let mut found = [0u8; pinocchio::MAX_TX_ACCOUNTS];
+    let mut count = 0;
+    for (index, acc) in accounts.iter().enumerate() {
+        if !is_snapshot_candidate(acc, vault_key)
+            || found[..count]
+                .iter()
+                .any(|&j| accounts[j as usize].key() == acc.key())
+        {
+            continue;
+        }
+        found[count] = index as u8;
+        count += 1;
     }
 
-    // Scan all SPL-Token-owned accounts; snapshot every vault-owned one.
-    let mut out = Vec::new();
-    for acc in accounts {
-        let owner = acc.owner();
-        if owner.as_ref() != &SPL_TOKEN_PROGRAM_ID && owner.as_ref() != &SPL_TOKEN_2022_PROGRAM_ID {
-            continue;
-        }
+    // Allocated once at its final size: the heap is a 32 KiB bump allocator
+    // that never frees, and a Vec that grows leaves every smaller buffer
+    // behind. Sized by unique accounts, so passing one account many times
+    // costs one copy.
+    let mut out = Vec::with_capacity(count);
+    for &index in &found[..count] {
+        let index = index as usize;
+        let acc = &accounts[index];
         let data = unsafe { acc.borrow_data_unchecked() };
-        if data.len() < TOKEN_ACCOUNT_MIN_SIZE {
-            continue;
-        }
-        // vault must currently own it
-        if &data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32] != vault_key.as_ref() {
-            continue;
-        }
-
-        let mut owner_bytes = [0u8; 32];
-        owner_bytes.copy_from_slice(&data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32]);
-        let mut delegate = [0u8; 36];
-        delegate.copy_from_slice(&data[TOKEN_DELEGATE_OFFSET..TOKEN_DELEGATE_OFFSET + 36]);
-        let mut close_authority = [0u8; 36];
-        close_authority.copy_from_slice(
-            &data[TOKEN_CLOSE_AUTHORITY_OFFSET..TOKEN_CLOSE_AUTHORITY_OFFSET + 36],
-        );
-
-        let mut account_key = [0u8; 32];
-        account_key.copy_from_slice(acc.key().as_ref());
-
-        out.push(TokenAuthoritySnapshot {
-            account_key,
-            owner: owner_bytes,
-            delegate,
-            close_authority,
+        let mut base = [0u8; TOKEN_ACCOUNT_LEN];
+        base.copy_from_slice(&data[..TOKEN_ACCOUNT_LEN]);
+        out.push(VaultTokenSnapshot {
+            index,
+            data_len: data.len(),
+            lamports: acc.lamports(),
+            base,
         });
     }
-
-    Ok(out)
+    out
 }
 
-/// Verify that every snapshotted token account still has the same owner,
-/// delegate, and close_authority fields. Returns an error if any field has
-/// changed.
-pub fn verify_token_authorities_unchanged(
-    snapshots: &[TokenAuthoritySnapshot],
+// A position in Execute's account list is stored as a byte above.
+const _: () = assert!(pinocchio::MAX_TX_ACCOUNTS <= u8::MAX as usize + 1);
+
+/// Check every snapshotted account after the CPI loop, and every token account
+/// that became vault-owned during it. Any failure is
+/// `SessionTokenAuthorityChanged` (3032).
+///
+/// A snapshotted account must still be a token account of the same length with
+/// lamports in it, and every base field but `amount` must be as it was, except
+/// that `delegated_amount` may fall. Its lamports may fall only by what a native
+/// (wSOL) account's `amount` fell by.
+///
+/// A token account that is vault-owned now but was not snapshotted must carry
+/// no delegate and no close authority. Its balance is not credited to the
+/// vault (see [`mint_flows`]); this keeps it from being drained later, for
+/// instance through deposits made into a vault ATA created in this Execute.
+pub fn verify_vault_token_accounts(
+    snapshots: &[VaultTokenSnapshot],
     accounts: &[AccountInfo],
+    vault_key: &Pubkey,
 ) -> Result<(), ProgramError> {
     for snap in snapshots {
-        // Find the account by key in the tx accounts list.
-        let acc = match accounts
-            .iter()
-            .find(|a| a.key().as_ref() == snap.account_key)
-        {
-            Some(a) => a,
-            // If the account disappeared (e.g. CloseAccount closed it), that's also a
-            // mutation we should reject. CloseAccount sends rent lamports to an
-            // attacker-chosen destination without touching the token balance.
-            None => return Err(AuthError::SessionTokenAuthorityChanged.into()),
-        };
-
-        // Must still be owned by SPL Token (not re-assigned to another program)
-        let owner = acc.owner();
-        if owner.as_ref() != &SPL_TOKEN_PROGRAM_ID && owner.as_ref() != &SPL_TOKEN_2022_PROGRAM_ID {
-            return Err(AuthError::SessionTokenAuthorityChanged.into());
-        }
-
+        let acc = &accounts[snap.index];
         let data = unsafe { acc.borrow_data_unchecked() };
-        if data.len() < TOKEN_ACCOUNT_MIN_SIZE {
-            return Err(AuthError::SessionTokenAuthorityChanged.into());
-        }
-
-        if &data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32] != snap.owner {
-            return Err(AuthError::SessionTokenAuthorityChanged.into());
-        }
-        if &data[TOKEN_DELEGATE_OFFSET..TOKEN_DELEGATE_OFFSET + 36] != snap.delegate {
-            return Err(AuthError::SessionTokenAuthorityChanged.into());
-        }
-        if &data[TOKEN_CLOSE_AUTHORITY_OFFSET..TOKEN_CLOSE_AUTHORITY_OFFSET + 36]
-            != snap.close_authority
+        if acc.lamports() == 0
+            || data.len() != snap.data_len
+            || !is_token_account(acc.owner(), data)
+            || !base_unchanged_except_balance(&snap.base, data)
+            || !lamports_kept(snap.lamports, &snap.base, acc.lamports(), data)
         {
             return Err(AuthError::SessionTokenAuthorityChanged.into());
         }
     }
+
+    for (index, acc) in accounts.iter().enumerate() {
+        if !is_snapshot_candidate(acc, vault_key) {
+            continue;
+        }
+        // Snapshotted here (the snapshot is in index order), or a repeat of an
+        // account listed earlier, which is either snapshotted or checked at
+        // its first position.
+        if snapshots.binary_search_by_key(&index, |s| s.index).is_ok()
+            || repeats_earlier(accounts, index)
+        {
+            continue;
+        }
+        let data = unsafe { acc.borrow_data_unchecked() };
+        if data[TOKEN_DELEGATE_OFFSET..TOKEN_DELEGATE_OFFSET + COPTION_TAG_LEN]
+            != [0u8; COPTION_TAG_LEN]
+            || data[TOKEN_CLOSE_AUTHORITY_OFFSET..TOKEN_CLOSE_AUTHORITY_OFFSET + COPTION_TAG_LEN]
+                != [0u8; COPTION_TAG_LEN]
+        {
+            return Err(AuthError::SessionTokenAuthorityChanged.into());
+        }
+    }
+
     Ok(())
 }
 
-/// Evaluate post-CPI actions (spending limits).
+/// Each mint's balance over the snapshotted accounts, before and after the CPI
+/// loop. Call only after [`verify_vault_token_accounts`] has passed, which
+/// guarantees every snapshotted account still holds the same mint.
+///
+/// Measured over the snapshot alone: a token account that became vault-owned
+/// during the Execute adds nothing to "after", so moving tokens into one is
+/// spending them.
+pub fn mint_flows(snapshots: &[VaultTokenSnapshot], accounts: &[AccountInfo]) -> Vec<MintFlow> {
+    let mut flows = Vec::with_capacity(snapshots.len());
+    for snap in snapshots {
+        let data = unsafe { accounts[snap.index].borrow_data_unchecked() };
+        let mut mint = [0u8; 32];
+        mint.copy_from_slice(&snap.base[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32]);
+        add_flow(
+            &mut flows,
+            mint,
+            read_u64(&snap.base, TOKEN_AMOUNT_OFFSET),
+            read_u64(data, TOKEN_AMOUNT_OFFSET),
+        );
+    }
+    flows
+}
+
+/// Evaluate post-CPI actions (spending limits, and the assets the policy does
+/// not name).
 ///
 /// `vault_lamports_gross_out` is the sum of all per-CPI outflows from the vault, used for
 /// `SolMaxPerTx` (which must block even DeFi round-trips that appear net-zero).
 /// `vault_lamports_before`/`after` net diff is used for the cumulative limits (SolLimit,
 /// SolRecurringLimit), where net accounting is conservative and appropriate.
+/// `mint_flows` holds each mint's net balance over the vault token accounts
+/// snapshotted before the loop.
 ///
 /// Security: This function first computes all spending deltas and validates
 /// ALL limits before writing any state. This ensures no partial state mutation
@@ -308,12 +317,10 @@ pub fn verify_token_authorities_unchanged(
 pub fn evaluate_post_actions(
     session_data: &mut [u8],
     loc: PolicyLocation,
-    accounts: &[AccountInfo],
-    vault_key: &Pubkey,
     vault_lamports_before: u64,
     vault_lamports_after: u64,
     vault_lamports_gross_out: u64,
-    token_snapshots_before: &[TokenSnapshot],
+    mint_flows: &[MintFlow],
     current_slot: u64,
 ) -> Result<(), ProgramError> {
     if !loc.is_present(session_data) {
@@ -327,8 +334,9 @@ pub fn evaluate_post_actions(
     // If nothing was spent, skip all checks (no state mutation needed for SOL).
     // Token checks still need to run.
 
-    let actions_buf_readonly = loc.slice(session_data);
-    let actions = parse_actions(actions_buf_readonly)?;
+    // Parsed once: `ActionView` holds offsets into the buffer, not borrows of
+    // it, so Phase 2 below writes through `session_data` with these same views.
+    let actions = parse_actions(loc.slice(session_data))?;
 
     // ── Phase 1: Validate all SOL limits (read-only check) ──────────
     // Expired spending-limit actions are treated as fully exhausted / "0 remaining":
@@ -403,19 +411,11 @@ pub fn evaluate_post_actions(
             ActionType::TokenMaxPerTx
             | ActionType::TokenLimit
             | ActionType::TokenRecurringLimit => {
-                let mut mint = [0u8; 32];
-                mint.copy_from_slice(&session_data[abs_data_offset..abs_data_offset + 32]);
-
-                let before_amount = token_snapshots_before
-                    .iter()
-                    .find(|s| s.mint == mint)
-                    .map(|s| s.amount)
-                    .unwrap_or(0);
-
-                let after_amount = find_token_balance(accounts, vault_key, &mint).unwrap_or(0);
-
-                // Only count outflows
-                let token_spent = before_amount.saturating_sub(after_amount);
+                // Only count outflows, net per mint over the snapshotted accounts.
+                let token_spent = mint_outflow(
+                    mint_flows,
+                    &session_data[abs_data_offset..abs_data_offset + 32],
+                );
 
                 if token_spent > 0 {
                     if action_expired {
@@ -472,10 +472,28 @@ pub fn evaluate_post_actions(
         }
     }
 
-    // ── Phase 2: All checks passed. Now write state mutations. ──────
-    // Re-parse using a slice reference — no allocation needed, same bytes, same offsets.
-    let actions = parse_actions(loc.slice(session_data))?;
+    // ── Phase 1c: Assets the policy does not name (read-only check) ──
+    // A policy lists what may leave; an asset it does not name may not. Any
+    // `Sol*` action names SOL, and a `Token*` action names its mint — expired
+    // or not, since an expired limit is already an exhausted one above. Net,
+    // like the limits: an Execute that puts back what it took passes.
+    // Rent the vault pays for a new account is SOL leaving the vault.
+    let names_sol = actions.iter().any(|a| {
+        matches!(
+            a.action_type,
+            ActionType::SolLimit | ActionType::SolRecurringLimit | ActionType::SolMaxPerTx
+        )
+    });
+    if !names_sol && sol_spent > 0 {
+        return Err(AuthError::ActionUnlistedSolOutflow.into());
+    }
+    for flow in mint_flows {
+        if flow.outflow() > 0 && !names_mint(&actions, session_data, loc, &flow.mint) {
+            return Err(AuthError::ActionUnlistedTokenOutflow.into());
+        }
+    }
 
+    // ── Phase 2: All checks passed. Now write state mutations. ──────
     for action in &actions {
         if is_expired(action, current_slot) {
             continue;
@@ -523,15 +541,10 @@ pub fn evaluate_post_actions(
                 }
             },
             ActionType::TokenLimit => {
-                let mut mint = [0u8; 32];
-                mint.copy_from_slice(&session_data[abs_data_offset..abs_data_offset + 32]);
-                let before = token_snapshots_before
-                    .iter()
-                    .find(|s| s.mint == mint)
-                    .map(|s| s.amount)
-                    .unwrap_or(0);
-                let after = find_token_balance(accounts, vault_key, &mint).unwrap_or(0);
-                let token_spent = before.saturating_sub(after);
+                let token_spent = mint_outflow(
+                    mint_flows,
+                    &session_data[abs_data_offset..abs_data_offset + 32],
+                );
 
                 if token_spent > 0 {
                     let remaining = read_u64(&session_data[abs_data_offset..], 32);
@@ -543,15 +556,10 @@ pub fn evaluate_post_actions(
                 }
             },
             ActionType::TokenRecurringLimit => {
-                let mut mint = [0u8; 32];
-                mint.copy_from_slice(&session_data[abs_data_offset..abs_data_offset + 32]);
-                let before = token_snapshots_before
-                    .iter()
-                    .find(|s| s.mint == mint)
-                    .map(|s| s.amount)
-                    .unwrap_or(0);
-                let after = find_token_balance(accounts, vault_key, &mint).unwrap_or(0);
-                let token_spent = before.saturating_sub(after);
+                let token_spent = mint_outflow(
+                    mint_flows,
+                    &session_data[abs_data_offset..abs_data_offset + 32],
+                );
 
                 if token_spent > 0 {
                     let spent = read_u64(&session_data[abs_data_offset..], 40);
@@ -592,56 +600,124 @@ fn is_expired(action: &ActionView, current_slot: u64) -> bool {
 // a test) — the Token-2022 constant was previously wrong here.
 use crate::utils::{SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID};
 
-/// Find the total token balance across ALL token accounts for a given mint owned by the vault.
-///
-/// Security: Sums every matching account rather than returning the first match.
-/// Returning only the first match allowed an attacker to place a 0-balance dummy
-/// token account (owned by vault, same mint) before the real account in the
-/// accounts list, causing both the pre-CPI snapshot and post-CPI check to read
-/// the dummy account (balance always 0) and bypass all token spending limits.
-///
-/// Verifies each account is owned by SPL Token or Token-2022 to prevent fake
-/// accounts with fabricated mint/owner fields.
-fn find_token_balance(
-    accounts: &[AccountInfo],
-    vault_key: &Pubkey,
+/// Whether any `Token*` action, expired or not, names `mint`.
+fn names_mint(
+    actions: &[ActionView],
+    session_data: &[u8],
+    loc: PolicyLocation,
     mint: &[u8; 32],
-) -> Option<u64> {
-    let mut total: u64 = 0;
-    let mut found = false;
+) -> bool {
+    actions.iter().any(|a| {
+        matches!(
+            a.action_type,
+            ActionType::TokenLimit | ActionType::TokenRecurringLimit | ActionType::TokenMaxPerTx
+        ) && session_data[loc.abs(a.data_offset)..loc.abs(a.data_offset) + 32] == mint[..]
+    })
+}
 
-    for acc in accounts {
-        // CRITICAL: Verify account is owned by SPL Token or Token-2022 program.
-        let owner = acc.owner();
-        if owner.as_ref() != &SPL_TOKEN_PROGRAM_ID && owner.as_ref() != &SPL_TOKEN_2022_PROGRAM_ID {
-            continue;
-        }
+/// The net outflow of `mint` over the snapshotted accounts; zero for a mint
+/// the vault held no snapshotted account of.
+fn mint_outflow(mint_flows: &[MintFlow], mint: &[u8]) -> u64 {
+    mint_flows
+        .iter()
+        .find(|f| f.mint[..] == *mint)
+        .map(MintFlow::outflow)
+        .unwrap_or(0)
+}
 
-        let data = unsafe { acc.borrow_data_unchecked() };
-        if data.len() < TOKEN_ACCOUNT_MIN_SIZE {
-            continue;
-        }
-        if &data[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32] != mint {
-            continue;
-        }
-        if &data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32] != vault_key.as_ref() {
-            continue;
-        }
-        let amount = u64::from_le_bytes(
-            match data[TOKEN_AMOUNT_OFFSET..TOKEN_AMOUNT_OFFSET + 8].try_into() {
-                Ok(b) => b,
-                Err(_) => continue,
-            },
-        );
-        total = total.saturating_add(amount);
-        found = true;
+/// Fold one account's before/after balance into its mint's entry.
+fn add_flow(flows: &mut Vec<MintFlow>, mint: [u8; 32], before: u64, after: u64) {
+    match flows.iter_mut().find(|f| f.mint == mint) {
+        Some(flow) => {
+            flow.before = flow.before.saturating_add(before);
+            flow.after = flow.after.saturating_add(after);
+        },
+        None => flows.push(MintFlow {
+            mint,
+            before,
+            after,
+        }),
     }
+}
 
-    if found {
-        Some(total)
+/// A writable, initialized token account whose owner field is the vault.
+fn is_snapshot_candidate(acc: &AccountInfo, vault_key: &Pubkey) -> bool {
+    if !acc.is_writable() {
+        return false;
+    }
+    let data = unsafe { acc.borrow_data_unchecked() };
+    is_token_account(acc.owner(), data)
+        && data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32] == vault_key[..]
+}
+
+/// Whether `accounts[i]` repeats an account listed earlier.
+fn repeats_earlier(accounts: &[AccountInfo], i: usize) -> bool {
+    let key = accounts[i].key();
+    accounts[..i].iter().any(|a| a.key() == key)
+}
+
+/// Whether `data`, owned by `program`, is an initialized token account: not a
+/// mint, not a multisig, not an account nobody has initialized.
+///
+/// An earlier reader accepted any token-program-owned account of 165 bytes or
+/// more whose bytes 32..64 matched the vault. A 355-byte multisig's signer
+/// keys are whatever its creator chose, and a Token-2022 mint with extensions
+/// is longer than 165 bytes too, so neither length nor owner field was enough.
+fn is_token_account(program: &Pubkey, data: &[u8]) -> bool {
+    // Length and state first: one load each, and they rule out most accounts
+    // in an Execute before any 32-byte comparison runs.
+    if data.len() < TOKEN_ACCOUNT_LEN || !matches!(data[TOKEN_STATE_OFFSET], 1 | 2) {
+        return false;
+    }
+    if data.len() == TOKEN_ACCOUNT_LEN {
+        program == &SPL_TOKEN_PROGRAM_ID || program == &SPL_TOKEN_2022_PROGRAM_ID
     } else {
-        None
+        program == &SPL_TOKEN_2022_PROGRAM_ID
+            && data.len() != TOKEN_MULTISIG_LEN
+            && data[TOKEN_ACCOUNT_TYPE_OFFSET] == TOKEN_2022_ACCOUNT_TYPE_ACCOUNT
     }
+}
+
+/// Every base field but `amount` is as it was, except that `delegated_amount`
+/// may have fallen (an existing delegate spent some of its allowance, or the
+/// owner lowered it).
+///
+/// Frozen: mint and owner (0..64); delegate, state and is_native (72..121);
+/// close_authority (129..165). A raised `delegated_amount` is a re-`Approve`
+/// of the same delegate for more, which leaves the delegate field untouched.
+fn base_unchanged_except_balance(before: &[u8; TOKEN_ACCOUNT_LEN], after: &[u8]) -> bool {
+    if after.len() < TOKEN_ACCOUNT_LEN {
+        return false;
+    }
+    after[..TOKEN_AMOUNT_OFFSET] == before[..TOKEN_AMOUNT_OFFSET]
+        && after[TOKEN_DELEGATE_OFFSET..TOKEN_DELEGATED_AMOUNT_OFFSET]
+            == before[TOKEN_DELEGATE_OFFSET..TOKEN_DELEGATED_AMOUNT_OFFSET]
+        && after[TOKEN_CLOSE_AUTHORITY_OFFSET..TOKEN_ACCOUNT_LEN]
+            == before[TOKEN_CLOSE_AUTHORITY_OFFSET..TOKEN_ACCOUNT_LEN]
+        && read_u64(after, TOKEN_DELEGATED_AMOUNT_OFFSET)
+            <= read_u64(before, TOKEN_DELEGATED_AMOUNT_OFFSET)
+}
+
+/// A token account's lamports fell only with a matching fall in a native
+/// (wSOL) account's `amount`. A non-native account's lamports are its rent and
+/// any excess, and neither may leave: `WithdrawExcessLamports` would otherwise
+/// move vault SOL that no SOL action sees.
+fn lamports_kept(
+    before_lamports: u64,
+    before: &[u8; TOKEN_ACCOUNT_LEN],
+    after_lamports: u64,
+    after: &[u8],
+) -> bool {
+    let drop = before_lamports.saturating_sub(after_lamports);
+    if drop == 0 {
+        return true;
+    }
+    let is_native = before[TOKEN_IS_NATIVE_OFFSET..TOKEN_IS_NATIVE_OFFSET + COPTION_TAG_LEN]
+        != [0u8; COPTION_TAG_LEN];
+    is_native
+        && drop
+            <= read_u64(before, TOKEN_AMOUNT_OFFSET)
+                .saturating_sub(read_u64(after, TOKEN_AMOUNT_OFFSET))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────
@@ -671,26 +747,14 @@ mod tests {
     /// Test helper: calls evaluate_post_actions with gross_out = before - after (single CPI).
     fn eval_post(
         session_data: &mut [u8],
-        accounts: &[AccountInfo],
-        vault_key: &Pubkey,
         before: u64,
         after: u64,
-        token_snapshots: &[TokenSnapshot],
+        mint_flows: &[MintFlow],
         slot: u64,
     ) -> Result<(), ProgramError> {
         let gross = before.saturating_sub(after);
         let loc = PolicyLocation::of(session_data).expect("session data resolves");
-        evaluate_post_actions(
-            session_data,
-            loc,
-            accounts,
-            vault_key,
-            before,
-            after,
-            gross,
-            token_snapshots,
-            slot,
-        )
+        evaluate_post_actions(session_data, loc, before, after, gross, mint_flows, slot)
     }
 
     fn build_sol_recurring(limit: u64, spent: u64, window: u64, last_reset: u64) -> Vec<u8> {
@@ -708,15 +772,7 @@ mod tests {
     fn test_no_actions_passthrough() {
         let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
         session_data[0] = crate::state::AccountDiscriminator::Session as u8;
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            10_000_000,
-            0,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 10_000_000, 0, &[], 100);
         assert!(result.is_ok());
     }
 
@@ -729,8 +785,6 @@ mod tests {
         // vault gained lamports (before < after) → sol_spent = 0
         let result = eval_post(
             &mut session_data,
-            &[],
-            &Pubkey::default(),
             1_000_000,
             2_000_000, // vault gained 1M
             &[],
@@ -749,8 +803,6 @@ mod tests {
 
         let result = eval_post(
             &mut session_data,
-            &[],
-            &Pubkey::default(),
             1_000_000,
             5_000_000, // gained 4M
             &[],
@@ -769,8 +821,6 @@ mod tests {
         // Spend exactly the remaining amount — should succeed
         let result = eval_post(
             &mut session_data,
-            &[],
-            &Pubkey::default(),
             2_000_000,
             1_000_000, // spent exactly 1M
             &[],
@@ -789,43 +839,19 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Tx 1: spend 600k
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_400_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 100);
         assert!(result.is_ok());
 
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
         assert_eq!(read_u64(&session_data[abs_offset..], 0), 400_000);
 
         // Tx 2: spend 400k (exact remaining) — OK
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_400_000,
-            1_000_000,
-            &[],
-            101,
-        );
+        let result = eval_post(&mut session_data, 1_400_000, 1_000_000, &[], 101);
         assert!(result.is_ok());
         assert_eq!(read_u64(&session_data[abs_offset..], 0), 0);
 
         // Tx 3: spend 1 lamport — should fail (0 remaining)
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            999_999,
-            &[],
-            102,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 999_999, &[], 102);
         assert!(result.is_err());
     }
 
@@ -837,8 +863,6 @@ mod tests {
         // Try to spend 1M + 1 — should fail
         let result = eval_post(
             &mut session_data,
-            &[],
-            &Pubkey::default(),
             2_000_000,
             999_999, // spent 1_000_001
             &[],
@@ -859,27 +883,11 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend exactly the max — OK
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_500_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 1_500_000, &[], 100);
         assert!(result.is_ok());
 
         // Exceed by 1 — fail
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_499_999,
-            &[],
-            101,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 1_499_999, &[], 101);
         assert!(result.is_err());
     }
 
@@ -892,8 +900,6 @@ mod tests {
         for slot in 100..110 {
             let result = eval_post(
                 &mut session_data,
-                &[],
-                &Pubkey::default(),
                 2_000_000,
                 1_500_000, // 500k each time
                 &[],
@@ -912,27 +918,11 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend 600k at slot 50
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_400_000,
-            &[],
-            50,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 50);
         assert!(result.is_ok());
 
         // Spend 500k more at slot 60 — total 1.1M > 1M limit
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_400_000,
-            900_000,
-            &[],
-            60,
-        );
+        let result = eval_post(&mut session_data, 1_400_000, 900_000, &[], 60);
         assert!(result.is_err());
     }
 
@@ -943,27 +933,10 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend 900k at slot 50
-        eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_100_000,
-            &[],
-            50,
-        )
-        .unwrap();
+        eval_post(&mut session_data, 2_000_000, 1_100_000, &[], 50).unwrap();
 
         // At slot 150 (after window), 500k should work again
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_100_000,
-            600_000,
-            &[],
-            150,
-        );
+        let result = eval_post(&mut session_data, 1_100_000, 600_000, &[], 150);
         assert!(result.is_ok());
 
         // The new window starts at the spend that opened it, not at the grid
@@ -987,45 +960,21 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend the full allowance late in the first window (slot 199).
-        eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            5_000_000,
-            4_000_000,
-            &[],
-            199,
-        )
-        .expect("first window's allowance");
+        eval_post(&mut session_data, 5_000_000, 4_000_000, &[], 199)
+            .expect("first window's allowance");
 
         // Two slots later the old code reset again (199 -> aligned 100, and
         // 201 - 100 = 101 > 100). It must not: only 2 slots of a 100-slot
         // window have elapsed.
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            4_000_000,
-            3_000_000,
-            &[],
-            201,
-        );
+        let result = eval_post(&mut session_data, 4_000_000, 3_000_000, &[], 201);
         assert!(
             result.is_err(),
             "a second full allowance 2 slots later must be refused"
         );
 
         // A spend past the real window boundary is allowed again.
-        eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            4_000_000,
-            3_000_000,
-            &[],
-            300,
-        )
-        .expect("the window genuinely elapsed");
+        eval_post(&mut session_data, 4_000_000, 3_000_000, &[], 300)
+            .expect("the window genuinely elapsed");
     }
 
     #[test]
@@ -1037,8 +986,6 @@ mod tests {
         // At slot 150 (fresh window), try to spend more than the full limit
         let result = eval_post(
             &mut session_data,
-            &[],
-            &Pubkey::default(),
             5_000_000,
             3_500_000, // 1.5M > 1M limit
             &[],
@@ -1054,27 +1001,11 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend exactly the limit
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_000_000,
-            &[],
-            50,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 1_000_000, &[], 50);
         assert!(result.is_ok());
 
         // Spend 1 more in same window — fail
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            999_999,
-            &[],
-            60,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 999_999, &[], 60);
         assert!(result.is_err());
     }
 
@@ -1089,8 +1020,6 @@ mod tests {
         // But limit is u64::MAX so it should be within limit
         let result = eval_post(
             &mut session_data,
-            &[],
-            &Pubkey::default(),
             1_000_000,
             999_800, // spent 200
             &[],
@@ -1113,27 +1042,11 @@ mod tests {
         let mut session_data = build_session_data(&actions_buf);
 
         // 400k — under both limits
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            5_000_000,
-            4_600_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 5_000_000, 4_600_000, &[], 100);
         assert!(result.is_ok());
 
         // 600k — under lifetime (1.6M left) but over per-tx (500k)
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            4_600_000,
-            4_000_000,
-            &[],
-            101,
-        );
+        let result = eval_post(&mut session_data, 4_600_000, 4_000_000, &[], 101);
         assert!(result.is_err());
     }
 
@@ -1152,39 +1065,13 @@ mod tests {
         let mut session_data = build_session_data(&actions_buf);
 
         // 200k — OK
-        eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            5_000_000,
-            4_800_000,
-            &[],
-            50,
-        )
-        .unwrap();
+        eval_post(&mut session_data, 5_000_000, 4_800_000, &[], 50).unwrap();
 
         // 200k more — OK (400k total in window, under 1M; 200k under 300k per-tx)
-        eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            4_800_000,
-            4_600_000,
-            &[],
-            60,
-        )
-        .unwrap();
+        eval_post(&mut session_data, 4_800_000, 4_600_000, &[], 60).unwrap();
 
         // 350k — fails per-tx (350k > 300k) even though recurring has room
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            4_600_000,
-            4_250_000,
-            &[],
-            70,
-        );
+        let result = eval_post(&mut session_data, 4_600_000, 4_250_000, &[], 70);
         assert!(result.is_err());
     }
 
@@ -1197,27 +1084,11 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // At slot 100, action expired — any spend should FAIL
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_400_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 100);
         assert!(result.is_err());
 
         // Zero spending is still OK even with expired action
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            2_000_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 2_000_000, &[], 100);
         assert!(result.is_ok());
     }
 
@@ -1229,27 +1100,11 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // At slot 50 — still active, 600k > 500k → fail
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_400_000,
-            &[],
-            50,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 50);
         assert!(result.is_err());
 
         // At slot 51 — expired, any spend → also fail (expired = exhausted)
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_400_000,
-            &[],
-            51,
-        );
+        let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 51);
         assert!(result.is_err());
     }
 
@@ -1264,39 +1119,15 @@ mod tests {
         let mut session_data = build_session_data(&actions_buf);
 
         // At slot 100: MaxPerTx expired → any spend blocked by expired MaxPerTx
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            5_000_000,
-            2_000_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 5_000_000, 2_000_000, &[], 100);
         assert!(result.is_err());
 
         // Even 1 lamport fails because expired MaxPerTx blocks all spending
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            5_000_000,
-            4_999_999,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 5_000_000, 4_999_999, &[], 100);
         assert!(result.is_err());
 
         // Zero spend is OK
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            5_000_000,
-            5_000_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 5_000_000, 5_000_000, &[], 100);
         assert!(result.is_ok());
     }
 
@@ -1314,15 +1145,7 @@ mod tests {
         let original = session_data.clone();
 
         // 500k spend — passes SolLimit but fails SolMaxPerTx
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            5_000_000,
-            4_500_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 5_000_000, 4_500_000, &[], 100);
         assert!(result.is_err());
 
         // Because we validate ALL checks before writing, state is unchanged
@@ -1337,45 +1160,18 @@ mod tests {
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
 
         // Spend 300k at slot 50
-        eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            2_000_000,
-            1_700_000,
-            &[],
-            50,
-        )
-        .unwrap();
+        eval_post(&mut session_data, 2_000_000, 1_700_000, &[], 50).unwrap();
 
         assert_eq!(read_u64(&session_data[abs_offset..], 8), 300_000); // spent
         assert_eq!(read_u64(&session_data[abs_offset..], 24), 0); // last_reset (first window)
 
         // Spend 200k at slot 60
-        eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_700_000,
-            1_500_000,
-            &[],
-            60,
-        )
-        .unwrap();
+        eval_post(&mut session_data, 1_700_000, 1_500_000, &[], 60).unwrap();
 
         assert_eq!(read_u64(&session_data[abs_offset..], 8), 500_000); // cumulative
 
         // Window reset at slot 200
-        eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_500_000,
-            1_300_000,
-            &[],
-            200,
-        )
-        .unwrap();
+        eval_post(&mut session_data, 1_500_000, 1_300_000, &[], 200).unwrap();
 
         assert_eq!(read_u64(&session_data[abs_offset..], 8), 200_000); // reset + new spend
         assert_eq!(read_u64(&session_data[abs_offset..], 24), 200); // aligned: (200/100)*100
@@ -1389,27 +1185,11 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Even 1 lamport should fail
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            999_999,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 999_999, &[], 100);
         assert!(result.is_err());
 
         // But zero spending is OK
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            1_000_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 1_000_000, &[], 100);
         assert!(result.is_ok());
     }
 
@@ -1418,26 +1198,10 @@ mod tests {
         let actions = build_action(3, 0, &0u64.to_le_bytes());
         let mut session_data = build_session_data(&actions);
 
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            999_999,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 999_999, &[], 100);
         assert!(result.is_err());
 
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            1_000_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 1_000_000, &[], 100);
         assert!(result.is_ok());
     }
 
@@ -1445,9 +1209,8 @@ mod tests {
     // Token spending limit tests
     // ══════════════════════════════════════════════════════════════════
     //
-    // Token tests use empty `accounts` slice so find_token_balance returns
-    // None → unwrap_or(0), meaning "all tokens drained." We provide
-    // token_snapshots_before with the initial balance to compute spending.
+    // Token tests pass a `MintFlow` with `after: 0`, meaning "all tokens
+    // drained": `before` is the amount that left the snapshotted accounts.
 
     fn build_token_limit(mint: &[u8; 32], remaining: u64) -> Vec<u8> {
         let mut data = Vec::new();
@@ -1486,21 +1249,14 @@ mod tests {
         let mint = [0xAA; 32];
         let actions = build_action(4, 0, &build_token_limit(&mint, 1_000_000));
         let mut session_data = build_session_data(&actions);
-        let snapshots = vec![TokenSnapshot {
+        let snapshots = vec![MintFlow {
             mint,
-            amount: 500_000,
+            before: 500_000,
+            after: 0,
         }];
 
         // accounts=[] → after=0, token_spent=500_000, within 1M limit
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_ok());
 
         // Verify remaining was decremented
@@ -1514,21 +1270,14 @@ mod tests {
         let mint = [0xBB; 32];
         let actions = build_action(4, 0, &build_token_limit(&mint, 100_000));
         let mut session_data = build_session_data(&actions);
-        let snapshots = vec![TokenSnapshot {
+        let snapshots = vec![MintFlow {
             mint,
-            amount: 200_000,
+            before: 200_000,
+            after: 0,
         }];
 
         // token_spent=200k > remaining=100k → fail
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_err());
     }
 
@@ -1537,21 +1286,14 @@ mod tests {
         let mint = [0xCC; 32];
         let actions = build_action(4, 0, &build_token_limit(&mint, 500_000));
         let mut session_data = build_session_data(&actions);
-        let snapshots = vec![TokenSnapshot {
+        let snapshots = vec![MintFlow {
             mint,
-            amount: 500_000,
+            before: 500_000,
+            after: 0,
         }];
 
         // token_spent = exactly remaining → OK
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_ok());
 
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
@@ -1565,27 +1307,33 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Tx 1: drain 600k
-        let s1 = vec![TokenSnapshot {
+        let s1 = vec![MintFlow {
             mint,
-            amount: 600_000,
+            before: 600_000,
+            after: 0,
         }];
-        eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s1, 100).unwrap();
+        eval_post(&mut session_data, 0, 0, &s1, 100).unwrap();
 
         // remaining = 400k
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
         assert_eq!(read_u64(&session_data[abs_offset..], 32), 400_000);
 
         // Tx 2: drain 400k → exact
-        let s2 = vec![TokenSnapshot {
+        let s2 = vec![MintFlow {
             mint,
-            amount: 400_000,
+            before: 400_000,
+            after: 0,
         }];
-        eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s2, 101).unwrap();
+        eval_post(&mut session_data, 0, 0, &s2, 101).unwrap();
         assert_eq!(read_u64(&session_data[abs_offset..], 32), 0);
 
         // Tx 3: drain 1 → fail
-        let s3 = vec![TokenSnapshot { mint, amount: 1 }];
-        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s3, 102);
+        let s3 = vec![MintFlow {
+            mint,
+            before: 1,
+            after: 0,
+        }];
+        let result = eval_post(&mut session_data, 0, 0, &s3, 102);
         assert!(result.is_err());
     }
 
@@ -1596,20 +1344,13 @@ mod tests {
         let mint = [0xEE; 32];
         let actions = build_action(6, 0, &build_token_max_per_tx(&mint, 500_000));
         let mut session_data = build_session_data(&actions);
-        let snapshots = vec![TokenSnapshot {
+        let snapshots = vec![MintFlow {
             mint,
-            amount: 300_000,
+            before: 300_000,
+            after: 0,
         }];
 
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_ok());
     }
 
@@ -1618,20 +1359,13 @@ mod tests {
         let mint = [0xFF; 32];
         let actions = build_action(6, 0, &build_token_max_per_tx(&mint, 500_000));
         let mut session_data = build_session_data(&actions);
-        let snapshots = vec![TokenSnapshot {
+        let snapshots = vec![MintFlow {
             mint,
-            amount: 600_000,
+            before: 600_000,
+            after: 0,
         }];
 
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_err());
     }
 
@@ -1643,19 +1377,12 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         for slot in 100..105 {
-            let snapshots = vec![TokenSnapshot {
+            let snapshots = vec![MintFlow {
                 mint,
-                amount: 500_000,
+                before: 500_000,
+                after: 0,
             }];
-            let result = eval_post(
-                &mut session_data,
-                &[],
-                &Pubkey::default(),
-                0,
-                0,
-                &snapshots,
-                slot,
-            );
+            let result = eval_post(&mut session_data, 0, 0, &snapshots, slot);
             assert!(result.is_ok());
         }
     }
@@ -1669,18 +1396,20 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend 600k at slot 50 — OK
-        let s1 = vec![TokenSnapshot {
+        let s1 = vec![MintFlow {
             mint,
-            amount: 600_000,
+            before: 600_000,
+            after: 0,
         }];
-        eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s1, 50).unwrap();
+        eval_post(&mut session_data, 0, 0, &s1, 50).unwrap();
 
         // Spend 500k more at slot 60 → total 1.1M > 1M limit → fail
-        let s2 = vec![TokenSnapshot {
+        let s2 = vec![MintFlow {
             mint,
-            amount: 500_000,
+            before: 500_000,
+            after: 0,
         }];
-        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s2, 60);
+        let result = eval_post(&mut session_data, 0, 0, &s2, 60);
         assert!(result.is_err());
     }
 
@@ -1691,18 +1420,20 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend 900k at slot 50
-        let s1 = vec![TokenSnapshot {
+        let s1 = vec![MintFlow {
             mint,
-            amount: 900_000,
+            before: 900_000,
+            after: 0,
         }];
-        eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s1, 50).unwrap();
+        eval_post(&mut session_data, 0, 0, &s1, 50).unwrap();
 
         // At slot 150 (after window), spending resets → 500k OK
-        let s2 = vec![TokenSnapshot {
+        let s2 = vec![MintFlow {
             mint,
-            amount: 500_000,
+            before: 500_000,
+            after: 0,
         }];
-        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &s2, 150);
+        let result = eval_post(&mut session_data, 0, 0, &s2, 150);
         assert!(result.is_ok());
     }
 
@@ -1713,18 +1444,14 @@ mod tests {
         let mint = [0x44; 32];
         let actions = build_action(4, 50, &build_token_limit(&mint, 1_000_000)); // expires at slot 50
         let mut session_data = build_session_data(&actions);
-        let snapshots = vec![TokenSnapshot { mint, amount: 100 }];
+        let snapshots = vec![MintFlow {
+            mint,
+            before: 100,
+            after: 0,
+        }];
 
         // At slot 100 (expired), any token spend → fail
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_err());
     }
 
@@ -1733,18 +1460,14 @@ mod tests {
         let mint = [0x55; 32];
         let actions = build_action(6, 50, &build_token_max_per_tx(&mint, 1_000_000)); // expires at 50
         let mut session_data = build_session_data(&actions);
-        let snapshots = vec![TokenSnapshot { mint, amount: 1 }];
+        let snapshots = vec![MintFlow {
+            mint,
+            before: 1,
+            after: 0,
+        }];
 
         // Expired → even 1 token blocked
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_err());
     }
 
@@ -1753,17 +1476,13 @@ mod tests {
         let mint = [0x66; 32];
         let actions = build_action(5, 50, &build_token_recurring(&mint, 1_000_000, 0, 100, 0));
         let mut session_data = build_session_data(&actions);
-        let snapshots = vec![TokenSnapshot { mint, amount: 1 }];
+        let snapshots = vec![MintFlow {
+            mint,
+            before: 1,
+            after: 0,
+        }];
 
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_err());
     }
 
@@ -1780,24 +1499,18 @@ mod tests {
 
         // Drain mint_a within its limit, drain mint_b within its limit
         let snapshots = vec![
-            TokenSnapshot {
+            MintFlow {
                 mint: mint_a,
-                amount: 50_000,
+                before: 50_000,
+                after: 0,
             },
-            TokenSnapshot {
+            MintFlow {
                 mint: mint_b,
-                amount: 400_000,
+                before: 400_000,
+                after: 0,
             },
         ];
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_ok());
     }
 
@@ -1812,24 +1525,18 @@ mod tests {
 
         // mint_a: 50k OK, mint_b: 600k > 500k → fail
         let snapshots = vec![
-            TokenSnapshot {
+            MintFlow {
                 mint: mint_a,
-                amount: 50_000,
+                before: 50_000,
+                after: 0,
             },
-            TokenSnapshot {
+            MintFlow {
                 mint: mint_b,
-                amount: 600_000,
+                before: 600_000,
+                after: 0,
             },
         ];
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            0,
-            0,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_err());
     }
 
@@ -1843,21 +1550,14 @@ mod tests {
         actions_buf.extend_from_slice(&build_action(4, 0, &build_token_limit(&mint, 500_000))); // TokenLimit: 500k
         let mut session_data = build_session_data(&actions_buf);
 
-        let snapshots = vec![TokenSnapshot {
+        let snapshots = vec![MintFlow {
             mint,
-            amount: 300_000,
+            before: 300_000,
+            after: 0,
         }];
 
         // SOL: 200k spent (under 1M), Token: 300k spent (under 500k) → OK
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            800_000,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 800_000, &snapshots, 100);
         assert!(result.is_ok());
     }
 
@@ -1869,21 +1569,14 @@ mod tests {
         actions_buf.extend_from_slice(&build_action(4, 0, &build_token_limit(&mint, 100_000))); // TokenLimit: 100k
         let mut session_data = build_session_data(&actions_buf);
 
-        let snapshots = vec![TokenSnapshot {
+        let snapshots = vec![MintFlow {
             mint,
-            amount: 200_000,
+            before: 200_000,
+            after: 0,
         }];
 
         // SOL: 500k spent (under 10M), Token: 200k > 100k → fail
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            5_000_000,
-            4_500_000,
-            &snapshots,
-            100,
-        );
+        let result = eval_post(&mut session_data, 5_000_000, 4_500_000, &snapshots, 100);
         assert!(result.is_err());
     }
 
@@ -1904,8 +1597,6 @@ mod tests {
         let result = evaluate_post_actions(
             &mut session_data,
             loc,
-            &[],
-            &Pubkey::default(),
             20_000_000_000,
             19_500_000_000,
             10_000_000_000, // gross = 10 SOL
@@ -1925,8 +1616,6 @@ mod tests {
         let result = evaluate_post_actions(
             &mut session_data,
             loc,
-            &[],
-            &Pubkey::default(),
             20_000_000_000,
             19_000_000_000,
             3_000_000_000, // gross = 3 SOL
@@ -1948,8 +1637,6 @@ mod tests {
         let result = evaluate_post_actions(
             &mut session_data,
             loc,
-            &[],
-            &Pubkey::default(),
             20_000_000_000,
             19_500_000_000,
             10_000_000_000,
@@ -1977,27 +1664,11 @@ mod tests {
         let mut session_data = build_session_data(&actions_buf);
 
         // At slot 100 (both expired), even 1 lamport spend is blocked
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            999_999,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 999_999, &[], 100);
         assert!(result.is_err());
 
         // Zero spend still OK
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            1_000_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 1_000_000, &[], 100);
         assert!(result.is_ok());
     }
 
@@ -2011,23 +1682,17 @@ mod tests {
         let mut session_data = build_session_data(&actions_buf);
 
         // SOL spend → blocked
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            1_000_000,
-            999_000,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, 1_000_000, 999_000, &[], 100);
         assert!(result.is_err());
 
         // Token spend → blocked
-        let snapshots = vec![TokenSnapshot { mint, amount: 100 }];
+        let snapshots = vec![MintFlow {
+            mint,
+            before: 100,
+            after: 0,
+        }];
         let result = eval_post(
             &mut session_data,
-            &[],
-            &Pubkey::default(),
             1_000_000,
             1_000_000, // no SOL change
             &snapshots,
@@ -2043,15 +1708,7 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Spend u64::MAX → should succeed (exact match)
-        let result = eval_post(
-            &mut session_data,
-            &[],
-            &Pubkey::default(),
-            u64::MAX,
-            0,
-            &[],
-            100,
-        );
+        let result = eval_post(&mut session_data, u64::MAX, 0, &[], 100);
         assert!(result.is_ok());
 
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
@@ -2060,14 +1717,354 @@ mod tests {
 
     #[test]
     fn test_no_token_snapshot_means_no_change() {
-        // If a token mint has a limit but no before-snapshot, token_spent = 0
+        // If a token mint has a limit but no snapshotted account, token_spent = 0
         let mint = [0xAA; 32];
         let actions = build_action(4, 0, &build_token_limit(&mint, 1_000_000));
         let mut session_data = build_session_data(&actions);
 
-        // No snapshots → before=0, after=0 → spent=0 → OK
-        let result = eval_post(&mut session_data, &[], &Pubkey::default(), 0, 0, &[], 100);
+        // No flows → before=0, after=0 → spent=0 → OK
+        let result = eval_post(&mut session_data, 0, 0, &[], 100);
         assert!(result.is_ok());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Assets the policy does not name (D13)
+    // ══════════════════════════════════════════════════════════════════
+
+    fn custom_code(result: Result<(), ProgramError>) -> Option<u32> {
+        match result {
+            Err(ProgramError::Custom(code)) => Some(code),
+            _ => None,
+        }
+    }
+
+    const ERR_UNLISTED_SOL: u32 = AuthError::ActionUnlistedSolOutflow as u32;
+    const ERR_UNLISTED_TOKEN: u32 = AuthError::ActionUnlistedTokenOutflow as u32;
+    const ERR_TOKEN_LIMIT: u32 = AuthError::ActionTokenLimitExceeded as u32;
+
+    fn whitelist_only() -> Vec<u8> {
+        build_action(10, 0, &[0x77; 32])
+    }
+
+    fn flow(mint: [u8; 32], before: u64, after: u64) -> MintFlow {
+        MintFlow {
+            mint,
+            before,
+            after,
+        }
+    }
+
+    #[test]
+    fn unlisted_sol_outflow_rejected() {
+        let mut session_data = build_session_data(&whitelist_only());
+        let original = session_data.clone();
+        let result = eval_post(&mut session_data, 2_000_000, 1_999_999, &[], 100);
+        assert_eq!(custom_code(result), Some(ERR_UNLISTED_SOL));
+        assert_eq!(session_data, original);
+    }
+
+    #[test]
+    fn unlisted_sol_inflow_ok() {
+        let mut session_data = build_session_data(&whitelist_only());
+        assert!(eval_post(&mut session_data, 1_000_000, 3_000_000, &[], 100).is_ok());
+        assert!(eval_post(&mut session_data, 1_000_000, 1_000_000, &[], 100).is_ok());
+    }
+
+    /// A per-transaction cap alone names SOL: it was written to bound SOL, so
+    /// the unlisted rule does not stack on top of it.
+    #[test]
+    fn sol_max_per_tx_alone_names_sol() {
+        let actions = build_action(3, 0, &500_000u64.to_le_bytes());
+        let mut session_data = build_session_data(&actions);
+        assert!(eval_post(&mut session_data, 2_000_000, 1_500_000, &[], 100).is_ok());
+        assert_eq!(
+            custom_code(eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 100)),
+            Some(AuthError::ActionSolMaxPerTxExceeded as u32)
+        );
+    }
+
+    #[test]
+    fn sol_recurring_alone_names_sol() {
+        let data = build_sol_recurring(1_000_000, 0, 100, 0);
+        let mut session_data = build_session_data(&build_action(2, 0, &data));
+        assert!(eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 50).is_ok());
+    }
+
+    #[test]
+    fn unlisted_mint_outflow_rejected() {
+        let listed = [0xAA; 32];
+        let unlisted = [0xBB; 32];
+        let mut actions = whitelist_only();
+        actions.extend_from_slice(&build_action(4, 0, &build_token_limit(&listed, 1_000)));
+        let mut session_data = build_session_data(&actions);
+        let result = eval_post(&mut session_data, 0, 0, &[flow(unlisted, 10, 9)], 100);
+        assert_eq!(custom_code(result), Some(ERR_UNLISTED_TOKEN));
+    }
+
+    #[test]
+    fn unlisted_mint_inflow_ok() {
+        let mut session_data = build_session_data(&whitelist_only());
+        let flows = [flow([0xBB; 32], 10, 500)];
+        assert!(eval_post(&mut session_data, 0, 0, &flows, 100).is_ok());
+    }
+
+    /// Net per mint: moving an unlisted mint between two vault accounts, or
+    /// sending some out and getting as much back, leaves the balance where it
+    /// was.
+    #[test]
+    fn unlisted_mint_net_zero_ok() {
+        let mut session_data = build_session_data(&whitelist_only());
+        let flows = [flow([0xBB; 32], 700, 700)];
+        assert!(eval_post(&mut session_data, 0, 0, &flows, 100).is_ok());
+    }
+
+    /// An expired limit still names its mint; it is an exhausted limit, not an
+    /// absent one, so the error is the limit's.
+    #[test]
+    fn expired_token_action_still_names_mint() {
+        let mint = [0x44; 32];
+        let actions = build_action(4, 50, &build_token_limit(&mint, 1_000_000));
+        let mut session_data = build_session_data(&actions);
+        let result = eval_post(&mut session_data, 0, 0, &[flow(mint, 100, 0)], 100);
+        assert_eq!(custom_code(result), Some(ERR_TOKEN_LIMIT));
+    }
+
+    #[test]
+    fn listed_and_unlisted_outflow_reports_listed_first_when_over_limit() {
+        let listed = [0xAA; 32];
+        let unlisted = [0xBB; 32];
+        let actions = build_action(4, 0, &build_token_limit(&listed, 10));
+        let mut session_data = build_session_data(&actions);
+        let flows = [flow(unlisted, 5, 0), flow(listed, 11, 0)];
+        assert_eq!(
+            custom_code(eval_post(&mut session_data, 0, 0, &flows, 100)),
+            Some(ERR_TOKEN_LIMIT)
+        );
+
+        // Within the listed limit, the unlisted outflow is what fails.
+        let flows = [flow(listed, 10, 0), flow(unlisted, 5, 0)];
+        assert_eq!(
+            custom_code(eval_post(&mut session_data, 0, 0, &flows, 100)),
+            Some(ERR_UNLISTED_TOKEN)
+        );
+    }
+
+    /// The unlisted checks run before Phase 2, so a listed spend that would
+    /// otherwise be charged is not written when an unlisted asset left too.
+    #[test]
+    fn no_state_written_when_unlisted_check_fails() {
+        let listed = [0xAA; 32];
+        let mut actions = build_action(4, 0, &build_token_limit(&listed, 1_000));
+        actions.extend_from_slice(&whitelist_only());
+        let mut session_data = build_session_data(&actions);
+        let original = session_data.clone();
+
+        // Listed spend within its limit, plus SOL with no SOL action.
+        let result = eval_post(
+            &mut session_data,
+            5_000,
+            4_000,
+            &[flow(listed, 100, 0)],
+            100,
+        );
+        assert_eq!(custom_code(result), Some(ERR_UNLISTED_SOL));
+        assert_eq!(session_data, original);
+
+        // Listed spend within its limit, plus an unlisted mint.
+        let flows = [flow(listed, 100, 0), flow([0xBB; 32], 1, 0)];
+        let result = eval_post(&mut session_data, 0, 0, &flows, 100);
+        assert_eq!(custom_code(result), Some(ERR_UNLISTED_TOKEN));
+        assert_eq!(session_data, original);
+
+        // The listed spend alone is charged.
+        eval_post(&mut session_data, 0, 0, &[flow(listed, 100, 0)], 100).unwrap();
+        let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
+        assert_eq!(read_u64(&session_data[abs_offset..], 32), 900);
+    }
+
+    /// wSOL is a mint; a SOL action does not name it, and a token action on
+    /// wSOL does not name SOL.
+    #[test]
+    fn sol_and_wsol_are_separate_assets() {
+        let wsol = [0x06; 32];
+        let mut session_data = build_session_data(&build_action(1, 0, &u64::MAX.to_le_bytes()));
+        let result = eval_post(&mut session_data, 0, 0, &[flow(wsol, 10, 0)], 100);
+        assert_eq!(custom_code(result), Some(ERR_UNLISTED_TOKEN));
+
+        let mut session_data =
+            build_session_data(&build_action(4, 0, &build_token_limit(&wsol, u64::MAX)));
+        let result = eval_post(&mut session_data, 10, 0, &[], 100);
+        assert_eq!(custom_code(result), Some(ERR_UNLISTED_SOL));
+    }
+
+    #[test]
+    fn add_flow_folds_per_mint_without_cross_mint_netting() {
+        let mut flows = Vec::new();
+        add_flow(&mut flows, [1; 32], 100, 40);
+        add_flow(&mut flows, [2; 32], 0, 500);
+        add_flow(&mut flows, [1; 32], 0, 60);
+        add_flow(&mut flows, [1; 32], u64::MAX, 0);
+        assert_eq!(flows.len(), 2);
+        assert_eq!(flows[0].before, u64::MAX);
+        assert_eq!(flows[0].after, 100);
+        assert_eq!(flows[1].outflow(), 0);
+    }
+
+    // ── Token account classification and the per-field freeze ─────────
+
+    fn token_account_bytes(len: usize, state: u8) -> Vec<u8> {
+        let mut data = vec![0u8; len];
+        data[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32].copy_from_slice(&[0x11; 32]);
+        data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32].copy_from_slice(&[0x22; 32]);
+        data[TOKEN_AMOUNT_OFFSET..TOKEN_AMOUNT_OFFSET + 8].copy_from_slice(&1_000u64.to_le_bytes());
+        data[TOKEN_STATE_OFFSET] = state;
+        data
+    }
+
+    #[test]
+    fn classifier_accepts_only_initialized_token_accounts() {
+        let legacy = &SPL_TOKEN_PROGRAM_ID;
+        let t22 = &SPL_TOKEN_2022_PROGRAM_ID;
+
+        assert!(is_token_account(legacy, &token_account_bytes(165, 1)));
+        assert!(
+            is_token_account(legacy, &token_account_bytes(165, 2)),
+            "frozen"
+        );
+        assert!(
+            !is_token_account(legacy, &token_account_bytes(165, 0)),
+            "uninitialized"
+        );
+        assert!(
+            !is_token_account(legacy, &token_account_bytes(170, 1)),
+            "legacy is 165 only"
+        );
+        assert!(
+            !is_token_account(legacy, &token_account_bytes(355, 1)),
+            "multisig"
+        );
+        assert!(!is_token_account(legacy, &[0u8; 82]), "mint");
+
+        assert!(is_token_account(t22, &token_account_bytes(165, 1)));
+        let mut ext = token_account_bytes(170, 1);
+        ext[TOKEN_ACCOUNT_TYPE_OFFSET] = TOKEN_2022_ACCOUNT_TYPE_ACCOUNT;
+        assert!(
+            is_token_account(t22, &ext),
+            "Token-2022 account with an extension"
+        );
+        let mut mint = token_account_bytes(278, 1);
+        mint[TOKEN_ACCOUNT_TYPE_OFFSET] = 1;
+        assert!(
+            !is_token_account(t22, &mint),
+            "Token-2022 mint with extensions"
+        );
+        let mut multisig = token_account_bytes(355, 1);
+        multisig[TOKEN_ACCOUNT_TYPE_OFFSET] = TOKEN_2022_ACCOUNT_TYPE_ACCOUNT;
+        assert!(!is_token_account(t22, &multisig), "355 bytes is a multisig");
+
+        assert!(
+            !is_token_account(&[9u8; 32], &token_account_bytes(165, 1)),
+            "other program"
+        );
+    }
+
+    fn base_of(data: &[u8]) -> [u8; TOKEN_ACCOUNT_LEN] {
+        let mut base = [0u8; TOKEN_ACCOUNT_LEN];
+        base.copy_from_slice(&data[..TOKEN_ACCOUNT_LEN]);
+        base
+    }
+
+    #[test]
+    fn base_unchanged_except_balance_freezes_every_field_but_amount() {
+        let mut before = token_account_bytes(165, 1);
+        before[TOKEN_DELEGATED_AMOUNT_OFFSET..TOKEN_DELEGATED_AMOUNT_OFFSET + 8]
+            .copy_from_slice(&10u64.to_le_bytes());
+        let base = base_of(&before);
+
+        assert!(base_unchanged_except_balance(&base, &before));
+
+        let mut amount = before.clone();
+        amount[TOKEN_AMOUNT_OFFSET] = 0;
+        assert!(
+            base_unchanged_except_balance(&base, &amount),
+            "amount is free"
+        );
+
+        // (offset, field) — one byte flipped in each frozen field.
+        for (offset, field) in [
+            (TOKEN_MINT_OFFSET, "mint"),
+            (TOKEN_OWNER_OFFSET + 31, "owner"),
+            (TOKEN_DELEGATE_OFFSET, "delegate tag"),
+            (TOKEN_DELEGATE_OFFSET + 4, "delegate key"),
+            (TOKEN_STATE_OFFSET, "state"),
+            (TOKEN_IS_NATIVE_OFFSET, "is_native tag"),
+            (TOKEN_IS_NATIVE_OFFSET + 4, "is_native reserve"),
+            (TOKEN_CLOSE_AUTHORITY_OFFSET, "close_authority tag"),
+            (TOKEN_CLOSE_AUTHORITY_OFFSET + 35, "close_authority key"),
+        ] {
+            let mut after = before.clone();
+            after[offset] ^= 0xFF;
+            assert!(!base_unchanged_except_balance(&base, &after), "{field}");
+        }
+
+        let mut up = before.clone();
+        up[TOKEN_DELEGATED_AMOUNT_OFFSET..TOKEN_DELEGATED_AMOUNT_OFFSET + 8]
+            .copy_from_slice(&11u64.to_le_bytes());
+        assert!(
+            !base_unchanged_except_balance(&base, &up),
+            "delegated_amount up"
+        );
+
+        let mut down = before.clone();
+        down[TOKEN_DELEGATED_AMOUNT_OFFSET..TOKEN_DELEGATED_AMOUNT_OFFSET + 8]
+            .copy_from_slice(&9u64.to_le_bytes());
+        assert!(
+            base_unchanged_except_balance(&base, &down),
+            "delegated_amount down"
+        );
+
+        assert!(
+            !base_unchanged_except_balance(&base, &before[..164]),
+            "truncated"
+        );
+    }
+
+    #[test]
+    fn lamports_kept_allows_only_a_native_unwrap() {
+        let plain = token_account_bytes(165, 1);
+        let base = base_of(&plain);
+        assert!(lamports_kept(2_000, &base, 2_000, &plain));
+        assert!(
+            lamports_kept(2_000, &base, 9_000, &plain),
+            "a lamport inflow"
+        );
+        assert!(
+            !lamports_kept(2_000, &base, 1_999, &plain),
+            "non-native drop"
+        );
+
+        let mut native = token_account_bytes(165, 1);
+        native[TOKEN_IS_NATIVE_OFFSET..TOKEN_IS_NATIVE_OFFSET + 4]
+            .copy_from_slice(&1u32.to_le_bytes());
+        let base = base_of(&native);
+        let mut after = native.clone();
+        after[TOKEN_AMOUNT_OFFSET..TOKEN_AMOUNT_OFFSET + 8].copy_from_slice(&600u64.to_le_bytes());
+        assert!(
+            lamports_kept(5_000, &base, 4_600, &after),
+            "drop equals amount drop"
+        );
+        assert!(
+            lamports_kept(5_000, &base, 4_700, &after),
+            "drop below amount drop"
+        );
+        assert!(
+            !lamports_kept(5_000, &base, 4_599, &after),
+            "drop beyond amount drop"
+        );
+        assert!(
+            !lamports_kept(5_000, &base, 4_999, &native),
+            "excess lamports, amount unchanged"
+        );
     }
 
     // ── evaluate_pre_actions tests ───────────────────────────────────
