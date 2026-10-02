@@ -27,12 +27,13 @@
 # precompiled std carries the absolute paths it was built under into the
 # program's panic locations: /Users/runner/work/platform-tools/… in the macOS
 # package, /home/runner/work/platform-tools/… in the Linux one. With the same
-# cargo-build-sbf, flags and environment, a Linux build of the recorded commit
-# is mainnet f655b300… (150776 bytes, the recorded size), mainnet-v1 044cdc08…
-# (45848, 8 bytes less), devnet cd253e68…, devnet-v1 7cc0c17a…. The record is
-# for macOS on Apple silicon, where it was made and where GitHub's macos-15
-# runner rebuilds it byte for byte; release builds run there (Intel macOS is
-# not checked).
+# cargo-build-sbf, flags and environment, a Linux build of the source before
+# the heap-capacity fix was mainnet f655b300… (150776 bytes, the macOS size
+# then), mainnet-v1 044cdc08… (45848, 8 bytes less), devnet cd253e68…,
+# devnet-v1 7cc0c17a… (on macOS the fix moved both v2 builds and neither
+# sunset). The record is for macOS on Apple silicon, where it was made and
+# where GitHub's macos-15 runner rebuilds it byte for byte; release builds run
+# there (Intel macOS is not checked).
 #
 # Changing any of these changes every artifact: rebuild with
 # scripts/check-release-hashes.sh, re-record scripts/release-hashes.txt and the

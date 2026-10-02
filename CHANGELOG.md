@@ -6,6 +6,43 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — Execute's heap: buffers sized exactly (program; needs a review before the mainnet deploy)
+
+**Program** (both v2 artifacts change: devnet `3584aec7…` → `1b60f072…`,
+mainnet `4cb80304…` → `ff4978ff…`, 151256 bytes each; both sunset artifacts are
+byte-identical)
+
+- Execute and ExecuteDeferred ran out of heap on payloads a v1 transaction
+  (SIMD-0385, 4096 bytes) carries easily. The heap is a 32 KiB bump allocator
+  that never frees, and two buffers grew by doubling, leaving every smaller copy
+  allocated: the accounts-hash preimage, sized for four accounts per inner
+  instruction, and the account-meta and CPI-account buffers reused across inner
+  instructions, sized for 32. On devnet a passkey Execute failed with "memory
+  allocation failed, out of memory" at one inner instruction of 128 accounts,
+  at 70 + 70 and at 100 + 30; in litesvm also at 16 instructions of 16 accounts,
+  none wider than 64. Both buffers are now sized once from the parsed
+  instructions (`compact::accounts_hash_entries`, `compact::max_inner_accounts`).
+  For any payload this allocates no more than before, so nothing that landed
+  before can fail. One inner instruction can now name all 255 accounts the
+  compact format allows (127 before), 16 equal ones about 41 each (15 before).
+  What bounds a payload now is the preimage itself, 33 bytes per hashed
+  account, taken in one piece; `docs/Architecture.md` (Compact instruction
+  format) gives the allocation formula. Nothing else changes: no account,
+  instruction or challenge layout. A payload too large for the heap now fails
+  at the first allocation rather than part-way through the accounts-hash walk.
+- The 16-inner-instruction cap is unchanged, and documented as a limit a v1
+  transaction can reach.
+- Compute, measured on identical state: within 35 CU for an inner instruction
+  of up to two accounts, up to 880 CU less for wider ones, up to 575 CU more
+  for 16 inner instructions of 8 accounts.
+- Tests: `program/tests/heap_capacity_tests.rs` (litesvm; passkey Execute,
+  ExecuteDeferred, Ed25519 Execute) fails against `3584aec7…` with out of
+  memory in every case but the 16-instruction cap, and passes now; a unit test
+  pins the exact capacities.
+- Devnet's v2 runs `3584aec7…` and needs an upgrade to get the fix. The v2
+  hashes in `scripts/release-hashes.txt` and in the deploy checklist's tables
+  changed, and the two-id rehearsal has not been re-run on the new artifacts.
+
 ### Fixed — review follow-ups: a failed fee read, the finalized lag, the deploy commands
 
 **SDKs** (`@lazorkit/sdk-legacy` 1.3.1, `@lazorkit/sdk` 1.0.0-rc.5)
