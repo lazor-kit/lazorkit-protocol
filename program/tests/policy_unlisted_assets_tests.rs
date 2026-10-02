@@ -61,6 +61,9 @@ const DECIMALS: u8 = 6;
 /// `TokenLimit.remaining` and `SolLimit.remaining`, relative to the action data.
 const TOKEN_REMAINING: usize = 32;
 const SOL_REMAINING: usize = 0;
+/// `TokenRecurringLimit.spent` and `SolRecurringLimit.spent`, likewise.
+const TOKEN_RECURRING_SPENT: usize = 40;
+const SOL_RECURRING_SPENT: usize = 8;
 
 /// Every Execute here lays its accounts out as `0` payer · `1` wallet ·
 /// `2` authority · `3` vault · `4` the actor's key, then whatever the test adds.
@@ -792,17 +795,49 @@ struct Unlisted {
 }
 
 fn unlisted_fixture(fx: &mut Fx) -> Unlisted {
-    let listed = listed_session(fx, 1_000, 5_000);
-    let b = fx.mint();
+    unlisted_fixture_with(fx, |a| token_limit_policy(a, 1_000))
+}
+
+/// [`unlisted_fixture`], the session's actions built for A by `actions`.
+fn unlisted_fixture_with(fx: &mut Fx, actions: impl FnOnce(Pubkey) -> Vec<u8>) -> Unlisted {
+    let mint = fx.mint();
     let vault = fx.vault();
+    let vault_ata = fx.token_account(mint, vault, 5_000);
+    let actor = fx.session(&actions(mint));
+    let b = fx.mint();
     let vault_b = fx.token_account(b, vault, 5_000);
     let dest_b = fx.token_account(b, Pubkey::new_unique(), 0);
     Unlisted {
-        listed,
+        listed: Listed {
+            actor,
+            mint,
+            vault_ata,
+        },
         b,
         vault_b,
         dest_b,
     }
+}
+
+/// A transfer of `amount` of B out of the vault, which no action names.
+fn unlisted_transfer_exec(u: &Unlisted, amount: u64) -> Exec {
+    let mut exec = Exec::new(&u.listed.actor);
+    let token = exec.readonly(spl_token_id());
+    let src = exec.writable(u.vault_b);
+    let dst = exec.writable(u.dest_b);
+    transfer(&mut exec, token, src, dst, IDX_VAULT, amount);
+    exec
+}
+
+/// A transfer of `amount` of the listed mint A out of the vault.
+fn listed_transfer_exec(fx: &mut Fx, u: &Unlisted, amount: u64) -> (Exec, Pubkey) {
+    let dest = fx.token_account(u.listed.mint, Pubkey::new_unique(), 0);
+    let mut exec = Exec::new(&u.listed.actor);
+    let token = exec.readonly(spl_token_id());
+    let src = exec.writable(u.listed.vault_ata);
+    let dst = exec.writable(dest);
+    transfer(&mut exec, token, src, dst, IDX_VAULT, amount);
+    (exec, dest)
 }
 
 #[test]
@@ -810,11 +845,7 @@ fn n1_transfer_of_an_unlisted_mint_is_refused() {
     let mut fx = Fx::new();
     let u = unlisted_fixture(&mut fx);
 
-    let mut exec = Exec::new(&u.listed.actor);
-    let token = exec.readonly(spl_token_id());
-    let src = exec.writable(u.vault_b);
-    let dst = exec.writable(u.dest_b);
-    transfer(&mut exec, token, src, dst, IDX_VAULT, 100);
+    let exec = unlisted_transfer_exec(&u, 100);
     assert_custom_error(fx.execute(&u.listed.actor, exec), ERR_UNLISTED_TOKEN, "N1");
     assert_eq!(fx.amount(u.vault_b), 5_000);
 }
@@ -1302,6 +1333,83 @@ fn n18_closing_an_existing_wsol_account_is_refused() {
         spl_close_account_data(),
     );
     assert_custom_error(fx.execute(&actor, exec), ERR_TOKEN_AUTHORITY_CHANGED, "N18");
+}
+
+/// Every `Token*` type names its mint, not only `TokenLimit`: a
+/// `TokenMaxPerTx(A)` session moves A within its cap, and B not at all.
+#[test]
+fn n19_token_max_per_tx_alone_names_its_mint_only() {
+    let mut fx = Fx::new();
+    let u = unlisted_fixture_with(&mut fx, |a| action_token_max_per_tx(a, 1_000));
+
+    let exec = unlisted_transfer_exec(&u, 100);
+    assert_custom_error(
+        fx.execute(&u.listed.actor, exec),
+        ERR_UNLISTED_TOKEN,
+        "N19 B",
+    );
+    assert_eq!(fx.amount(u.vault_b), 5_000);
+
+    let (exec, dest) = listed_transfer_exec(&mut fx, &u, 400);
+    fx.execute_ok(&u.listed.actor, exec, "N19 A within the cap");
+    assert_eq!(fx.amount(u.listed.vault_ata), 4_600);
+    assert_eq!(fx.amount(dest), 400);
+}
+
+/// A `TokenRecurringLimit(A)` session moves A within its window's limit, and
+/// the move is charged to `spent`; B it cannot move.
+#[test]
+fn n20_token_recurring_limit_alone_names_its_mint_only() {
+    let mut fx = Fx::new();
+    let u = unlisted_fixture_with(&mut fx, |a| action_token_recurring_limit(a, 1_000, 1_000));
+
+    let exec = unlisted_transfer_exec(&u, 100);
+    assert_custom_error(
+        fx.execute(&u.listed.actor, exec),
+        ERR_UNLISTED_TOKEN,
+        "N20 B",
+    );
+
+    let (exec, dest) = listed_transfer_exec(&mut fx, &u, 400);
+    fx.execute_ok(&u.listed.actor, exec, "N20 A within the limit");
+    assert_eq!(fx.amount(dest), 400);
+    assert_eq!(
+        session_action_u64(
+            &fx.context.svm,
+            u.listed.actor.pda,
+            0,
+            TOKEN_RECURRING_SPENT
+        ),
+        400
+    );
+}
+
+/// A recurring SOL limit names SOL and nothing else, and SOL it moves is
+/// charged to `spent`.
+#[test]
+fn n21_sol_recurring_limit_alone_names_sol_only() {
+    let mut fx = Fx::new();
+    let mint = fx.mint();
+    let vault = fx.vault();
+    let vault_ata = fx.token_account(mint, vault, 5_000);
+    let dest = fx.token_account(mint, Pubkey::new_unique(), 0);
+    let actor = fx.session(&action_sol_recurring_limit(1_000_000, 1_000));
+
+    let mut exec = Exec::new(&actor);
+    let token = exec.readonly(spl_token_id());
+    let src = exec.writable(vault_ata);
+    let dst = exec.writable(dest);
+    transfer(&mut exec, token, src, dst, IDX_VAULT, 100);
+    assert_custom_error(fx.execute(&actor, exec), ERR_UNLISTED_TOKEN, "N21 token");
+
+    let recipient = Pubkey::new_unique();
+    let exec = sol_transfer_exec(&actor, recipient, 500_000);
+    fx.execute_ok(&actor, exec, "N21 SOL within the limit");
+    assert_eq!(fx.lamports(&recipient), 500_000);
+    assert_eq!(
+        session_action_u64(&fx.context.svm, actor.pda, 0, SOL_RECURRING_SPENT),
+        500_000
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────

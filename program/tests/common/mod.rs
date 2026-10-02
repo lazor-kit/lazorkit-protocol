@@ -986,7 +986,7 @@ pub fn execute_data(instructions: &[(u8, Vec<u8>, Vec<u8>)]) -> Vec<u8> {
 }
 
 /// A one-transfer `Execute` authorized by an Ed25519 authority PDA and its
-/// signer, laid out as [`ed25519_execute_accounts`]. Lifted from `repro_h2`.
+/// signer, laid out as [`ed25519_execute_accounts`].
 pub fn execute_as(
     context: &TestContext,
     wallet: &WalletFixture,
