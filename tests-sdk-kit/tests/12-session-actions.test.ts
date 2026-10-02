@@ -11,19 +11,30 @@
  *   - Combined actions (whitelist+limits, stricter wins)
  *   - Whitelist+Blacklist conflict at creation
  *   - Session isolation (two sessions independent)
+ *   - Unlisted assets (D13): a policy with no Sol* action moves no SOL (3037),
+ *     a mint no Token* action names may not leave (3038), inflows always pass
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import * as crypto from 'node:crypto';
+import { getCreateAccountInstruction } from '@solana-program/system';
 import {
+  AccountRole,
   generateKeyPairSigner,
+  getAddressEncoder,
   type Address,
+  type Instruction,
   type KeyPairSigner,
 } from '@solana/kit';
 import {
   Actions,
   LazorKit,
+  ROLE_SPENDER,
   SYSTEM_PROGRAM_ADDRESS,
+  TOKEN_PROGRAM_ADDRESS,
+  createAssociatedTokenAccountIdempotentIx,
   ed25519,
+  getAssociatedTokenAddress,
+  serializeActions,
   session,
   type SessionAction,
 } from '@lazorkit/sdk';
@@ -40,6 +51,11 @@ import {
 } from './common.js';
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+
+/** `ActionUnlistedSolOutflow`: SOL left and no Sol* action names it. */
+const ERR_UNLISTED_SOL = 3037;
+/** `ActionUnlistedTokenOutflow`: a mint left and no Token* action names it. */
+const ERR_UNLISTED_TOKEN = 3038;
 
 describe('Session Actions', () => {
   let ctx: TestContext;
@@ -144,6 +160,8 @@ describe('Session Actions', () => {
     it('allows whitelisted program (SystemProgram)', async () => {
       const { sessionSigner, sessionPda } = await createSessionWith([
         Actions.programWhitelist(SYSTEM_PROGRAM_ADDRESS),
+        // A whitelist names programs, not assets: SOL needs its own action.
+        Actions.solLimit(LAMPORTS_PER_SOL),
       ]);
       const recipient = (await generateKeyPairSigner()).address;
       await sendTx(
@@ -152,6 +170,19 @@ describe('Session Actions', () => {
         [sessionSigner],
       );
       expect(await getBalance(ctx, recipient)).toBe(1_000_000n);
+    });
+
+    it('whitelist with no SOL action — SOL cannot leave', async () => {
+      const { sessionSigner, sessionPda } = await createSessionWith([
+        Actions.programWhitelist(SYSTEM_PROGRAM_ADDRESS),
+      ]);
+      const recipient = (await generateKeyPairSigner()).address;
+      await sendTxExpectError(
+        ctx,
+        await transferIxs(sessionSigner, sessionPda, recipient, 1_000_000n),
+        [sessionSigner],
+        ERR_UNLISTED_SOL,
+      );
     });
 
     it('rejects non-whitelisted program', async () => {
@@ -173,6 +204,7 @@ describe('Session Actions', () => {
       const { sessionSigner, sessionPda } = await createSessionWith([
         Actions.programWhitelist(SYSTEM_PROGRAM_ADDRESS),
         Actions.programWhitelist(extra),
+        Actions.solLimit(LAMPORTS_PER_SOL),
       ]);
       const recipient = (await generateKeyPairSigner()).address;
       await sendTx(
@@ -202,6 +234,7 @@ describe('Session Actions', () => {
       const random = (await generateKeyPairSigner()).address;
       const { sessionSigner, sessionPda } = await createSessionWith([
         Actions.programBlacklist(random),
+        Actions.solLimit(LAMPORTS_PER_SOL),
       ]);
       const recipient = (await generateKeyPairSigner()).address;
       await sendTx(
@@ -210,6 +243,20 @@ describe('Session Actions', () => {
         [sessionSigner],
       );
       expect(await getBalance(ctx, recipient)).toBe(1_000_000n);
+    });
+
+    it('blacklist with no SOL action — SOL cannot leave', async () => {
+      const random = (await generateKeyPairSigner()).address;
+      const { sessionSigner, sessionPda } = await createSessionWith([
+        Actions.programBlacklist(random),
+      ]);
+      const recipient = (await generateKeyPairSigner()).address;
+      await sendTxExpectError(
+        ctx,
+        await transferIxs(sessionSigner, sessionPda, recipient, 1_000_000n),
+        [sessionSigner],
+        ERR_UNLISTED_SOL,
+      );
     });
   });
 
@@ -443,6 +490,168 @@ describe('Session Actions', () => {
       // B works.
       await sendTx(ctx, await transferIxs(b.sessionSigner, b.sessionPda, r2, 3_000_000n), [b.sessionSigner]);
       expect(await getBalance(ctx, r2)).toBe(3_000_000n);
+    });
+  });
+
+  describe('Unlisted assets', () => {
+    const addressEncoder = getAddressEncoder();
+    let mintA: Address;
+    let mintB: Address;
+    let vaultA: Address;
+    let vaultB: Address;
+    let outsiderB: Address;
+
+    /** SPL Token `Transfer` (3), or `MintTo` (7) with the mint first. */
+    function amountIx(tag: 3 | 7, first: Address, second: Address, authority: Address, amount: bigint): Instruction {
+      const data = new Uint8Array(9);
+      data[0] = tag;
+      new DataView(data.buffer).setBigUint64(1, amount, true);
+      return {
+        programAddress: TOKEN_PROGRAM_ADDRESS,
+        accounts: [
+          { address: first, role: AccountRole.WRITABLE },
+          { address: second, role: AccountRole.WRITABLE },
+          { address: authority, role: AccountRole.READONLY_SIGNER },
+        ],
+        data,
+      };
+    }
+    const transferIx = (source: Address, destination: Address, owner: Address, amount: bigint) =>
+      amountIx(3, source, destination, owner, amount);
+
+    /** A fresh SPL Token mint, 0 decimals, the test payer its authority. */
+    async function createMint(): Promise<Address> {
+      const mint = await generateKeyPairSigner();
+      const initializeMint2 = new Uint8Array(35);
+      initializeMint2[0] = 20;
+      initializeMint2.set(addressEncoder.encode(ctx.payer.address), 2);
+      await sendTx(
+        ctx,
+        [
+          getCreateAccountInstruction({
+            payer: ctx.payer,
+            newAccount: mint,
+            lamports: 10_000_000n,
+            space: 82n,
+            programAddress: TOKEN_PROGRAM_ADDRESS,
+          }),
+          {
+            programAddress: TOKEN_PROGRAM_ADDRESS,
+            accounts: [{ address: mint.address, role: AccountRole.WRITABLE }],
+            data: initializeMint2,
+          },
+        ],
+        [mint],
+      );
+      return mint.address;
+    }
+
+    /** `owner`'s ATA for `mint`, created and paid by the test payer, with `amount` minted in. */
+    async function fundedAta(mint: Address, owner: Address, amount: bigint): Promise<Address> {
+      const ata = await getAssociatedTokenAddress(mint, owner, TOKEN_PROGRAM_ADDRESS);
+      const ixs: Instruction[] = [
+        createAssociatedTokenAccountIdempotentIx({
+          payer: ctx.payer.address,
+          ata,
+          owner,
+          mint,
+          tokenProgram: TOKEN_PROGRAM_ADDRESS,
+        }),
+      ];
+      if (amount > 0n) ixs.push(amountIx(7, mint, ata, ctx.payer.address, amount));
+      await sendTx(ctx, ixs);
+      return ata;
+    }
+
+    async function tokenAmount(account: Address): Promise<bigint> {
+      const { value } = await ctx.rpc
+        .getAccountInfo(account, { commitment: 'confirmed', encoding: 'base64' })
+        .send();
+      const data = Buffer.from(value!.data[0], 'base64');
+      return data.readBigUInt64LE(64);
+    }
+
+    async function executeIxs(signer: Parameters<LazorKit['execute']>[0]['signer'], instructions: Instruction[]) {
+      const { instructions: ixs } = await client.execute({
+        payer: ctx.payer.address,
+        walletPda,
+        signer,
+        instructions,
+      });
+      return ixs;
+    }
+
+    beforeAll(async () => {
+      mintA = await createMint();
+      mintB = await createMint();
+      vaultA = await fundedAta(mintA, vaultPda, 1_000_000n);
+      vaultB = await fundedAta(mintB, vaultPda, 1_000_000n);
+      outsiderB = await fundedAta(mintB, (await generateKeyPairSigner()).address, 0n);
+    });
+
+    it('TokenLimit(A) — moving A is charged, moving B is refused', async () => {
+      const { sessionSigner, sessionPda } = await createSessionWith([
+        Actions.tokenLimit({ mint: mintA, remaining: 1_000n }),
+        Actions.programWhitelist(TOKEN_PROGRAM_ADDRESS),
+      ]);
+      const outsiderA = await fundedAta(mintA, (await generateKeyPairSigner()).address, 0n);
+      const signer = session(sessionPda, sessionSigner.address);
+
+      await sendTx(ctx, await executeIxs(signer, [transferIx(vaultA, outsiderA, vaultPda, 400n)]), [sessionSigner]);
+      expect(await tokenAmount(outsiderA)).toBe(400n);
+
+      const before = await tokenAmount(vaultB);
+      await sendTxExpectError(
+        ctx,
+        await executeIxs(signer, [transferIx(vaultB, outsiderB, vaultPda, 1n)]),
+        [sessionSigner],
+        ERR_UNLISTED_TOKEN,
+      );
+      expect(await tokenAmount(vaultB)).toBe(before);
+    });
+
+    it('an inflow of an unlisted mint passes', async () => {
+      const { sessionSigner, sessionPda } = await createSessionWith([
+        Actions.tokenLimit({ mint: mintA, remaining: 1_000n }),
+        Actions.programWhitelist(TOKEN_PROGRAM_ADDRESS),
+      ]);
+      const sessionB = await fundedAta(mintB, sessionSigner.address, 250n);
+      const before = await tokenAmount(vaultB);
+
+      // The session key signs for its own account; the vault receives.
+      await sendTx(
+        ctx,
+        await executeIxs(session(sessionPda, sessionSigner.address), [
+          transferIx(sessionB, vaultB, sessionSigner.address, 250n),
+        ]),
+        [sessionSigner],
+      );
+      expect(await tokenAmount(vaultB)).toBe(before + 250n);
+    });
+
+    it('a Delegate whose policy names only SOL cannot move a token', async () => {
+      const delegate = await generateKeyPairSigner();
+      const added = await client.addAuthority({
+        payer: ctx.payer.address,
+        walletPda,
+        adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
+        newAuthority: { type: 'ed25519', publicKey: delegate.address },
+        role: ROLE_SPENDER,
+        policy: serializeActions([
+          Actions.solLimit(1_000_000n),
+          Actions.programWhitelist(TOKEN_PROGRAM_ADDRESS),
+        ]),
+      });
+      await sendTx(ctx, added.instructions, [ownerSigner]);
+
+      await sendTxExpectError(
+        ctx,
+        await executeIxs(ed25519(delegate.address, added.newAuthorityPda), [
+          transferIx(vaultB, outsiderB, vaultPda, 1n),
+        ]),
+        [delegate],
+        ERR_UNLISTED_TOKEN,
+      );
     });
   });
 });

@@ -14,12 +14,15 @@
  * - State persistence across transactions
  * - Zero spending passthrough
  * - Vault balance increase (no false positive)
+ * - Unlisted assets (D13): a policy with no Sol* action moves no SOL (3037),
+ *   a mint no Token* action names may not leave (3038), inflows always pass
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
   Keypair,
   PublicKey,
   SystemProgram,
+  TransactionInstruction,
   LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
@@ -32,11 +35,21 @@ import {
 } from './common';
 import {
   LazorKitClient,
+  ROLE_SPENDER,
+  TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotentIx,
   ed25519,
+  getAssociatedTokenAddress,
+  serializeActions,
   session,
   Actions,
   type SessionAction,
 } from '../../sdk/sdk-legacy/src';
+
+/** `ActionUnlistedSolOutflow`: SOL left and no Sol* action names it. */
+const ERR_UNLISTED_SOL = 3037;
+/** `ActionUnlistedTokenOutflow`: a mint left and no Token* action names it. */
+const ERR_UNLISTED_TOKEN = 3038;
 
 describe('Session Actions', () => {
   let ctx: TestContext;
@@ -175,6 +188,8 @@ describe('Session Actions', () => {
     it('allows whitelisted program (SystemProgram)', async () => {
       const { sessionKp, sessionPda } = await createSessionWith([
         Actions.programWhitelist(SystemProgram.programId),
+        // A whitelist names programs, not assets: SOL needs its own action.
+        Actions.solLimit(BigInt(LAMPORTS_PER_SOL)),
       ]);
       const recipient = Keypair.generate().publicKey;
       const ixs = await executeTransfer(
@@ -186,6 +201,21 @@ describe('Session Actions', () => {
 
       await sendTx(ctx, ixs, [sessionKp]);
       expect(await ctx.connection.getBalance(recipient)).toBe(1_000_000);
+    });
+
+    it('whitelist with no SOL action — SOL cannot leave', async () => {
+      const { sessionKp, sessionPda } = await createSessionWith([
+        Actions.programWhitelist(SystemProgram.programId),
+      ]);
+      const recipient = Keypair.generate().publicKey;
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
+
+      await sendTxExpectError(ctx, ixs, [sessionKp], ERR_UNLISTED_SOL);
     });
 
     it('rejects non-whitelisted program', async () => {
@@ -209,6 +239,7 @@ describe('Session Actions', () => {
       const { sessionKp, sessionPda } = await createSessionWith([
         Actions.programWhitelist(SystemProgram.programId),
         Actions.programWhitelist(Keypair.generate().publicKey), // extra allowed program
+        Actions.solLimit(BigInt(LAMPORTS_PER_SOL)),
       ]);
       const recipient = Keypair.generate().publicKey;
       const ixs = await executeTransfer(
@@ -248,6 +279,7 @@ describe('Session Actions', () => {
       const randomProgram = Keypair.generate().publicKey;
       const { sessionKp, sessionPda } = await createSessionWith([
         Actions.programBlacklist(randomProgram), // only blocks randomProgram
+        Actions.solLimit(BigInt(LAMPORTS_PER_SOL)),
       ]);
       const recipient = Keypair.generate().publicKey;
       const ixs = await executeTransfer(
@@ -259,6 +291,21 @@ describe('Session Actions', () => {
 
       await sendTx(ctx, ixs, [sessionKp]);
       expect(await ctx.connection.getBalance(recipient)).toBe(1_000_000);
+    });
+
+    it('blacklist with no SOL action — SOL cannot leave', async () => {
+      const { sessionKp, sessionPda } = await createSessionWith([
+        Actions.programBlacklist(Keypair.generate().publicKey),
+      ]);
+      const recipient = Keypair.generate().publicKey;
+      const ixs = await executeTransfer(
+        sessionKp,
+        sessionPda,
+        recipient,
+        1_000_000,
+      );
+
+      await sendTxExpectError(ctx, ixs, [sessionKp], ERR_UNLISTED_SOL);
     });
   });
 
@@ -607,6 +654,197 @@ describe('Session Actions', () => {
       );
 
       expect(await ctx.connection.getBalance(r2)).toBe(3_000_000);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════
+  // UNLISTED ASSETS (D13)
+  // ═══════════════════════════════════════════════════════════════════
+
+  describe('Unlisted assets', () => {
+    let mintA: PublicKey;
+    let mintB: PublicKey;
+    let vaultA: PublicKey;
+    let vaultB: PublicKey;
+    let outsiderB: PublicKey;
+
+    // SPL Token instructions, by hand: sdk-legacy has no spl-token dependency.
+    function initializeMint2Ix(mint: PublicKey, authority: PublicKey): TransactionInstruction {
+      const data = Buffer.alloc(35);
+      data[0] = 20; // InitializeMint2
+      data[1] = 0; // decimals
+      authority.toBuffer().copy(data, 2);
+      data[34] = 0; // no freeze authority
+      return new TransactionInstruction({
+        programId: TOKEN_PROGRAM_ID,
+        keys: [{ pubkey: mint, isSigner: false, isWritable: true }],
+        data,
+      });
+    }
+
+    function amountIx(
+      tag: number,
+      first: PublicKey,
+      second: PublicKey,
+      authority: PublicKey,
+      amount: bigint,
+    ): TransactionInstruction {
+      const data = Buffer.alloc(9);
+      data[0] = tag;
+      data.writeBigUInt64LE(amount, 1);
+      return new TransactionInstruction({
+        programId: TOKEN_PROGRAM_ID,
+        keys: [
+          { pubkey: first, isSigner: false, isWritable: true },
+          { pubkey: second, isSigner: false, isWritable: true },
+          { pubkey: authority, isSigner: true, isWritable: false },
+        ],
+        data,
+      });
+    }
+    /** `Transfer` (3): source, destination, owner. */
+    const transferIx = (source: PublicKey, destination: PublicKey, owner: PublicKey, amount: bigint) =>
+      amountIx(3, source, destination, owner, amount);
+    /** `MintTo` (7): mint, destination, mint authority. */
+    const mintToIx = (mint: PublicKey, destination: PublicKey, amount: bigint) =>
+      amountIx(7, mint, destination, ctx.payer.publicKey, amount);
+
+    async function createMint(): Promise<PublicKey> {
+      const mint = Keypair.generate();
+      const lamports = await ctx.connection.getMinimumBalanceForRentExemption(82);
+      await sendTx(
+        ctx,
+        [
+          SystemProgram.createAccount({
+            fromPubkey: ctx.payer.publicKey,
+            newAccountPubkey: mint.publicKey,
+            lamports,
+            space: 82,
+            programId: TOKEN_PROGRAM_ID,
+          }),
+          initializeMint2Ix(mint.publicKey, ctx.payer.publicKey),
+        ],
+        [mint],
+      );
+      return mint.publicKey;
+    }
+
+    /** `owner`'s ATA for `mint`, created and paid by the test payer, with `amount` minted in. */
+    async function fundedAta(mint: PublicKey, owner: PublicKey, amount: bigint): Promise<PublicKey> {
+      const ata = getAssociatedTokenAddress(mint, owner, TOKEN_PROGRAM_ID);
+      const ixs = [
+        createAssociatedTokenAccountIdempotentIx({
+          payer: ctx.payer.publicKey,
+          ata,
+          owner,
+          mint,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        }),
+      ];
+      if (amount > 0n) ixs.push(mintToIx(mint, ata, amount));
+      await sendTx(ctx, ixs);
+      return ata;
+    }
+
+    async function tokenAmount(account: PublicKey): Promise<bigint> {
+      const info = await ctx.connection.getAccountInfo(account, 'confirmed');
+      return info!.data.readBigUInt64LE(64);
+    }
+
+    beforeAll(async () => {
+      mintA = await createMint();
+      mintB = await createMint();
+      vaultA = await fundedAta(mintA, vaultPda, 1_000_000n);
+      vaultB = await fundedAta(mintB, vaultPda, 1_000_000n);
+      outsiderB = await fundedAta(mintB, Keypair.generate().publicKey, 0n);
+    });
+
+    async function executeTokenTransfer(
+      signer: ReturnType<typeof session>,
+      source: PublicKey,
+      destination: PublicKey,
+      owner: PublicKey,
+      amount: bigint,
+    ) {
+      const { instructions } = await client.execute({
+        payer: ctx.payer.publicKey,
+        walletPda,
+        signer,
+        instructions: [transferIx(source, destination, owner, amount)],
+      });
+      return instructions;
+    }
+
+    it('TokenLimit(A) — moving A is charged, moving B is refused', async () => {
+      const { sessionKp, sessionPda } = await createSessionWith([
+        Actions.tokenLimit({ mint: mintA, remaining: 1_000n }),
+        Actions.programWhitelist(TOKEN_PROGRAM_ID),
+      ]);
+      const outsiderA = await fundedAta(mintA, Keypair.generate().publicKey, 0n);
+      const signer = session(sessionPda, sessionKp.publicKey);
+
+      await sendTx(
+        ctx,
+        await executeTokenTransfer(signer, vaultA, outsiderA, vaultPda, 400n),
+        [sessionKp],
+      );
+      expect(await tokenAmount(outsiderA)).toBe(400n);
+
+      const before = await tokenAmount(vaultB);
+      await sendTxExpectError(
+        ctx,
+        await executeTokenTransfer(signer, vaultB, outsiderB, vaultPda, 1n),
+        [sessionKp],
+        ERR_UNLISTED_TOKEN,
+      );
+      expect(await tokenAmount(vaultB)).toBe(before);
+    });
+
+    it('an inflow of an unlisted mint passes', async () => {
+      const { sessionKp, sessionPda } = await createSessionWith([
+        Actions.tokenLimit({ mint: mintA, remaining: 1_000n }),
+        Actions.programWhitelist(TOKEN_PROGRAM_ID),
+      ]);
+      const sessionB = await fundedAta(mintB, sessionKp.publicKey, 250n);
+      const before = await tokenAmount(vaultB);
+
+      // The session key signs for its own account; the vault receives.
+      await sendTx(
+        ctx,
+        await executeTokenTransfer(
+          session(sessionPda, sessionKp.publicKey),
+          sessionB,
+          vaultB,
+          sessionKp.publicKey,
+          250n,
+        ),
+        [sessionKp],
+      );
+      expect(await tokenAmount(vaultB)).toBe(before + 250n);
+    });
+
+    it('a Delegate whose policy names only SOL cannot move a token', async () => {
+      const delegateKp = Keypair.generate();
+      const { instructions, newAuthorityPda } = await client.addAuthority({
+        payer: ctx.payer.publicKey,
+        walletPda,
+        adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
+        newAuthority: { type: 'ed25519', publicKey: delegateKp.publicKey },
+        role: ROLE_SPENDER,
+        policy: serializeActions([
+          Actions.solLimit(1_000_000n),
+          Actions.programWhitelist(TOKEN_PROGRAM_ID),
+        ]),
+      });
+      await sendTx(ctx, instructions, [ownerKp]);
+
+      const { instructions: executeIxs } = await client.execute({
+        payer: ctx.payer.publicKey,
+        walletPda,
+        signer: ed25519(delegateKp.publicKey, newAuthorityPda),
+        instructions: [transferIx(vaultB, outsiderB, vaultPda, 1n)],
+      });
+      await sendTxExpectError(ctx, executeIxs, [delegateKp], ERR_UNLISTED_TOKEN);
     });
   });
 });
