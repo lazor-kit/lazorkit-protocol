@@ -39,8 +39,8 @@ pub enum AuthError {
     /// A vault-owned token account changed other than its balance, or a token
     /// account that became vault-owned during the Execute carries a delegate
     /// or close authority. Raised for any signer that carries a policy, not
-    /// only sessions: owner, delegate, close authority, state, is_native and
-    /// data length are frozen, `delegated_amount` may only fall, and the
+    /// only sessions: mint, owner, delegate, close authority, state, is_native
+    /// and data length are frozen, `delegated_amount` may only fall, and the
     /// account's lamports may fall only with a native account's `amount`.
     SessionTokenAuthorityChanged = 3032,
     // Rank + policy (authority-level spending limits)

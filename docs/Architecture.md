@@ -499,11 +499,17 @@ net SOL and its net balance of each mint, measured over the token accounts it
 owned before the CPIs, cannot fall unless an action names that asset. Before
 D13 a policy bounded only what its actions covered: a `ProgramWhitelist` with no
 `SolLimit` left SOL uncapped, and a `TokenLimit(USDC)` left every other mint the
-vault held uncapped. A whitelist-only policy now moves no value at all; it can
-still call programs that move none, or that pay the vault.
+vault held uncapped. A whitelist-only policy can now lower neither the vault's
+SOL nor its balance of any mint in the token accounts it owns; value the vault
+controls any other way is bounded only by the whitelist (see *What it does not
+reach* below).
 
-What the program checks, after the CPI loop, in this order (state is written
-only once all pass):
+After the CPI loop the program holds the Execute to the invariants below. The
+rows are not the order of the checks: it checks I-0, then I-2 and I-3, then the
+`Sol*` limits of I-6 (3023–3025), the `Token*` limits (I-4), unlisted SOL (I-6,
+3037) and last unlisted mints (I-5, 3038). The first failure is the error, so
+an Execute that breaks two rules gets the earlier one's. State is written only
+once all pass.
 
 | | Invariant | Error |
 |---|---|---|

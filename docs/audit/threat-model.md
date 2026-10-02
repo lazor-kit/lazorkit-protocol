@@ -59,10 +59,12 @@ sign for me."
   bounds what it does not name as well: SOL may leave only under a `Sol*`
   action, and a mint only under a `Token*` action naming it (3037 / 3038), net
   over the Execute, over the vault's lamports and the token accounts it owns.
-  A whitelist-only policy moves no value. What a granter still chooses is the
-  size of each limit. Value the vault controls other than those balances
-  (stake, nonce and seed-derived accounts, positions in other programs,
-  authorities it holds) is bounded only by the program whitelist; the list is
-  in `docs/Architecture.md` ("What a policy bounds").
+  A whitelist-only policy can lower neither, and what a granter still chooses
+  is the size of each limit. Value the vault controls other than those
+  balances (stake, nonce and seed-derived accounts, positions in other
+  programs, authorities it holds) is bounded only by the program whitelist,
+  and what it releases into the vault during the Execute can leave in the
+  same Execute, since the net does not change; the list is in
+  `docs/Architecture.md` ("What a policy bounds").
 - The **upgrade authority is all-powerful** by Solana's design; the program
   cannot constrain it. Key management is out of scope for the code audit.
