@@ -336,9 +336,24 @@ pub struct WalletFixture {
 
 /// Create a wallet with a single Ed25519 Owner authority, and fund its vault.
 pub fn create_ed25519_wallet(context: &mut TestContext, vault_lamports: u64) -> WalletFixture {
-    let user_seed = rand::random::<[u8; 32]>();
-    let owner = Keypair::new();
+    create_ed25519_wallet_with(
+        context,
+        vault_lamports,
+        rand::random::<[u8; 32]>(),
+        Keypair::new(),
+    )
+}
 
+/// [`create_ed25519_wallet`] at a chosen seed and owner, so every PDA, and the
+/// bump search that finds it, is the same from run to run. Compute-unit
+/// measurements need that: each extra bump `find_program_address` tries costs
+/// about 1,500 CU.
+pub fn create_ed25519_wallet_with(
+    context: &mut TestContext,
+    vault_lamports: u64,
+    user_seed: [u8; 32],
+    owner: Keypair,
+) -> WalletFixture {
     let (wallet_pda, _) = Pubkey::find_program_address(
         &[lazorkit_program::seeds::WALLET, &user_seed],
         &context.program_id,
@@ -532,6 +547,67 @@ pub fn action_token_limit(mint: Pubkey, remaining: u64) -> Vec<u8> {
     action(4, &data)
 }
 
+/// `SolRecurringLimit` — lamport cap per window of `window` slots.
+/// Data: `[limit u64][spent u64][window u64][last_reset u64]`.
+pub fn action_sol_recurring_limit(limit: u64, window: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(32);
+    data.extend_from_slice(&limit.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // spent
+    data.extend_from_slice(&window.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // last_reset
+    action(2, &data)
+}
+
+/// `SolMaxPerTx` — lamports per Execute. Data: `[max u64]`.
+pub fn action_sol_max_per_tx(max: u64) -> Vec<u8> {
+    action(3, &max.to_le_bytes())
+}
+
+/// `TokenRecurringLimit` — cap per window for one mint.
+/// Data: `[mint 32][limit u64][spent u64][window u64][last_reset u64]`.
+pub fn action_token_recurring_limit(mint: Pubkey, limit: u64, window: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(64);
+    data.extend_from_slice(mint.as_ref());
+    data.extend_from_slice(&limit.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // spent
+    data.extend_from_slice(&window.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes()); // last_reset
+    action(5, &data)
+}
+
+/// `TokenMaxPerTx` — cap per Execute for one mint. Data: `[mint 32][max u64]`.
+pub fn action_token_max_per_tx(mint: Pubkey, max: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(40);
+    data.extend_from_slice(mint.as_ref());
+    data.extend_from_slice(&max.to_le_bytes());
+    action(6, &data)
+}
+
+/// `ProgramBlacklist` — refuse CPI to this program. Data: `[program 32]`.
+pub fn action_program_blacklist(program: Pubkey) -> Vec<u8> {
+    action(11, program.as_ref())
+}
+
+/// A `u64` field of action `action_idx` in a policy buffer stored from byte 80:
+/// a session's actions, or an Ed25519 authority's policy. `field_off` is
+/// relative to the action's data (`SolLimit.remaining` is 0,
+/// `TokenLimit.remaining` 32).
+pub fn session_action_u64(
+    svm: &LiteSVM,
+    policy_account: Pubkey,
+    action_idx: usize,
+    field_off: usize,
+) -> u64 {
+    let buf = session_actions(svm, policy_account);
+    let mut cursor = 0;
+    for _ in 0..action_idx {
+        let data_len = u16::from_le_bytes([buf[cursor + 1], buf[cursor + 2]]) as usize;
+        cursor += 11 + data_len;
+    }
+    let at = cursor + 11 + field_off;
+    u64::from_le_bytes(buf[at..at + 8].try_into().unwrap())
+}
+
 // ─── SPL Token (layout-level fixtures) ───────────────────────────────────
 //
 // Accounts are written directly rather than built through SPL Token
@@ -624,6 +700,317 @@ pub fn spl_set_authority_data(authority_type: u8, new_authority: Pubkey) -> Vec<
     data.push(1); // COption::Some
     data.extend_from_slice(new_authority.as_ref());
     data
+}
+
+pub fn spl_token_2022_id() -> Pubkey {
+    Pubkey::try_from("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap()
+}
+
+pub fn ata_program_id() -> Pubkey {
+    Pubkey::try_from("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap()
+}
+
+/// The wrapped-SOL mint. litesvm does not create it; [`create_native_mint`]
+/// writes it.
+pub fn native_mint() -> Pubkey {
+    Pubkey::try_from("So11111111111111111111111111111111111111112").unwrap()
+}
+
+/// The associated token account of `owner` for `mint` under `token_program`.
+pub fn ata_address(owner: Pubkey, mint: Pubkey, token_program: Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+        &ata_program_id(),
+    )
+    .0
+}
+
+/// A mint under `program`, written by hand like [`create_mint`].
+///
+/// `extensions` is Token-2022 TLV (`[type u16][len u16][value]` …). When it is
+/// not empty the base is padded to 165 bytes and byte 165 is the account type,
+/// 1 (Mint), as Token-2022 lays an extended mint out.
+#[allow(clippy::too_many_arguments)]
+pub fn create_mint_with(
+    svm: &mut LiteSVM,
+    program: Pubkey,
+    mint: Pubkey,
+    authority: Pubkey,
+    freeze: Option<Pubkey>,
+    supply: u64,
+    decimals: u8,
+    extensions: &[u8],
+) {
+    let mut data = vec![0u8; 82];
+    data[0..4].copy_from_slice(&1u32.to_le_bytes()); // COption::Some
+    data[4..36].copy_from_slice(authority.as_ref());
+    data[36..44].copy_from_slice(&supply.to_le_bytes());
+    data[44] = decimals;
+    data[45] = 1; // is_initialized
+    if let Some(freeze) = freeze {
+        data[46..50].copy_from_slice(&1u32.to_le_bytes());
+        data[50..82].copy_from_slice(freeze.as_ref());
+    }
+    if !extensions.is_empty() {
+        data.resize(165, 0);
+        data.push(1); // AccountType::Mint
+        data.extend_from_slice(extensions);
+    }
+    let lamports = svm.minimum_balance_for_rent_exemption(data.len());
+    svm.set_account(
+        mint,
+        solana_sdk::account::Account {
+            lamports,
+            data,
+            owner: program,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .expect("set mint account");
+}
+
+/// The wrapped-SOL mint under SPL Token: 9 decimals, no authority.
+pub fn create_native_mint(svm: &mut LiteSVM) {
+    create_mint_with(
+        svm,
+        spl_token_id(),
+        native_mint(),
+        Pubkey::default(),
+        None,
+        0,
+        9,
+        &[],
+    );
+    // A native mint has no mint authority.
+    let mut account = svm.get_account(&native_mint()).unwrap();
+    account.data[0..36].fill(0);
+    svm.set_account(native_mint(), account).unwrap();
+}
+
+/// The optional fields of a hand-written token account.
+#[derive(Default)]
+pub struct TokenAccountOpts {
+    /// `(delegate, delegated_amount)`.
+    pub delegate: Option<(Pubkey, u64)>,
+    pub close_authority: Option<Pubkey>,
+    /// Makes the account native (wSOL): `is_native = Some(reserve)`, and its
+    /// lamports `reserve + amount`.
+    pub native_reserve: Option<u64>,
+    /// Lamports above what the account needs.
+    pub extra_lamports: u64,
+    /// Token-2022 TLV. When not empty, byte 165 is the account type, 2
+    /// (Account), and the TLV follows.
+    pub extensions: Vec<u8>,
+}
+
+/// A token account under `program`, every field written by hand at the
+/// offsets `processor/execute/actions.rs` reads.
+pub fn create_token_account_with(
+    svm: &mut LiteSVM,
+    program: Pubkey,
+    address: Pubkey,
+    mint: Pubkey,
+    owner: Pubkey,
+    amount: u64,
+    opts: TokenAccountOpts,
+) {
+    let mut data = vec![0u8; 165];
+    data[0..32].copy_from_slice(mint.as_ref());
+    data[32..64].copy_from_slice(owner.as_ref());
+    data[64..72].copy_from_slice(&amount.to_le_bytes());
+    if let Some((delegate, delegated_amount)) = opts.delegate {
+        data[72..76].copy_from_slice(&1u32.to_le_bytes());
+        data[76..108].copy_from_slice(delegate.as_ref());
+        data[121..129].copy_from_slice(&delegated_amount.to_le_bytes());
+    }
+    data[108] = 1; // AccountState::Initialized
+    if let Some(reserve) = opts.native_reserve {
+        data[109..113].copy_from_slice(&1u32.to_le_bytes());
+        data[113..121].copy_from_slice(&reserve.to_le_bytes());
+    }
+    if let Some(close_authority) = opts.close_authority {
+        data[129..133].copy_from_slice(&1u32.to_le_bytes());
+        data[133..165].copy_from_slice(close_authority.as_ref());
+    }
+    if !opts.extensions.is_empty() {
+        data.push(2); // AccountType::Account
+        data.extend_from_slice(&opts.extensions);
+    }
+    let lamports = match opts.native_reserve {
+        Some(reserve) => reserve + amount,
+        None => svm.minimum_balance_for_rent_exemption(data.len()),
+    } + opts.extra_lamports;
+    svm.set_account(
+        address,
+        solana_sdk::account::Account {
+            lamports,
+            data,
+            owner: program,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .expect("set token account");
+}
+
+/// The `amount` of a token account (bytes 64..72).
+pub fn token_amount(svm: &LiteSVM, address: Pubkey) -> u64 {
+    let data = svm.get_account(&address).expect("token account").data;
+    u64::from_le_bytes(data[64..72].try_into().unwrap())
+}
+
+/// The `close_authority` COption of a token account (bytes 129..165).
+pub fn token_account_close_authority(svm: &LiteSVM, address: Pubkey) -> Option<Pubkey> {
+    let data = svm.get_account(&address).expect("token account").data;
+    if u32::from_le_bytes(data[129..133].try_into().unwrap()) == 1 {
+        Some(Pubkey::try_from(&data[133..165]).expect("close authority field"))
+    } else {
+        None
+    }
+}
+
+// SPL Token instruction data. Tags are the same in SPL Token 3.5.0 and
+// Token-2022 5.0.2, the versions litesvm 0.6 loads.
+
+/// `Transfer`: `[3][amount u64]`. Accounts: source, destination, authority.
+pub fn spl_transfer_data(amount: u64) -> Vec<u8> {
+    spl_amount_data(3, amount)
+}
+
+/// `Approve`: `[4][amount u64]`. Accounts: source, delegate, owner.
+pub fn spl_approve_data(amount: u64) -> Vec<u8> {
+    spl_amount_data(4, amount)
+}
+
+/// `Burn`: `[8][amount u64]`. Accounts: account, mint, authority.
+pub fn spl_burn_data(amount: u64) -> Vec<u8> {
+    spl_amount_data(8, amount)
+}
+
+/// `CloseAccount`: `[9]`. Accounts: account, destination, owner.
+pub fn spl_close_account_data() -> Vec<u8> {
+    vec![9]
+}
+
+/// `FreezeAccount`: `[10]`. Accounts: account, mint, freeze authority.
+pub fn spl_freeze_account_data() -> Vec<u8> {
+    vec![10]
+}
+
+/// `TransferChecked`: `[12][amount u64][decimals u8]`. Accounts: source, mint,
+/// destination, authority.
+pub fn spl_transfer_checked_data(amount: u64, decimals: u8) -> Vec<u8> {
+    let mut data = spl_amount_data(12, amount);
+    data.push(decimals);
+    data
+}
+
+/// `SyncNative`: `[17]`. Accounts: the native account.
+pub fn spl_sync_native_data() -> Vec<u8> {
+    vec![17]
+}
+
+/// `InitializeAccount3`: `[18][owner 32]`. Accounts: account, mint.
+pub fn spl_initialize_account3_data(owner: Pubkey) -> Vec<u8> {
+    let mut data = vec![18];
+    data.extend_from_slice(owner.as_ref());
+    data
+}
+
+/// Token-2022 `Reallocate`: `[29][extension type u16]…`. Accounts: account,
+/// payer, system program, owner.
+pub fn token_2022_reallocate_data(extension_types: &[u16]) -> Vec<u8> {
+    let mut data = vec![29];
+    for t in extension_types {
+        data.extend_from_slice(&t.to_le_bytes());
+    }
+    data
+}
+
+/// Token-2022 `WithdrawExcessLamports`: `[38]`. Accounts: source, destination,
+/// authority.
+pub fn token_2022_withdraw_excess_lamports_data() -> Vec<u8> {
+    vec![38]
+}
+
+/// ATA `CreateIdempotent`: `[1]`. Accounts: funder, ATA, owner, mint, system
+/// program, token program.
+pub fn ata_create_idempotent_data() -> Vec<u8> {
+    vec![1]
+}
+
+fn spl_amount_data(tag: u8, amount: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(9);
+    data.push(tag);
+    data.extend_from_slice(&amount.to_le_bytes());
+    data
+}
+
+// ─── Execute, generalised ────────────────────────────────────────────────
+
+/// A compact account index with the forward-signer bit set: the inner
+/// instruction may use this outer signer's signature (see
+/// `compact::ACCOUNT_INDEX_FORWARD_SIGNER`).
+pub fn forward_signer(index: u8) -> u8 {
+    index | 0x80
+}
+
+/// Account list for an `Execute` authorized by `authority_pda` — a session or
+/// an authority — with `extra` from index 4, then the fee suffix:
+///   `0` payer · `1` wallet · `2` authority · `3` vault · `4..` `extra`
+///
+/// The key that authenticates `authority_pda` goes in `extra` as a signer.
+/// Generalises `repro_h4`'s `token_execute_accounts`.
+pub fn execute_accounts(
+    context: &TestContext,
+    wallet: &WalletFixture,
+    authority_pda: Pubkey,
+    extra: Vec<AccountMeta>,
+) -> Vec<AccountMeta> {
+    let mut accounts = vec![
+        AccountMeta::new(context.payer.pubkey(), true),
+        AccountMeta::new_readonly(wallet.wallet_pda, false),
+        AccountMeta::new(authority_pda, false),
+        AccountMeta::new(wallet.vault_pda, false),
+    ];
+    accounts.extend(extra);
+    with_protocol_fee_accounts(accounts, context)
+}
+
+/// `Execute` instruction data: discriminator 4, then the compact instructions.
+pub fn execute_data(instructions: &[(u8, Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut data = vec![4u8];
+    data.extend_from_slice(&encode_compact(instructions));
+    data
+}
+
+/// A one-transfer `Execute` authorized by an Ed25519 authority PDA and its
+/// signer, laid out as [`ed25519_execute_accounts`]. Lifted from `repro_h2`.
+pub fn execute_as(
+    context: &TestContext,
+    wallet: &WalletFixture,
+    authority_pda: Pubkey,
+    signer: &Keypair,
+    recipient: Pubkey,
+    lamports: u64,
+) -> Instruction {
+    Instruction {
+        program_id: context.program_id,
+        accounts: with_protocol_fee_accounts(
+            vec![
+                AccountMeta::new(context.payer.pubkey(), true),
+                AccountMeta::new_readonly(wallet.wallet_pda, false),
+                AccountMeta::new(authority_pda, false),
+                AccountMeta::new(wallet.vault_pda, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new(recipient, false),
+                AccountMeta::new_readonly(signer.pubkey(), true),
+            ],
+            context,
+        ),
+        data: vault_transfer_execute_data(lamports),
+    }
 }
 
 /// Load a pre-built fixture `.so`, searching the places the build script and
