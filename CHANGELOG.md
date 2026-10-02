@@ -6,6 +6,108 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — ownership proofs and messages get their own passkey challenges
+
+**SDKs** (`@lazorkit/sdk-legacy` 1.4.0, `@lazorkit/sdk` 1.0.0-rc.6)
+
+The programs approve a transaction by the challenge in a passkey signature, and
+a passkey signs whatever challenge it is handed. lazor-kit #113
+(`@lazorkit/wallet` 3.3.1, `@lazorkit/wallet-mobile-adapter` 2.3.1) gave each
+kind of challenge the wallet packages ask a passkey for its own shape; both
+SDKs now give the same bytes. The lengths differ and so do the tags, so no
+challenge of one kind can equal one of another:
+
+| Kind | Challenge | Length |
+|---|---|---|
+| Transaction (unchanged) | SHA-256 of the instruction's inputs | 32 |
+| Message | `tag ‖ SHA-256(tag ‖ message)`, tag = UTF-8 `LazorKit signed message v1` | 58 |
+| Ownership proof | `tag ‖ 32 random bytes`, tag = UTF-8 `LazorKit ownership proof v1` | 59 |
+
+- **New `createTaggedOwnershipChallenge()`**, with the constant
+  `OWNERSHIP_PROOF_DOMAIN`: the tagged 59-byte ownership challenge, the same
+  format as the wallet packages' own `createOwnershipChallenge`. Use it for
+  every new ownership proof. Both READMEs' sign-in and key-recovery examples,
+  the clients' JSDoc and that of `verifyOwnershipProof` and
+  `resolvePasskeyPublicKey` now use it.
+- **`createOwnershipChallenge()` is unchanged**: 32 bare random bytes, as in
+  every release before. It is marked `@deprecated` as a passkey challenge,
+  since 32 random bytes look exactly like a transaction challenge to whatever
+  is asked to sign them, but it is neither removed nor changed (see
+  Compatibility). `verifyOwnershipProof`, `recoverPasskeyPublicKeys`,
+  `resolvePasskeyPublicKey` and `findOwnPasskeyWallet` are unchanged too: they
+  check a proof over exactly the challenge it carries, from 16 bytes up, so
+  proofs over either form verify.
+- **New `signedMessageChallenge(message)`**, with `SIGNED_MESSAGE_DOMAIN` and
+  the type `SignedMessageInput`: the challenge a passkey signs for a message,
+  never the message itself. A string is signed as its UTF-8 bytes, any
+  typed-array view as its bytes; anything else throws a `TypeError`. The same
+  bytes as the wallet packages' `signedMessageChallenge`. Their
+  `verifyWalletMessage` checks a signature over it in the shape their
+  `signMessage` returns: the signature as 64-byte r‖s (low-S or not), not the
+  DER that `navigator.credentials.get` returns, so convert it first; and
+  clientDataJSON and authenticatorData as base64. `verifyOwnershipProof` here
+  takes DER or r‖s. Neither SDK asked a passkey to sign a message before and
+  neither does now; this is for apps that do.
+- **Transactions only, now said where it matters.** `Secp256r1Signer.sign` is
+  called only with the 32-byte challenge the SDK computed for an instruction,
+  and every `prepare*` challenge is a hash of the instruction's inputs, so no
+  caller bytes reach a passkey through either SDK. The JSDoc of
+  `Secp256r1Signer`, `PreparedSecp256r1.challenge` and the `prepare*` results
+  says so, and says not to route a message, a server nonce or a challenge from
+  a URL through such a signer. Both READMEs gain "Messages and ownership
+  proofs: never a transaction challenge": the table above, how to have a
+  passkey sign a message, and how to check one with the key read from the
+  claimed wallet on chain (`findPasskeyWalletCandidates` + `verifyOwnershipProof`
+  over `signedMessageChallenge(message)`, and the wallet account still there).
+- Fixed vectors in `test-vectors/challenge-domains.json`: both tags and the
+  wallet packages' own message vectors (lazor-kit
+  `packages/react/test/sign-message.test.mjs`). Checked once against the
+  wallet's source at lazor-kit 22e0ec2 as well: the same bytes for the four
+  vectors and for 4,000 random messages, lone surrogates included.
+- Tests: `sdk/sdk-kit/tests/challenge-domains.test.ts` (37), on both SDKs'
+  implementations — sdk-legacy's from source, since CI runs no sdk-legacy
+  tests: the message vectors; UTF-8 and typed-array input; 58 bytes under the
+  tag for every message length, 32 included, and never the message;
+  `signedMessageChallenge`'s own `TypeError` for anything else, checked by
+  its message; the tagged ownership format, fresh nonces and the wallet
+  packages' layout; `resolvePasskeyPublicKey` over two tagged challenges
+  (which share their first 27 bytes) and over a tagged and a bare one;
+  `createOwnershipChallenge` still 32 fresh bytes and a proof over them
+  still verifying; with `globalThis.crypto` removed, sdk-legacy's
+  `createOwnershipChallenge` still 32 bytes and the wallet packages'
+  ownership challenge (their code, run on it) made and verified, and that
+  same code throwing on the tagged form; the three lengths, the
+  transaction challenge from both SDKs' `buildSecp256r1Challenge`; and an
+  assertion over a message's raw bytes verifying as no message signature.
+  `tests-sdk/tests/17-ownership.test.ts` (sdk-legacy, the unit half): the
+  tagged format, a proof over either form, the message vectors. On the 1.3.1
+  / rc.5 sources, 31 of the 37 kit tests and the 3 new sdk-legacy ones fail;
+  the 6 that pass pin what must not change (`createOwnershipChallenge` with
+  and without `globalThis.crypto`).
+
+**Compatibility**
+- **No breaking change.** Everything above is new exports or documentation:
+  a minor for sdk-legacy, the next rc for the kit SDK, and both work with the
+  same programs as before. `createOwnershipChallenge()` keeps returning
+  exactly 32 random bytes on purpose: `@lazorkit/wallet` 3.3.1 and
+  `@lazorkit/wallet-mobile-adapter` 2.3.1 depend on sdk-legacy `^1.3.0`, so a
+  fresh install of them gets 1.4.0, and when `globalThis.crypto` is missing at
+  call time (Node 18 has no global WebCrypto by default) they take sdk-legacy's
+  `createOwnershipChallenge` as their 32 random bytes and throw "No source of
+  random bytes for an ownership challenge" on any other length. Checked: their
+  `ownershipProof.ts` (lazor-kit 22e0ec2) run on this sdk-legacy's build with
+  `globalThis.crypto` undefined gives its 59-byte challenge; on a build where
+  `createOwnershipChallenge` returned the tagged form it throws.
+- Those wallet releases need nothing from this one: their connect already
+  signs the tagged form, from their own `createOwnershipChallenge`, and checks
+  it with sdk-legacy's `verifyOwnershipProof`, which takes it unchanged.
+- An app that makes its own ownership proofs should move from
+  `createOwnershipChallenge()` to `createTaggedOwnershipChallenge()`. Every
+  verifier in both SDKs accepts both forms, so the client that asks for the
+  proof and the server that checks it can move in either order.
+- `@lazorkit/sdk` 1.0.0-rc.6 is a prerelease, like the rcs before it; neither
+  wallet package depends on it.
+
 ### Fixed — review follow-ups: a failed fee read, the finalized lag, the deploy commands
 
 **SDKs** (`@lazorkit/sdk-legacy` 1.3.1, `@lazorkit/sdk` 1.0.0-rc.5)
