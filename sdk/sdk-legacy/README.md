@@ -433,8 +433,9 @@ const { instructions: addPasskeyIxs } = await client.addAuthority({
   // A Delegate must carry a policy. Rank says what an authority may manage;
   // the policy says what it may spend, and the two are independent — without
   // one, "spender" would name a tier with full control of the vault. This one
-  // names SOL only, so this spender can move no token at all: add a
-  // Actions.tokenLimit({ mint, remaining }) for each mint it may spend.
+  // names SOL only, so this spender cannot lower the vault's balance of any
+  // token: add an Actions.tokenLimit({ mint, remaining }) for each mint it may
+  // spend.
   policy: serializeActions([Actions.solLimit(1_000_000_000n)]),
 });
 

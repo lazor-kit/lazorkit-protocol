@@ -397,8 +397,8 @@ function assertAddAuthorityRole(
 /// (owner and data length; every vault token account unchanged but for its
 /// balance; no SOL and no mint the actions do not name leaving the vault), so
 /// an empty buffer disables all of them: such a key can reassign the vault,
-/// seize its token accounts, or move any asset it holds. That is a deliberate capability, never a default, so it
-/// has to be asked for by name.
+/// seize its token accounts, or move any asset it holds. That is a deliberate
+/// capability, never a default, so it has to be asked for by name.
 function assertSessionActions(
   actions: SessionAction[] | undefined,
   unrestricted = false,
