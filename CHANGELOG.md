@@ -108,10 +108,38 @@ challenge of one kind can equal one of another:
 - `@lazorkit/sdk` 1.0.0-rc.6 is a prerelease, like the rcs before it; neither
   wallet package depends on it.
 
+### Fixed — a 255-account instruction wrote past the entrypoint's array (pinocchio 0.9.3)
+
+**Program** (all four artifacts): mainnet `c9f563e2…` → `b30ce1df…` and devnet
+`384e6927…` → `efea949f…`, 152392 bytes each; mainnet-v1 `6080da9f…` →
+`7a86c87c…` and devnet-v1 `2cf15c89…` → `a84a234e…`, 45936 bytes each.
+
+- pinocchio 0.9.2's `entrypoint!` parses an instruction's accounts into a
+  stack array of `MAX_TX_ACCOUNTS` (254) entries and, at that default, does not
+  clamp the count it is handed. The runtime hands over up to 255 and refuses
+  only more (`MaxAccountsExceeded`), so any instruction with 255 accounts, for
+  instance an Execute that repeats one account, wrote one `AccountInfo` past
+  the array, on every artifact. 0.9.3 makes `MAX_TX_ACCOUNTS` 255. The
+  workspace now requires pinocchio 0.9.3 or later, and `entrypoint.rs` asserts
+  at compile time that `MAX_TX_ACCOUNTS` covers 255. The write went unnoticed
+  (a 255-account Execute returned Ok on 0.9.2), and D13's snapshot of the
+  vault's token accounts stays in bounds either way.
+- 0.9.3 also reads `Clock` and `Rent` through `sol_get_sysvar` (SIMD-0127)
+  instead of the per-sysvar syscalls. That syscall is active on mainnet (since
+  epoch 745) and devnet (since epoch 806). An Execute costs 27 CU less in the
+  four shapes `c1_compute_units_of_the_policy_path` measures.
+- Test: `h2_execute_at_the_runtime_account_limit` runs a 255-account Execute
+  (the fee suffix's last account is read, the listed mint charged once) and
+  checks that the runtime refuses 256.
+- `scripts/release-hashes.txt` and the checklist's tables record all four
+  (`check-release-hashes.sh` on the pinned toolchain); the two-id rehearsal
+  has not been run on them.
+
 ### Changed — a policy bounds the vault's SOL and every token balance it owns directly (D13)
 
 **Program** (v2 only; both sunset artifacts are byte-identical): devnet
-`3584aec7…` → `384e6927…`, mainnet `4cb80304…` → `c9f563e2…`, 152264 bytes each.
+`3584aec7…` → `384e6927…`, mainnet `4cb80304…` → `c9f563e2…`, 152264 bytes each,
+on pinocchio 0.9.2; the entrypoint fix above then moves all four.
 
 - **What a policy does not name may not leave.** For an Execute whose signer
   carries a policy — a session with actions, or a Delegate — the vault's net
@@ -135,8 +163,8 @@ challenge of one kind can equal one of another:
   carry no delegate or close authority (3032). An account passed twice used to
   be counted twice.
 - **More of each vault token account is frozen** (3032): besides owner,
-  delegate and close authority, its state, is_native and data length, and
-  `delegated_amount` may only fall; its lamports may fall only with a native
+  delegate and close authority, its mint, state, is_native and data length,
+  and `delegated_amount` may only fall; its lamports may fall only with a native
   account's `amount`. This catches re-`Approve` of the same delegate for more,
   `FreezeAccount`, `WithdrawExcessLamports` and `Reallocate`. Only initialised
   token accounts count: a mint or a multisig whose bytes 32..64 match the
@@ -165,9 +193,10 @@ challenge of one kind can equal one of another:
   preset builds (it names SOL only), so it waits for an SDK release and that
   preset's fix.
 - The v2 hashes in `scripts/release-hashes.txt` and in the deploy checklist's
-  tables changed (`check-release-hashes.sh`: ok for all four), and the two-id
-  rehearsal has not been re-run on the new artifacts. PR #42 (Execute's heap
-  buffers) changes the same two artifacts: whichever lands second rebuilds and
+  tables changed (with the entrypoint fix above, all four did;
+  `check-release-hashes.sh`: ok for all four), and the two-id rehearsal has
+  not been re-run on the new artifacts. PR #42 (Execute's heap buffers)
+  changes the two v2 artifacts as well: whichever lands second rebuilds and
   re-records them.
 
 **SDKs** (next releases of `@lazorkit/sdk-legacy` and `@lazorkit/sdk`; versions
@@ -180,7 +209,7 @@ are picked when this lands)
   sells, and create the output ATA in a top-level instruction the fee payer
   funds, or give the policy a `SolLimit` for the rent.
 
-**Tests**: `program/tests/policy_unlisted_assets_tests.rs` (42 litesvm tests:
+**Tests**: `program/tests/policy_unlisted_assets_tests.rs` (45 litesvm tests:
 positive and negative flows, the unbounded signers, heap shapes, compute units;
 against develop's binary every negative flow but one lands); `actions.rs` unit
 tests for the new phase, the classifier and the per-field freeze; the

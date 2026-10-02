@@ -128,9 +128,10 @@ files. Nothing below deploys a path that a later build could overwrite.
       stable installer brings since 2026-09-22, and it turns link-time
       optimisation off for a crate that is both `cdylib` and `lib` — this one;
       the litesvm tests link it as a library — with only a warning ("two crate
-      types defined … precludes link-time optimizations"). On this source its
-      mainnet-v1 sunset is **140200** bytes instead of 45856, which the size
-      check below stops, and no artifact hashes as recorded. Pinning
+      types defined … precludes link-time optimizations"). On the source before
+      pinocchio 0.9.3 its mainnet-v1 sunset was **140200** bytes instead of
+      45856, which the size check below stops, and no artifact hashes as
+      recorded. Pinning
       `--tools-version` alone does not help; the cargo-build-sbf version is
       part of the build.
       ⚠️ **`GITHUB_SHA` and `GITHUB_REF_NAME` must be unset.** The program's
@@ -144,8 +145,9 @@ files. Nothing below deploys a path that a later build could overwrite.
       `/home/runner/…` on Linux) in the program's panic locations. With
       everything else equal, the Linux package built the source before D13
       as mainnet `f655b300…` (150776 bytes), mainnet-v1 `044cdc08…` (45848),
-      devnet `cd253e68…`, devnet-v1 `7cc0c17a…` (on macOS D13 moved both v2
-      builds and neither sunset). The tables below are macOS builds, and
+      devnet `cd253e68…`, devnet-v1 `7cc0c17a…` (on macOS D13 then moved both
+      v2 builds, and pinocchio 0.9.3 all four). The tables below are macOS
+      builds, and
       GitHub's `macos-15` runner reproduces them byte for byte. (Intel macOS
       is not checked.)
 - [ ] Build from the pinned release commit, **each into its own directory**:
@@ -366,12 +368,18 @@ rehearsal at the **mainnet ids** passed **18/18** again on them, with both SDKs
 built from the reviewed source, followed by the phase B rollback (the
 programdata dumped with `v1-live.so`'s exact bytes).
 
-**Not re-run since D13.** D13 (a policy bounds the SOL and the mints it does
-not name) changed both v2 artifacts and neither sunset. The v2 rows below give
-the current builds; the 18/18 runs were on the previous ones, devnet
-`3584aec7…` and mainnet `4cb80304…` (150776 bytes each). Re-run the rehearsal
-on the current v2 artifacts before relying on this record. The migration it
-exercises signs as an Owner, which D13 does not touch.
+**Not re-run since D13 and pinocchio 0.9.3.** D13 (a policy bounds the SOL and
+the mints it does not name) changed both v2 artifacts and neither sunset;
+pinocchio 0.9.3 (the entrypoint holds all 255 accounts the runtime can pass,
+and `Clock` and `Rent` are read through `sol_get_sysvar`) then changed all four.
+The sunset and v2 rows below give the current builds; the 18/18 runs were on
+the previous ones: v2 devnet `3584aec7…` and mainnet `4cb80304…` (150776 bytes
+each), sunset devnet-v1 `2cf15c89…` and mainnet-v1 `6080da9f…` (45856 bytes
+each). Re-run the rehearsal on the current artifacts, after PR #42 (which moves
+both v2 artifacts again) lands or is dropped, before relying on this record.
+The migration it exercises signs as an Owner, which D13 does not touch, but it
+runs through the sunset binary, whose entrypoint and sysvar reads pinocchio
+0.9.3 did change.
 
 At the **devnet ids** (`legacyProgramIdFor(57bTNW…) = 4h3XoNRe…`), the v1 dump
 preloaded at `4h3XoNRe…`, v2 at `57bTNW…`, then `4h3XoNRe…` upgraded to the
@@ -380,8 +388,8 @@ sunset build — **18/18**:
 | artifact | id | size | SHA-256 |
 |---|---|---|---|
 | v1 — the live mainnet program, `solana program dump` | `4h3XoNRe…` (devnet v1) | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
-| sunset — `--features devnet-v1`, platform-tools v1.53 | `4h3XoNRe…` | 45856 | `2cf15c89ad3ad194e5aebcab608dc4bc75270cb7d094d342a31ecdd3306f1240` |
-| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 152264 | `384e6927749c9805c193a946d7abfb98c6dcdde1656ffe55554302240c3ccb03` |
+| sunset — `--features devnet-v1`, platform-tools v1.53 | `4h3XoNRe…` | 45936 | `a84a234e924a4774eff031afb9c7edde0bc6f002479934414bf0b2bda8d32d56` |
+| v2 — `--features devnet`, platform-tools v1.53 | `57bTNWqt…` | 152392 | `efea949f358dea5ce0ea39120d9d452385aff69a225203ddf1e36d2b5d67d47e` |
 
 At the **mainnet ids** (`legacyProgramIdFor(LazorFroi…) = LazorjRF…`), the v1
 dump preloaded at `LazorjRF…`, v2 at `LazorFroi…`, then `LazorjRF…` upgraded to
@@ -392,8 +400,8 @@ dumped with the dump's exact bytes.
 | artifact | id | size | SHA-256 (this machine — the release commit re-records) |
 |---|---|---|---|
 | v1 — `solana program dump` of the live program | `LazorjRF…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
-| sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45856 | `6080da9f28d194e36efbfbd6cf6d74389f2a68e232d4c323d153761c532a58a6` |
-| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 152264 | `c9f563e2393ec4b81fb65aadff87b72b20e8f08f3cc1ff013a3358b7dacba915` |
+| sunset — `--features mainnet-v1`, platform-tools v1.53 | `LazorjRF…` | 45936 | `7a86c87c46d098b247ee2de734de8aea863b15c4ba6b87c6341e7f8e6c313a2d` |
+| v2 — `--features mainnet`, platform-tools v1.53 | `LazorFroi…` | 152392 | `b30ce1dfd72690fc7ee9d3ca749d1f509fb48ab526cd043ff0ea03080d3cecb9` |
 
 ```
 ok    the sunset binary refuses CreateWallet with 4018 RetiredDeployment
