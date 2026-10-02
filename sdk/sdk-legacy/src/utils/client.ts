@@ -369,9 +369,10 @@ function assertAddAuthorityRole(
 /// A session with no actions is not "a session with no limits" — it is a key
 /// with *more* power over the vault than a bounded Delegate. The action buffer
 /// is what switches on the vault invariants the program checks after the CPI
-/// (lamport delta, owner, data length, and the token-authority snapshot), so an
-/// empty buffer disables all of them: such a key can reassign the vault or seize
-/// its token accounts. That is a deliberate capability, never a default, so it
+/// (owner and data length; every vault token account unchanged but for its
+/// balance; no SOL and no mint the actions do not name leaving the vault), so
+/// an empty buffer disables all of them: such a key can reassign the vault,
+/// seize its token accounts, or move any asset it holds. That is a deliberate capability, never a default, so it
 /// has to be asked for by name.
 function assertSessionActions(
   actions: SessionAction[] | undefined,
@@ -931,7 +932,10 @@ export class LazorKitClient {
     role: number;
     /** Action buffer bounding what this authority may spend. Required for
      *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
-     *  carry one, so a policy always means a bounded spender. */
+     *  carry one, so a policy always means a bounded spender. An asset the
+     *  policy does not name cannot leave the vault: with no `Sol*` action no
+     *  SOL can (rent the vault pays included), and each mint needs a `Token*`
+     *  action. */
     policy?: Uint8Array;
     /** Opt in to creating another Owner. An Owner can manage and revoke every
      *  authority on the wallet, this one included, so it is never the default. */
@@ -1207,8 +1211,10 @@ export class LazorKitClient {
     secp256r1: Secp256r1Params;
     sessionKey: PublicKey;
     expiresAt: bigint;
-    /** Actions bounding what this session may spend. Omitting them creates an
-     *  UNRESTRICTED session and requires `unrestricted: true`. */
+    /** Actions bounding what this session may spend. An asset they do not
+     *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
+     *  vault pays included), and each mint needs a `Token*` action. Omitting
+     *  them creates an UNRESTRICTED session and requires `unrestricted: true`. */
     actions?: SessionAction[];
     /** Opt in to a session with no actions — see `actions`. */
     unrestricted?: boolean;
@@ -1927,7 +1933,8 @@ export class LazorKitClient {
    * control this wallet".
    *
    * `policyLen > 0` means the authority is bounded: rank says what it may
-   * manage, the policy says what it may spend. Read the policy itself with
+   * manage, the policy says what it may spend, and an asset the policy does
+   * not name it cannot spend at all. Read the policy itself with
    * `parseActions` over the account bytes after the key material (80 bytes for
    * an Ed25519 authority, 145 for Secp256r1).
    *
@@ -2135,7 +2142,10 @@ export class LazorKitClient {
     role: number;
     /** Action buffer bounding what this authority may spend. Required for
      *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
-     *  carry one, so a policy always means a bounded spender. */
+     *  carry one, so a policy always means a bounded spender. An asset the
+     *  policy does not name cannot leave the vault: with no `Sol*` action no
+     *  SOL can (rent the vault pays included), and each mint needs a `Token*`
+     *  action. */
     policy?: Uint8Array;
     /** Opt in to creating another Owner. An Owner can manage and revoke every
      *  authority on the wallet, this one included, so it is never the default. */
@@ -2320,8 +2330,10 @@ export class LazorKitClient {
     adminSigner: AdminSigner;
     sessionKey: PublicKey;
     expiresAt: bigint;
-    /** Actions bounding what this session may spend. Omitting them creates an
-     *  UNRESTRICTED session and requires `unrestricted: true`. */
+    /** Actions bounding what this session may spend. An asset they do not
+     *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
+     *  vault pays included), and each mint needs a `Token*` action. Omitting
+     *  them creates an UNRESTRICTED session and requires `unrestricted: true`. */
     actions?: SessionAction[];
     /** Opt in to a session with no actions — see `actions`. */
     unrestricted?: boolean;

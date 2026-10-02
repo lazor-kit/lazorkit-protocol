@@ -432,7 +432,9 @@ const { instructions: addPasskeyIxs } = await client.addAuthority({
   role: ROLE_SPENDER,
   // A Delegate must carry a policy. Rank says what an authority may manage;
   // the policy says what it may spend, and the two are independent — without
-  // one, "spender" would name a tier with full control of the vault.
+  // one, "spender" would name a tier with full control of the vault. This one
+  // names SOL only, so this spender can move no token at all: add a
+  // Actions.tokenLimit({ mint, remaining }) for each mint it may spend.
   policy: serializeActions([Actions.solLimit(1_000_000_000n)]),
 });
 
@@ -728,6 +730,17 @@ await client.execute({
 client.revokeSession({ payer, walletPda, adminSigner, sessionPda });
 ```
 
+A policy (a session's actions, or a Delegate's policy) names what may leave
+the vault, and nothing it does not name may. With no `Sol*` action the vault's
+SOL may not fall (3037), rent the vault pays for a new account included; a mint
+with no `Token*` action may not leave the vault's token accounts (3038). Both
+are net over one Execute and inflows always pass; wSOL is a mint, not SOL; a
+program whitelist names programs, not assets. The session above can therefore
+move SOL but no token. For a swap, name the mint it sells, and create the output
+ATA in a top-level instruction the fee payer funds, before the Execute, or give
+the session a `solLimit` that covers the rent. A policy holds at most 16
+actions.
+
 Action builders (via `Actions`):
 
 | Builder | Notes |
@@ -971,8 +984,21 @@ An authority that carries a policy itself may not add authorities at all.
 | 3020–3029 | Action errors (buffer invalid, whitelist/blacklist, spending limits exceeded) |
 | 3030 | SessionVaultOwnerChanged (H1 fix) |
 | 3031 | SessionVaultDataLenChanged (H1 fix) |
-| 3032 | SessionTokenAuthorityChanged (H1 fix) |
-| 4001–4007 | Protocol fee errors |
+| 3032 | SessionTokenAuthorityChanged: a vault token account changed other than its balance, or one that became vault-owned during the Execute carries a delegate or close authority |
+| 3033 | DelegateRequiresPolicy |
+| 3034 | PolicyBearingAuthorityCannotDelegate |
+| 3035 | PolicyRankMismatch |
+| 3036 | SessionNotExpired |
+| 3037 | ActionUnlistedSolOutflow: the vault's SOL fell and the policy has no `Sol*` action (rent the vault pays for a new account counts) |
+| 3038 | ActionUnlistedTokenOutflow: the vault's balance of a mint fell and no `Token*` action names it (wSOL is a mint) |
+| 4001–4007 | Protocol fee errors (4003 retired) |
+| 4008–4011 | Fee suffix errors: FeeAccountsRequired, ProtocolNotInitialized, InvalidTreasuryShard, InvalidFeeRecord (4012 retired) |
+| 4013 | AccountVersionMismatch |
+| 4014 | FeeExceedsMaximum |
+| 4015 | UnauthorizedInitializer |
+| 4016 | NoPendingAdmin |
+| 4017 | WrongProgramAddress |
+| 4018 | RetiredDeployment: a v1 sunset binary serving only ReclaimDeferred, MigrateWallet and CloseExpiredSession |
 
 A program that `Execute` calls can fail with the same custom code, and the transaction then fails with it too: Anchor's account errors use 3000–3017, so an inner Anchor program's `AccountNotMutable` is also `Custom(3006)`. `extractErrorCode` and `errorFromCode` read only the number. The transaction logs name the program: the first `Program <id> failed: custom program error: 0x…` line is the one that raised it, and only when that id is the LazorKit program is the code one of the above. A landed failure (`{"InstructionError":[i,{"Custom":3006}]}` from `confirmTransaction` or `getSignatureStatuses`) names only the top-level instruction — the LazorKit one, whichever program inside it failed — so it cannot be attributed without its logs: read them with `getTransaction(signature)` → `meta.logMessages` before telling the user to sign again. `extractErrorCode` returns `null` for that object (it reads error text only).
 
