@@ -695,6 +695,8 @@ This means admins, spenders, and session keys can all operate on the same wallet
 
 2-transaction flow for payloads too large for a single Secp256r1 Execute (e.g., Jupiter swaps). A v0 transaction is capped at 1232 bytes, and a passkey Execute with no inner instruction already takes about 887 of them (portal clientDataJSON, no ALT, no ComputeBudget instruction). That leaves about 345 bytes for inner instructions, about 305 with a compute-unit limit, and under 200 when Chrome pads clientDataJSON (+109 bytes). Even a single-hop SOL→USDC Jupiter route does not fit from the portal: 1521 bytes with a compute-unit limit, 1245 with Jupiter's ALTs as well. Measured 2026-09-29 with sdk-legacy 1.2.0 and cross-checked against devnet transactions.
 
+Under [transaction v1](#transaction-v1-simd-0385) (4096 bytes, 64 addresses) this is no longer a size workaround. tx2 is held to the same 64-address cap as a direct Execute, and addresses run out before bytes, so deferring buys almost no room there (BONK→WIF: 58 addresses as tx2, 59 as a direct Execute); the measured Jupiter routes fit a direct Execute. What deferring still gives is the separation of signing from sending — in time, within the expiry window, or to another sender such as a relayer or a second device.
+
 1. **TX1 (Authorize)** — signer computes `instructions_hash = SHA256(compact_instructions)` and `accounts_hash = SHA256(referenced_pubkeys)`. These are signed via Secp256r1 and stored in a `DeferredExec` PDA. Odometer counter is incremented.
 2. **TX2 (ExecuteDeferred)** — any payer submits the full compact instructions. Program verifies both hashes, consumes the `DeferredExec` authorization (zeroes its data before any CPI, so nothing reached from the inner instructions can replay it), executes via CPI with vault signing, and only then moves its rent to the original payer. The rent moves last because the runtime syncs a caller's lamport writes into a CPI only for the accounts that CPI is handed: credited earlier, the refund would cross into any inner instruction that names the payer — a paymaster being repaid — without the matching debit, and the CPI would fail with `UnbalancedInstruction`.
 
@@ -741,6 +743,146 @@ Properties:
 - Expiry window: 10–9,000 slots (~4 s to ~1 h).
 - Only a Secp256r1 Owner or Admin can authorize — not Ed25519, not a Delegate.
 - If TX2 never runs, the original payer can reclaim rent after expiry via `ReclaimDeferred`.
+
+## Transaction v1 (SIMD-0385)
+
+SIMD-0385 adds a transaction format, v1. It raises the size cap to 4096 bytes
+(v0: 1232) and keeps the 64-account cap. It has no address lookup tables, and
+it carries the compute-unit limit, the loaded-accounts-data limit and the
+priority fee in a config inside the message, not in ComputeBudget
+instructions. Its feature is active on devnet.
+
+The program runs under it unchanged. On 2026-09-30, against the deployed devnet
+program `57bTNW…` (solana-core 4.3.0), all of these landed as v1: CreateWallet
+(passkey and Ed25519), passkey and Ed25519 Execute, Authorize and
+ExecuteDeferred, Jupiter-sized Executes up to 59 addresses, and a 64-address
+Execute of exactly 4096 bytes. The passkey counter rose by exactly one per
+operation, and the precompile check at `current_index - 1` behaved as under v0.
+The instructions came from sdk-legacy 1.3.1 unchanged and were compiled by
+`@solana/kit` 8.4.0; sdk-legacy's own transaction helpers (`buildLegacyTx`,
+`buildV0Tx`) build legacy and v0 only.
+
+**Room.** A passkey Execute has 11 fixed addresses — payer, wallet, authority,
+vault, program, Secp256r1, the Instructions sysvar, System and the three
+protocol-fee accounts — which leaves 53 for the payload's programs and
+accounts. For real payloads that cap binds first and bytes second. The RPC
+refuses a 4097-byte or a 65-address transaction (-32602). Measured sizes, the
+passkey rows with the portal's clientDataJSON:
+
+| Transaction | v1 bytes / addresses |
+|---|---|
+| Passkey Execute, one transfer | 957 / 12 |
+| Ed25519 Execute (two signers) | 573 / 11 |
+| Authorize (tx1) | 904 / 9 |
+| Passkey Execute, SOL→USDC route | 1,526 / 26 |
+| Passkey Execute, JUP→POPCAT route | 2,294 / 49 |
+| Passkey Execute, BONK→WIF route | 2,660 / 59; 2,769 when Chrome pads clientDataJSON |
+| ExecuteDeferred (tx2), BONK→WIF route | 2,213 / 58 |
+| Passkey Execute, 64 addresses and 1,386 bytes of inner data | 4,096 / 64 |
+
+None of the three routes fits a v0 transaction as a direct Execute, even with
+Jupiter's ALTs. They are replays: Jupiter's swap instructions with each program
+id replaced by SPL Noop and the real id kept as a read-only account (one
+address more than the real route). The account lists and data are real, but
+only LazorKit's side of the CPI loop ran, not the AMMs. The sizes include a
+20-byte config (a 4-byte mask, an 8-byte priority fee, and 4 bytes each for the
+compute-unit and loaded-data limits); without a priority fee it is 8 bytes
+smaller.
+
+**Program limits a v1 payload can reach.** Real payloads rarely reached two
+of the program's ceilings in 1232 bytes. A v1 payload can reach both, and both
+fail the transaction:
+
+- **16 inner instructions** (`MAX_COMPACT_INSTRUCTIONS`,
+  `program/src/compact.rs`). A 17th fails with `InvalidInstructionData`.
+- **A fixed 32 KiB heap.** The allocator hands out 32 KiB from the top down
+  and never frees; its cursor takes the lowest 8 bytes, which leaves 32,760.
+  A v1 `heapSize` request does not change it. A payload that needs more fails
+  with `ProgramFailedToComplete` ("memory allocation failed, out of memory").
+  What a payload needs depends on the instruction that runs it, and no rule on
+  account-meta counts alone describes it: on a passkey Execute one inner
+  instruction of 127 metas runs, while 16 inner instructions of 16 metas each
+  do not. For a passkey Execute without a policy, the program built from this
+  source (devnet's `57bTNW…` runs it as `3584aec7…`) allocates, in this order:
+  1. the parsed inner instructions, 40 bytes each;
+  2. the accounts-hash preimage: 33 bytes for each inner instruction's program
+     and for each of its metas, in a buffer that starts at 132 bytes per
+     inner instruction and doubles whenever it fills, every outgrown copy
+     kept (`accounts_hash_preimage_with`, `program/src/compact.rs`);
+  3. the signed payload (the compact instructions plus 32 bytes) and the
+     44-byte base64url challenge;
+  4. the account-meta (16 bytes each) and CPI-account (56 bytes each)
+     buffers, reused across the inner instructions: room for 32 of each,
+     and a new allocation of double the size each time an instruction has
+     more metas than they hold;
+  5. for each inner instruction, its accounts (8 bytes per meta) and their
+     signer flags (1 byte per meta).
+
+  Each byte buffer can add up to 7 bytes of alignment. ExecuteDeferred
+  skips item 3, and an Ed25519 or session Execute skips items 2 and 3. A
+  policy on the authority or session allocates more, which this does not
+  count. For k equal inner instructions, each with 12 bytes of data, the most
+  metas each can have:
+
+  | Inner instructions (k) | Passkey Execute | ExecuteDeferred | Ed25519 or session Execute |
+  |---|---|---|---|
+  | 1 | 127 | 127 | 128 |
+  | 2 | 64 | 64 | 128 |
+  | 3–5 | 63 | 63 | 128 |
+  | 6 | 32 | 32 | 128 |
+  | 7–12 | 31 | 31 | 128 |
+  | 13 | 29 | 31 | 128 |
+  | 14 | 15 | 16 | 127 |
+  | 15–16 | 15 | 15 | 118 at 15, 110 at 16 |
+
+  More instruction data leaves less room on a passkey Execute (item 3). The
+  sum agrees with every payload measured against that build, on both sides of
+  the limit. On devnet, all passkey Executes: 127 metas, 64 + 64, 100 + 20,
+  60 + 60 + 10, 80 + 5 × 8, 5 × 30 and 16 × 12 ran; 128 to 200 metas,
+  70 + 70 to 120 + 120 and 100 + 30 ran out of memory. On our own validator
+  running `3584aec7…`, 47 runs over all three paths, among them 16 × 16,
+  8 × 32 and 16 × 24, which ran out of memory on a passkey Execute and ran on
+  an Ed25519 Execute (16 × 16 also ran out on ExecuteDeferred). On the passkey
+  path it agrees to the byte: payloads that need 32,757, 32,759 and 32,760
+  bytes ran, and 32,765, 32,767 and 32,768 did not. The wallet packages' v1
+  path computes this sum (`lazorkitHeapBytes`) and refuses a payload over
+  32,760 bytes before asking for a signature. By it the measured route replays
+  need 8,756 bytes (SOL→USDC), 15,976 (JUP→POPCAT) and 25,456 (BONK→WIF,
+  83 + 7 metas) on a passkey Execute. A build that sizes these buffers exactly
+  from the parsed instructions allocates less for any payload.
+
+**Config.**
+
+- **Set both limits.** A v1 transaction whose compute-unit limit or
+  loaded-data limit is unset or zero is not refused up front: it lands as a
+  failure and the fee payer is charged the full fee, priority fee included. A
+  sponsor has to refuse it before signing, reading the limits from the
+  message's config.
+- **Size the limits from a simulation.** A passkey Execute with one transfer
+  took 13,011 CU (the [Compute cost](#compute-cost) table predates it); each
+  extra inner instruction adds about 1.8k and each inner account meta 280–380,
+  before the inner programs' own compute. The most observed was 107,163 (16
+  inner instructions × 12 metas). Loaded data counts 64 bytes plus the data
+  length of every existing account the transaction loads, and 64 bytes plus the
+  programdata length once per upgradeable program. Every LazorKit transaction
+  loads 160,992–161,337 bytes on devnet, almost all of it the program's own
+  programdata, so it needs a limit of about 161 KB (163,840 in 32 KiB pages)
+  before any payload. The three routes load 414,796, 490,044 and 2,407,845
+  bytes in total on devnet; computed from mainnet state, the routes alone
+  need 3.68, 5.54 and 16.07 MB, so size per route and per cluster.
+  `simulateTransaction` returns both `unitsConsumed` and
+  `loadedAccountsDataSize`. A bigger programdata raises every transaction's
+  load: see [upgrade-procedure.md](upgrade-procedure.md#6-deploy).
+- **No ComputeBudget instructions.** In a v1 transaction they configure
+  nothing (their limits and prices are ignored) and still cost 150 CU each.
+  One placed between the Secp256r1 precompile and the LazorKit instruction
+  fails with 3003, because the program reads the precompile at
+  `current_index - 1`.
+- **Fee.** It does not depend on the limits: 5,000 lamports per transaction
+  signature and per precompile signature (10,000 for a passkey Execute), plus
+  the priority fee, which in v1 is a total in lamports, not a price per
+  compute unit. The two priority-fee mask bits are set together or not at all;
+  the RPC refuses one alone.
 
 ## Compute cost
 

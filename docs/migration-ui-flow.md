@@ -247,7 +247,8 @@ Two consequences for the app:
 - **Transaction size:** the setup step scales with the token count. One
   transaction with the setup and the migrate is the safe shape; for a vault
   with more token accounts than fit, use a v0 transaction with an address
-  lookup table, exclude the dust, or split `setupInstructions` across
+  lookup table (with the setup, 7 tokens at most: see the trace limit
+  below), exclude the dust, or split `setupInstructions` across
   transactions and send the migrate only once every one of them is confirmed
   successful. The migrate itself is one instruction, but each token adds four
   accounts and about 100 bytes, so past the counts below it needs the lookup
@@ -262,6 +263,48 @@ Two consequences for the app:
   | Passkey, new v2 wallet + ATA setup + migrate | 1182 with none, 1356 with one | 0: SOL only |
   | Ed25519, migrate only | 470 with none, 602 with one, +100 each | 7 |
   | Setup only: new v2 wallet + ATAs | 559 with none, 697 with one, +74 each | 8 |
+
+  Transaction v1 (SIMD-0385: 4096 bytes, 64 addresses, no lookup tables) is
+  active on devnet. Each token adds three addresses (four for the first, which
+  brings the token program) and 100 bytes (111 with its ATA setup), and bytes
+  never bind first. Migrate only, the 64-address cap does. With a new wallet's
+  setup in the same transaction, the runtime's instruction-trace limit binds
+  first, in any transaction format: a transaction runs at most 64
+  instructions, top-level and inner together. CreateWallet takes 7, each ATA
+  creation 5, `MigrateWallet` 2 plus 2 per token, and a passkey's precompile
+  1, so setup and migrate together stop at 7 tokens; 8 fail with
+  `MaxInstructionTraceLengthExceeded`. Sizes with a 20-byte config, from the
+  sdk-legacy 1.3.1 builders:
+
+  | Shape | Tokens that fit in one v1 transaction | What binds | Size at that count |
+  |---|---|---|---|
+  | Passkey, migrate only | 18 | 64 addresses | 2,673 bytes / 64 addresses (2,782 when Chrome pads clientDataJSON) |
+  | Passkey, new v2 wallet + ATA setup + migrate | 7 | instruction trace | 2,042 bytes / 39 addresses |
+  | Ed25519, migrate only | 18 | 64 addresses | 2,321 bytes / 64 addresses |
+  | Ed25519, new v2 wallet + ATA setup + migrate | 7 | instruction trace | 1,690 bytes / 39 addresses |
+
+  Mixing Token and Token-2022 costs one more address: 17 tokens for migrate
+  only, still 7 with the setup. Past 7 tokens, send the setup first and the
+  migrate once every setup transaction is confirmed: CreateWallet and 11 ATA
+  creations fill 62 of a transaction's 64 trace entries, and by the same
+  count 12 ATA creations fit one without CreateWallet.
+
+  Landed on 2026-10-01 on our own validator, not on devnet: devnet's v1 id
+  `4h3XoNRe…` does not run the sunset binary (it answers `MigrateWallet` with
+  `InvalidInstructionData`). The validator ran the devnet-v1 sunset build
+  (`2cf15c89…`) at `4h3XoNRe…` and the devnet v2 artifact (`3584aec7…`) at
+  `57bTNW…`, with v1 wallets created by a dump of devnet's v1 program. Passkey
+  migrations of 3, 8, 15 and 18 tokens, 18 with Chrome's padding, 16 Token +
+  1 Token-2022, an Ed25519 migration of 18 and a passkey setup + migrate of 7
+  all landed as v1; those in the table at its sizes less 8 bytes, because
+  their config carried no priority fee. The Ed25519 setup + migrate row is
+  computed. `MigrateWallet` took about 8,700 CU plus 2,820 per token (SPL
+  Token, passkey; 1,500 more for each extra attempt the v1 vault's bump
+  search takes), and the sunset binary's heap held at 18 tokens (81 metas on
+  one instruction). A v1 migrate has to set its compute-unit and loaded-data
+  limits from a simulation: one Token-2022 token took the loaded data from
+  about 166 KB to 673 KB there (see
+  [Architecture](Architecture.md#transaction-v1-simd-0385)).
 - **Prioritise the active, high-value wallets** — value is concentrated, so
   reaching a handful of users covers most of it. Dormant wallets migrate whenever
   their owner returns; their funds wait safely in v1 until then.
