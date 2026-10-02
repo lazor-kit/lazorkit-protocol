@@ -7,7 +7,7 @@ exclude = ["tests-e2e"]
 solana = "3.0.4"
 
 [workspace.dependencies]
-pinocchio = { version = "0.9", features = ["std"] }
+pinocchio = { version = "0.9.3", features = ["std"] }
 pinocchio-pubkey = { version = "0.3" }
 pinocchio-system = { version = "0.3" }
 no-padding = { path = "./no-padding" }

@@ -21,6 +21,13 @@ use crate::{
 
 entrypoint!(process_instruction);
 
+// `entrypoint!` parses the instruction's accounts into a stack array of
+// `MAX_TX_ACCOUNTS` entries and, at that default, does not clamp the count the
+// runtime passes. The runtime passes up to 255 (it refuses an instruction only
+// past that), and pinocchio 0.9.2 set `MAX_TX_ACCOUNTS` to 254: a 255-account
+// instruction wrote one entry past the array. 0.9.3 makes it 255.
+const _: () = assert!(pinocchio::MAX_TX_ACCOUNTS >= 255);
+
 pub fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

@@ -1003,10 +1003,10 @@ vault-owned token accounts in the Execute:
 
 | Session policy, one transfer | develop (`3584aec7…`) | D13 |
 |---|---|---|
-| whitelist + `SolLimit`, System transfer, t = 0 | 24,128 | 23,806 |
-| `TokenLimit`, one listed transfer, t = 1 | 30,083 | 29,099 |
-| the same, t = 8 | 32,974 | 32,863 |
-| the same, t = 24 | 41,195 | 45,888 |
+| whitelist + `SolLimit`, System transfer, t = 0 | 24,128 | 23,779 |
+| `TokenLimit`, one listed transfer, t = 1 | 30,083 | 29,072 |
+| the same, t = 8 | 32,974 | 32,836 |
+| the same, t = 24 | 41,195 | 45,861 |
 
 D13 copies each vault token account once and reads it back by position, where
 develop scanned the whole account list once per listed mint before the loop and

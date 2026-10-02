@@ -182,8 +182,9 @@ pub fn snapshot_vault_token_accounts(
     // Positions to copy, found in one walk: each writable vault-owned token
     // account at its first position in the list. A repeat is looked for only
     // among the positions already found, not among every account before it.
-    // pinocchio's entrypoint hands the program at most `MAX_TX_ACCOUNTS`
-    // accounts, so a position fits a byte and the list fits the stack.
+    // The runtime passes an instruction at most 255 accounts, and
+    // `MAX_TX_ACCOUNTS` covers them (see `entrypoint.rs`), so a position fits
+    // a byte and the list fits the stack.
     let mut found = [0u8; pinocchio::MAX_TX_ACCOUNTS];
     let mut count = 0;
     for (index, acc) in accounts.iter().enumerate() {

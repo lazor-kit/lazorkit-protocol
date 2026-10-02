@@ -22,10 +22,11 @@
 //!   and no close authority (3032).
 //!
 //! Positive flows `p*`, negative flows `n*`, regressions `r*` (unbounded
-//! signers, the deferred path, the program check), heap shapes `h1_*`, and
-//! compute units `c1_*`. On develop every `n*` test but `n18` lands. Accounts are
-//! written by hand, at the offsets the program reads; the SPL programs are the
-//! ones litesvm 0.6 loads (SPL Token 3.5.0, Token-2022 5.0.2, ATA 1.1.1).
+//! signers, the deferred path, the program check), heap shapes `h1_*`, the
+//! runtime's 255-account limit `h2_*`, and compute units `c1_*`. On develop
+//! every `n*` test but `n18` lands. Accounts are written by hand, at the
+//! offsets the program reads; the SPL programs are the ones litesvm 0.6 loads
+//! (SPL Token 3.5.0, Token-2022 5.0.2, ATA 1.1.1).
 //!
 //! Run:  cargo test --features devnet -p lazorkit-program --test policy_unlisted_assets_tests
 
@@ -1564,15 +1565,65 @@ fn h1_heap_with_one_account_passed_many_times() {
     );
 }
 
+/// The runtime passes an instruction up to 255 accounts, one more than
+/// pinocchio 0.9.2's entrypoint array held: it wrote the 255th past the end.
+/// A 255-account Execute runs, reads its last account (the fee suffix's
+/// system program; a shorter list would be 4008) and charges the listed mint
+/// once. At 256 the runtime refuses the instruction before the program runs.
+#[test]
+fn h2_execute_at_the_runtime_account_limit() {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+
+    // payer, wallet, authority and vault, then the fee suffix.
+    const OUTER: usize = 8;
+
+    let build = |fx: &mut Fx, total: usize| {
+        let a = listed_session(fx, 1_000, 5_000);
+        let dest = fx.token_account(a.mint, Pubkey::new_unique(), 0);
+        let mut exec = Exec::new(&a.actor);
+        exec.compute_limit = true;
+        let token = exec.readonly(spl_token_id());
+        let src = exec.writable(a.vault_ata);
+        let dst = exec.writable(dest);
+        while OUTER + exec.accounts.len() < total {
+            exec.writable(a.vault_ata);
+        }
+        transfer(&mut exec, token, src, dst, IDX_VAULT, 100);
+        (a.actor, exec)
+    };
+
+    let mut fx = Fx::new();
+    let (actor, exec) = build(&mut fx, 255);
+    fx.execute_ok(&actor, exec, "H2 255 accounts");
+    assert_eq!(
+        session_action_u64(&fx.context.svm, actor.pda, 0, TOKEN_REMAINING),
+        900
+    );
+
+    let mut fx = Fx::new();
+    let (actor, exec) = build(&mut fx, 256);
+    match fx.execute(&actor, exec) {
+        Err(failed) => assert!(
+            matches!(
+                failed.err,
+                TransactionError::InstructionError(_, InstructionError::MaxAccountsExceeded)
+            ),
+            "H2 256 accounts: {:?}",
+            failed.err
+        ),
+        Ok(_) => panic!("H2 256 accounts: the runtime passed them"),
+    }
+}
+
 /// Compute units for the policy path. Measured with the same transactions on
 /// develop (devnet `3584aec7…`) and on this branch:
 ///
 /// | shape                                    | develop | D13    |
 /// |------------------------------------------|---------|--------|
-/// | (a) whitelist + SolLimit, SOL, t = 0     | 24,128  | 23,806 |
-/// | (b) TokenLimit, one transfer, t = 1      | 30,083  | 29,099 |
-/// | (c) as (b), t = 8                        | 32,974  | 32,863 |
-/// | (d) as (b), t = 24                       | 41,195  | 45,888 |
+/// | (a) whitelist + SolLimit, SOL, t = 0     | 24,128  | 23,779 |
+/// | (b) TokenLimit, one transfer, t = 1      | 30,083  | 29,072 |
+/// | (c) as (b), t = 8                        | 32,974  | 32,836 |
+/// | (d) as (b), t = 24                       | 41,195  | 45,861 |
 ///
 /// `t` counts writable vault token accounts. Each one costs D13 more than it
 /// cost develop (about 810 CU against 510 between t = 8 and t = 24), while (b)
@@ -1606,10 +1657,10 @@ fn c1_compute_units_of_the_policy_path() {
         "(b) {b} CU against develop's {DEVELOP_B}"
     );
     for (shape, measured, ceiling) in [
-        ("(a)", a, 26_190),
-        ("(b)", b, 32_010),
-        ("(c)", c, 36_150),
-        ("(d)", d, 50_480),
+        ("(a)", a, 26_160),
+        ("(b)", b, 31_980),
+        ("(c)", c, 36_120),
+        ("(d)", d, 50_450),
     ] {
         assert!(
             measured <= ceiling,
