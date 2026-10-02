@@ -1,0 +1,43 @@
+{
+  "description": "Golden vectors for the passkey challenge domains, format v1. A passkey signs whatever WebAuthn challenge it is handed, and the LazorKit programs approve a transaction by the challenge in a passkey signature, so each kind of challenge has its own shape and no challenge of one kind can equal one of another: a transaction challenge is a 32-byte SHA-256 hash; a message challenge is tag || SHA-256(tag || message), 58 bytes, tag = UTF-8 \"LazorKit signed message v1\"; an ownership-proof challenge is tag || 32 random bytes, 59 bytes, tag = UTF-8 \"LazorKit ownership proof v1\". The first three message vectors are the fixed vectors of @lazorkit/wallet 3.3.1 (lazor-kit packages/react/test/sign-message.test.mjs, from lazor-kit #113, 704ba51) and the fourth is that test's UTF-8 case; all four were recomputed with node:crypto and with the wallet's own signedMessageChallenge (lazor-kit 22e0ec2). Both SDKs must give the same bytes as the wallet packages.",
+  "consumedBy": [
+    "sdk/sdk-kit/tests/challenge-domains.test.ts (both SDKs' implementations)",
+    "tests-sdk/tests/17-ownership.test.ts (sdk-legacy)"
+  ],
+  "transaction": {
+    "challengeLength": 32
+  },
+  "signedMessage": {
+    "domain": "LazorKit signed message v1",
+    "domainHex": "4c617a6f724b6974207369676e6564206d657373616765207631",
+    "challengeLength": 58,
+    "vectors": [
+      {
+        "name": "a string, signed as its UTF-8 bytes",
+        "utf8": "hello",
+        "challengeHex": "4c617a6f724b6974207369676e6564206d657373616765207631f0a0cabfe4698ae1261c9e56c6fd10a3800e99ac443a2b499ecead9d79897a21"
+      },
+      {
+        "name": "no bytes",
+        "hex": "",
+        "challengeHex": "4c617a6f724b6974207369676e6564206d65737361676520763100e05b0accc59e75916a1f60ee3e1d8686e4f317e55a300f385a752b04f9a695"
+      },
+      {
+        "name": "32 zero bytes: the length of a transaction challenge, never signed as one",
+        "hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "challengeHex": "4c617a6f724b6974207369676e6564206d657373616765207631ad1549f2a749d2e4124c97601838c5bbe5badfcf958e40d7bfdcaddb167cc0d2"
+      },
+      {
+        "name": "a string outside ASCII",
+        "utf8": "héllo ✓",
+        "challengeHex": "4c617a6f724b6974207369676e6564206d6573736167652076315e54983d8f69fa8eda4b184e1e7aa169a4d2696adf1e8f8d6a7137baa692a818"
+      }
+    ]
+  },
+  "ownershipProof": {
+    "domain": "LazorKit ownership proof v1",
+    "domainHex": "4c617a6f724b6974206f776e6572736869702070726f6f66207631",
+    "nonceLength": 32,
+    "challengeLength": 59
+  }
+}

@@ -10,4 +10,6 @@ export * from './transactions/index.js';
 export * from './types.js';
 // Which wallet a returning passkey user owns: proof and the adoption rule.
 export * from './ownership.js';
+// The challenge a passkey signs for a message, never the message itself.
+export * from './signedMessage.js';
 export * from './client.js';

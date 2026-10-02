@@ -63,7 +63,11 @@ export interface PasskeyWalletCandidate {
 
 /** A WebAuthn assertion over a challenge the caller chose. */
 export interface OwnershipProof {
-  /** Fresh random bytes the caller generated for this proof (>= 16 bytes; use createOwnershipChallenge()). */
+  /**
+   * The challenge the caller generated for this proof, fresh: use
+   * createTaggedOwnershipChallenge(). Any challenge of at least 16 bytes is
+   * checked, so a proof over createOwnershipChallenge()'s 32 bytes verifies too.
+   */
   challenge: Uint8Array;
   /** DER or 64-byte r||s. */
   signature: Uint8Array;
@@ -248,9 +252,50 @@ const MIN_CONTEXT_SLOT_TRIES = 5;
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────
 
-/** 32 random bytes from crypto.getRandomValues. */
+/** The domain tag every LazorKit ownership-proof challenge starts with (format v1). */
+export const OWNERSHIP_PROOF_DOMAIN = 'LazorKit ownership proof v1';
+
+const OWNERSHIP_PROOF_TAG = new Uint8Array(Buffer.from(OWNERSHIP_PROOF_DOMAIN, 'utf8'));
+const OWNERSHIP_PROOF_NONCE_LENGTH = 32;
+
+/**
+ * 32 fresh random bytes: a nonce, and no more than that.
+ *
+ * They come from `randomBytes` in @noble/hashes: crypto.getRandomValues, Node's
+ * own crypto where there is no global one (Node 18). Always exactly 32 bytes:
+ * `@lazorkit/wallet` and `@lazorkit/wallet-mobile-adapter` take them as their
+ * random source where `globalThis.crypto` is missing, and require that length.
+ *
+ * @deprecated As the challenge of an ownership proof, use
+ * {@link createTaggedOwnershipChallenge}. A passkey signs whatever challenge it
+ * is handed, and 32 bare random bytes look exactly like a transaction
+ * challenge to whatever is asked to sign them. This function itself is
+ * unchanged, and proofs over its bytes still verify.
+ */
 export function createOwnershipChallenge(): Uint8Array {
   return randomBytes(32);
+}
+
+/**
+ * A fresh challenge for an ownership proof, format v1:
+ *
+ *     tag       = UTF-8 "LazorKit ownership proof v1"   (27 bytes, OWNERSHIP_PROOF_DOMAIN)
+ *     challenge = tag || 32 random bytes               (59 bytes)
+ *
+ * The random bytes come from where {@link createOwnershipChallenge}'s do.
+ * Generate one for each proof and never reuse it; check the assertion with
+ * {@link verifyOwnershipProof}.
+ *
+ * A passkey signs whatever challenge it is handed, and the LazorKit programs
+ * approve a transaction by the challenge in a passkey signature: always a
+ * 32-byte hash. A message challenge ({@link signedMessageChallenge}) is 58
+ * bytes and starts with its own tag, and this one is 59 with another, so no
+ * challenge of one kind can equal one of another, whatever the bytes. The same
+ * format as `createOwnershipChallenge` in `@lazorkit/wallet` 3.3.1 and
+ * `@lazorkit/wallet-mobile-adapter` 2.3.1, whose connect already signs it.
+ */
+export function createTaggedOwnershipChallenge(): Uint8Array {
+  return concatBytes([OWNERSHIP_PROOF_TAG, randomBytes(OWNERSHIP_PROOF_NONCE_LENGTH)]);
 }
 
 /**
@@ -259,7 +304,10 @@ export function createOwnershipChallenge(): Uint8Array {
  * The assertion must be a `webauthn.get` over exactly `proof.challenge`, made
  * under `rpId` with the user present. Returns `[]` when any of that fails;
  * never throws. Freshness is the caller's part: generate the challenge with
- * {@link createOwnershipChallenge} for each proof and never reuse one.
+ * {@link createTaggedOwnershipChallenge} for each proof and never reuse one.
+ * Any challenge of at least 16 bytes is checked as it is — the tagged form,
+ * and the 32 bare random bytes of {@link createOwnershipChallenge} — so proofs
+ * made over either verify.
  */
 export function verifyOwnershipProof<T extends { publicKey: Uint8Array }>(
   candidates: T[],
@@ -331,9 +379,11 @@ export function recoverPasskeyPublicKeys(proof: OwnershipProof, rpId: string): U
  * For a passkey whose key you do not hold — one registered on another device,
  * or by another app under the same `rpId` — when it has no wallet yet: collect
  * two assertions from it, each over its own fresh challenge
- * ({@link createOwnershipChallenge}), and pass them here; then create the
- * wallet with the key this returns. Each proof leaves a few candidates
+ * ({@link createTaggedOwnershipChallenge}), and pass them here; then create
+ * the wallet with the key this returns. Each proof leaves a few candidates
  * ({@link recoverPasskeyPublicKeys}); only the signer's is common to both.
+ * Proofs over the 32 bare random bytes of {@link createOwnershipChallenge}
+ * still resolve, as they verify.
  *
  * `null` unless there are at least two proofs, no two over the same challenge,
  * each passes the checks of {@link verifyOwnershipProof} under `rpId`, and

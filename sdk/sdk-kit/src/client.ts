@@ -172,7 +172,7 @@ const SYSVAR_IX_INDEX_MIGRATE_WALLET = 7;
 // ─── Prepared types (Secp256r1 prepare/finalize flow) ────────────────
 
 interface PreparedBase {
-  /** SHA-256 challenge to pass to navigator.credentials.get(). */
+  /** SHA-256 challenge to pass to navigator.credentials.get(): 32 bytes, approving this operation only. */
   challenge: Uint8Array;
 }
 
@@ -1220,7 +1220,7 @@ export class LazorKit {
    * asking them.
    *
    * `proof` is a WebAuthn assertion over a challenge from
-   * {@link createOwnershipChallenge}, made by the passkey that signed in.
+   * {@link createTaggedOwnershipChallenge}, made by the passkey that signed in.
    * Candidates whose stored key did not produce it are dropped (`unproven`
    * counts them): anyone can create a wallet listing this credential with
    * their own key.
