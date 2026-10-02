@@ -6,13 +6,20 @@
  * adapted to use kit's Address branding and to read account data from a
  * kit-style RPC client.
  */
-import { createHash } from 'node:crypto';
+import { sha256 } from '@noble/hashes/sha2';
 import {
   getAddressEncoder,
   type Address,
   type Rpc,
   type GetAccountInfoApi,
 } from '@solana/kit';
+import {
+  readChallengeCounter,
+  readChallengeKey,
+  type ChallengeReadOptions,
+} from './challengeReads.js';
+
+export { MinContextSlotNotReachedError, type ChallengeReadOptions } from './challengeReads.js';
 
 const addressEncoder = getAddressEncoder();
 
@@ -26,7 +33,7 @@ const addressEncoder = getAddressEncoder();
  * - Counter: 0 (LazorKit uses its own odometer counter, not WebAuthn's)
  */
 export function generateAuthenticatorData(rpId: string): Uint8Array {
-  const rpIdHash = createHash('sha256').update(rpId).digest();
+  const rpIdHash = sha256(rpId);
   const data = new Uint8Array(37);
   data.set(rpIdHash, 0);
   data[32] = 0x01; // User Present flag
@@ -74,47 +81,33 @@ export interface Secp256r1Signer {
 /**
  * Reads the current odometer counter from an on-chain authority account.
  * The counter is a u32 LE at offset 8 of the AuthorityAccountHeader.
+ *
+ * Read at `opts.commitment` (default `'confirmed'`) and, with
+ * `opts.minContextSlot`, from a node at or past that slot: see
+ * {@link ChallengeReadOptions}.
  */
 export async function readAuthorityCounter(
   rpc: Rpc<GetAccountInfoApi>,
   authorityPda: Address,
+  opts?: ChallengeReadOptions,
 ): Promise<number> {
-  const info = await rpc
-    .getAccountInfo(authorityPda, { encoding: 'base64' })
-    .send();
-  if (!info.value)
-    throw new Error(`Authority account not found: ${authorityPda}`);
-  const bytes = base64ToBytes(info.value.data[0]);
-  if (bytes.length < 12) throw new Error('Authority account data too short');
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return view.getUint32(8, /* le */ true);
+  return readChallengeCounter(rpc, authorityPda, opts);
 }
 
 /**
  * Reads the compressed Secp256r1 public key (33 bytes) from an on-chain
  * authority account. Layout:
  *   [header(48)] [credential_id_hash(32)] [compressed_pubkey(33)] ...
+ *
+ * `opts` as for {@link readAuthorityCounter}: the key never changes, but an
+ * authority added by the previous transaction exists only from its slot.
  */
 export async function readAuthorityPubkey(
   rpc: Rpc<GetAccountInfoApi>,
   authorityPda: Address,
+  opts?: ChallengeReadOptions,
 ): Promise<Uint8Array> {
-  const info = await rpc
-    .getAccountInfo(authorityPda, { encoding: 'base64' })
-    .send();
-  if (!info.value)
-    throw new Error(`Authority account not found: ${authorityPda}`);
-  const bytes = base64ToBytes(info.value.data[0]);
-  // Min size = 48 (header) + 32 (credential_id_hash) + 33 (pubkey) = 113.
-  if (bytes.length < 113)
-    throw new Error('Authority account too small for Secp256r1');
-  if (bytes[0] !== 2) throw new Error('Not an Authority account');
-  if (bytes[1] !== 1) throw new Error('Authority is not Secp256r1');
-  return bytes.slice(80, 80 + 33);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  return new Uint8Array(Buffer.from(b64, 'base64'));
+  return readChallengeKey(rpc, authorityPda, opts);
 }
 
 // ─── Auth payload builders ───────────────────────────────────────────
@@ -190,8 +183,16 @@ export function buildAuthPayloadPrefix(params: {
  *
  * Hash = SHA256(
  *   discriminator || auth_payload_prefix || signed_payload ||
- *   payer || counter_le(4) || program_id
+ *   payer || wallet || counter_le(4) || program_id
  * )
+ *
+ * `wallet` is the wallet the authenticating authority belongs to — the `wallet`
+ * field of its account header: the wallet PDA for every v2 instruction, the v1
+ * wallet for `MigrateWallet`. Without it a signature for `CreateSession`,
+ * `AddAuthority` or `TransferOwnership` — or for `Execute` or `Authorize` when
+ * no inner instruction touches an account derived from the wallet — names no
+ * wallet, and could be submitted again on another wallet holding the same
+ * passkey at the same counter, through the same payer.
  *
  * Must exactly match the on-chain `sol_sha256` call in
  * program/src/auth/secp256r1/mod.rs.
@@ -201,18 +202,20 @@ export function buildSecp256r1Challenge(params: {
   authPayload: Uint8Array;
   signedPayload: Uint8Array;
   payer: Address;
+  wallet: Address;
   counter: number;
   programId: Address;
 }): Uint8Array {
   const counterBuf = new Uint8Array(4);
   new DataView(counterBuf.buffer).setUint32(0, params.counter, true);
 
-  const hash = createHash('sha256');
+  const hash = sha256.create();
   hash.update(params.discriminator);
   hash.update(params.authPayload);
   hash.update(params.signedPayload);
   hash.update(addressEncoder.encode(params.payer) as Uint8Array);
+  hash.update(addressEncoder.encode(params.wallet) as Uint8Array);
   hash.update(counterBuf);
   hash.update(addressEncoder.encode(params.programId) as Uint8Array);
-  return new Uint8Array(hash.digest());
+  return hash.digest();
 }

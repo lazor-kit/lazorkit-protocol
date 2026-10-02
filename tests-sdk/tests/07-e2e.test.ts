@@ -6,7 +6,13 @@ import {
   SystemProgram,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
-import { setupTest, sendTx, getSlot, type TestContext } from './common';
+import {
+  setupTest,
+  sendTx,
+  getSlot,
+  delegatePolicy,
+  type TestContext,
+} from './common';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
   LazorKitClient,
@@ -140,6 +146,7 @@ describe('E2E Company Workflow', () => {
         rpId: spenderKey.rpId,
       },
       role: ROLE_SPENDER,
+      policy: delegatePolicy(),
     });
     spenderAuthPda = newAuthorityPda;
 
@@ -207,6 +214,8 @@ describe('E2E Company Workflow', () => {
       adminSigner: ed25519(adminKp.publicKey, adminAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
 
     await sendTx(ctx, instructions, [adminKp]);

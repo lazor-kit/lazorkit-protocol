@@ -4,7 +4,7 @@ use pinocchio::{
 
 use crate::{
     error::ProtocolError,
-    state::{protocol_config::ProtocolConfig, AccountDiscriminator},
+    state::protocol_config::{ProtocolConfig, MAX_PROTOCOL_FEE_LAMPORTS},
 };
 
 /// Processes the `UpdateProtocol` instruction.
@@ -29,6 +29,15 @@ pub fn process(
     let creation_fee = u64::from_le_bytes(instruction_data[0..8].try_into().unwrap());
     let execution_fee = u64::from_le_bytes(instruction_data[8..16].try_into().unwrap());
     let enabled = instruction_data[16];
+
+    // An unbounded fee is a freeze in disguise — see MAX_PROTOCOL_FEE_LAMPORTS.
+    if creation_fee > MAX_PROTOCOL_FEE_LAMPORTS || execution_fee > MAX_PROTOCOL_FEE_LAMPORTS {
+        return Err(ProtocolError::FeeExceedsMaximum.into());
+    }
+    // `enabled` is read as a boolean everywhere; refuse values that are neither.
+    if enabled > 1 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
     // 7 bytes padding at [17..24]
     let new_treasury: &[u8; 32] = instruction_data[24..56].try_into().unwrap();
 
@@ -44,18 +53,11 @@ pub fn process(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Verify config_pda is owned by this program before reading its fields
-    // for authorization decisions. Defense-in-depth.
-    if config_pda.owner() != program_id {
-        return Err(ProgramError::IllegalOwner);
-    }
+    // Pin the address, the owner and the header before reading any field for an
+    // authorization decision.
+    ProtocolConfig::load(program_id, config_pda)?;
 
     let data = config_pda.try_borrow_data()?;
-    if data.len() < core::mem::size_of::<ProtocolConfig>()
-        || data[0] != AccountDiscriminator::ProtocolConfig as u8
-    {
-        return Err(ProtocolError::InvalidProtocolAdmin.into());
-    }
     let config = unsafe { &*(data.as_ptr() as *const ProtocolConfig) };
     if admin.key() != &config.admin {
         return Err(ProtocolError::InvalidProtocolAdmin.into());

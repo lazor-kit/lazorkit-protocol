@@ -113,9 +113,17 @@ export async function fakeWebAuthnSign(
   );
 
   const messageToSign = Buffer.concat([authenticatorData, clientDataJsonHash]);
-  const signatureBase64 = await key.privateKey.sign(Buffer.from(messageToSign));
+  // Fixed-width r || s straight from Node. The package's own `sign` strips the
+  // DER framing with `BN.toBuffer()`, which drops a leading zero byte of r or
+  // s: about one signature in 200 came back 63 bytes long and, padded at the
+  // front, split in the wrong place — an invalid signature.
   const signature = enforceLowS(
-    new Uint8Array(Buffer.from(signatureBase64, 'base64')),
+    new Uint8Array(
+      crypto.sign('sha256', messageToSign, {
+        key: key.privateKey.toPEM(),
+        dsaEncoding: 'ieee-p1363',
+      }),
+    ),
   );
 
   return {

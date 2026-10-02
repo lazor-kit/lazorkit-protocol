@@ -3,26 +3,41 @@
 A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r1)** authentication for end-user flows and **Ed25519** authentication for bots / backends / programmatic signing — mixed freely on the same wallet. Built with [pinocchio](https://github.com/febo/pinocchio) for zero-copy serialization.
 
 - **Two auth types, one wallet** — passkeys (Apple Touch ID / Face ID, Windows Hello, Android biometrics, security keys) and Ed25519 (regular Solana keypairs). Any mix is supported: a passkey owner with an Ed25519 admin bot, or vice versa.
-- **RBAC** — Owner / Admin / Spender with strict role hierarchy.
+- **Rank and policy, kept separate** — rank (Owner / Admin / Delegate) says what an
+  authority may manage; an optional per-authority spending policy says what it may
+  spend. A wallet may have several Owners, which is how a second device revokes a
+  lost first one.
 - **Session keys with policies** — ephemeral signers restricted by per-tx / per-window / lifetime SOL + token caps, and program whitelists.
-- **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps).
-- **Wallet lookup** — find wallets by credential hash or public key; no need to store `walletPda` locally.
+- **Deferred execution** — 2-tx flow for payloads exceeding a single tx size limit (e.g. Jupiter swaps in a v0 transaction, capped at 1232 bytes). Under transaction v1 (SIMD-0385: 4096 bytes, 64 addresses; active on devnet) it is no longer a size workaround: the measured Jupiter routes each fit one passkey Execute, and tx2 is held to the same 64 addresses. What it still gives is signing now and sending later, or from another sender. See [docs/Architecture.md](docs/Architecture.md#transaction-v1-simd-0385).
+- **Returning users, found safely** — `findOwnPasskeyWallet` finds a passkey user's own wallet from one assertion, with no `walletPda` stored: it adopts a wallet only if the passkey proves the key stored there, it is the one wallet the passkey has signed for, and nothing untrusted can spend from it; anything else goes to the user to confirm. (`findWalletsByAuthority` is a raw lookup by credential hash or public key — the hash is public, and anyone can plant a wallet that lists it.)
 - **Parallel execution** — different authorities on the same wallet never block each other.
 
 ## Install
 
 ```bash
-npm install @lazorkit/sdk-legacy
+npm install @lazorkit/sdk-legacy          # 0.3.x — protocol v1, what mainnet runs today
+npm install @lazorkit/sdk-legacy@next     # 1.x — protocol v2, this repo
 ```
 
-Program IDs (chosen at compile time via `--features mainnet` / `--features devnet`):
+This README documents protocol v2. v2 and v1 are not wire-compatible, so v2
+ships at its **own program ids** and v1 keeps its addresses — the way Squads
+v3/v4, Jupiter v4/v6 and Token/Token-2022 run side by side. Nothing that uses v1
+today stops working when v2 launches.
 
-| Cluster | Program ID |
-|---|---|
-| mainnet | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` |
-| devnet | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` |
+| Cluster | v2 program id | v1 program id (retiring) | build |
+|---|---|---|---|
+| mainnet | `LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8` (not yet deployed) | `LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi` | `--features mainnet` / `mainnet-v1` |
+| devnet | `57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv` | `4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS` | `--features devnet` / `devnet-v1` |
 
-The mainnet slot is shared with the [program-v2](https://github.com/lazor-kit/program-v2) foundation build (no fees). `@lazorkit/sdk-legacy` works against either binary at the shared slot — see the [SDK README](sdk/sdk-legacy/README.md#cluster--program-ids) for details.
+A v1 id is only ever rebuilt as a **sunset binary**: it serves the three
+instructions a v1 wallet needs to leave (`MigrateWallet`, `ReclaimDeferred`,
+`CloseExpiredSession`) and refuses everything else with `RetiredDeployment`
+(4018). `migrateV1Wallet` executes against the v1 id and delivers to a v2 vault
+at the v2 id. It reuses an existing v2 wallet only if it is the one authority
+the passkey has signed on and `vetMigrationDestination` finds no one else able
+to spend from it, and otherwise creates one; send its setup and migrate in one
+transaction. See
+[docs/migration-ui-flow.md](docs/migration-ui-flow.md).
 
 ## Quick start
 
@@ -50,8 +65,10 @@ const { instructions, walletPda, vaultPda, authorityPda } = await client.createW
     rpId: 'your-app.com',
   },
 });
-// Returning user: find the wallet again from just the credential hash
-const [wallet] = await client.findWalletsByAuthority(credentialIdHash);
+// Returning user: find this wallet with client.findOwnPasskeyWallet — see
+// "Finding a returning user's wallet" in sdk/sdk-legacy/README.md. Not by
+// credential hash alone: the hash is public, and anyone can plant a wallet
+// that lists it.
 ```
 
 **Ed25519 owner** (bot / backend / programmatic signing):
@@ -66,8 +83,10 @@ const { instructions, walletPda, vaultPda, authorityPda } = await client.createW
     publicKey: ownerKp.publicKey,
   },
 });
-// Lookup works for Ed25519 too
-const [wallet] = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
+// Lookup works for Ed25519 too. It lists every wallet the key is on, including
+// any a stranger added it to: check `role` and the wallet's other authorities
+// (findAuthoritiesByWallet) before using one.
+const records = await client.findWalletsByAuthority(ownerKp.publicKey.toBytes(), 'ed25519');
 ```
 
 ### Add another authority to the same wallet
@@ -179,9 +198,14 @@ All paths fit comfortably within Solana's 200,000 CU default budget. The ~2,300 
 | Account | Size | Rent |
 |---|---|---|
 | Wallet PDA | 8 bytes | 0.000947 SOL |
-| Authority (Ed25519) | 80 bytes | 0.001448 SOL |
-| Authority (Secp256r1) | 145 bytes | 0.001900 SOL |
+| Authority (Ed25519) | 80 bytes + policy (0–2048) | 0.001448+ SOL |
+| Authority (Secp256r1) | 145 bytes + policy (0–2048) | 0.001900+ SOL |
 | Session | 80 bytes + actions (0–2048) | 0.001448+ SOL |
+
+A policy costs the same rent per byte as a session's action buffer, and buys the
+same limits. The choice between a policy-bearing authority and a session is about
+lifetime and key custody, not cost: a session key is ephemeral and held by
+software, an authority is durable and can be a passkey.
 
 **Total wallet creation cost**: ~0.0024 SOL (Ed25519) or ~0.0028 SOL (Secp256r1) — roughly $0.40 USD at $150/SOL.
 
@@ -191,9 +215,11 @@ Each authority has its own PDA, so different authorities on the same wallet exec
 
 ## Security
 
-- Odometer counter replay protection (monotonic u32 per authority; works with synced passkeys).
+- Odometer counter replay protection (monotonic u32 per authority; checked increment never wraps; works with synced passkeys).
 - Clock-based slot freshness (150-slot window).
 - CPI reentrancy prevention (`stack_height` check on every authenticated path).
+- Authority creation rejects all-zero authority identity material.
+- Fee-eligible instructions require canonical protocol fee accounts and per-payer `FeeRecord` accounting.
 - Expired session limits treated as fully exhausted (never "unlocked").
 - `SolMaxPerTx` uses per-CPI gross-outflow tracking — DeFi round-trips can't bypass the per-tx cap by returning most lamports.
 - Vault + per-listed-mint token account invariants enforced during session execute (blocks `System::Assign`, `SetAuthority`, `Approve` escapes).

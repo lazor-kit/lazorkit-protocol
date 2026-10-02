@@ -15,12 +15,18 @@ use crate::{
     },
     error::AuthError,
     state::{authority::AuthorityAccountHeader, AccountDiscriminator},
+    utils::is_all_zero,
 };
 
 /// Processes the `TransferOwnership` instruction.
 ///
 /// atomically transfers the "Owner" role from the current authority to a new one.
 /// The old owner is closed/removed, and the new one is created with `Role::Owner`.
+///
+/// The wallet's `owner_count` is deliberately left alone: one Owner goes, one
+/// Owner arrives. That is also why this instruction survives multi-owner — it is
+/// the only way to hand ownership to a key that does not exist yet, and the only
+/// way for a sole Owner to stop being one without leaving the wallet ownerless.
 ///
 /// # Logic:
 /// 1. **Authentication**: Verifies the `current_owner` matches the request logic.
@@ -81,6 +87,15 @@ pub fn process(
                 return Err(ProgramError::InvalidInstructionData);
             }
             let (hash, rest_after_hash) = rest.split_at(32);
+            // M-5. `id_seed` is checked non-zero below, which for Ed25519 *is*
+            // the pubkey — but for Secp256r1 the seed is the credential hash and
+            // the 33-byte compressed key rides along unchecked. An all-zero key
+            // is not a valid curve point, so it would be stored as an authority
+            // that can never authenticate: a rank slot nobody can use and, if it
+            // were the Owner, a wallet nobody can manage.
+            if is_all_zero(&rest_after_hash[..33]) {
+                return Err(ProgramError::InvalidAccountData);
+            }
             let rp_id_len = rest_after_hash[33] as usize;
             if rp_id_len == 0 || rp_id_len > 253 {
                 return Err(ProgramError::InvalidInstructionData);
@@ -111,6 +126,13 @@ pub fn process(
     let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. The payer's signature was only ever enforced as a side effect: the
+    // System Program demands it during the funding CPI. `initialize_pda_account`
+    // skips that CPI when the PDA already holds enough lamports — anyone can
+    // pre-fund a PDA — so on that path nothing checked it at all.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -141,9 +163,7 @@ pub fn process(
     }
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     if !current_owner.is_writable() {
         return Err(ProgramError::InvalidAccountData);
@@ -156,15 +176,20 @@ pub fn process(
             return Err(ProgramError::InvalidAccountData);
         }
         // SAFETY: Use read_unaligned for safety
+        AuthorityAccountHeader::check(data)?;
         let auth =
             unsafe { std::ptr::read_unaligned(data.as_ptr() as *const AuthorityAccountHeader) };
-        if auth.discriminator != AccountDiscriminator::Authority as u8 {
-            return Err(ProgramError::InvalidAccountData);
-        }
         if auth.wallet != *wallet_pda.key() {
             return Err(ProgramError::InvalidAccountData);
         }
         if auth.role != 0 {
+            return Err(AuthError::PermissionDenied.into());
+        }
+        // A policy-bearing (bounded) Owner may not transfer ownership: the new
+        // owner is written with `policy_len = 0`, so a bounded Owner could shed
+        // its own spending bound by transferring to a fresh key it controls.
+        // Same principle as the CreateSession / AddAuthority / Authorize guards.
+        if auth.policy_len != 0 {
             return Err(AuthError::PermissionDenied.into());
         }
 
@@ -212,7 +237,7 @@ pub fn process(
     }
 
     let (new_key, bump) = find_program_address(
-        &[b"authority", wallet_pda.key().as_ref(), id_seed],
+        &[crate::seeds::AUTHORITY, wallet_pda.key().as_ref(), id_seed],
         program_id,
     );
     if !sol_assert_bytes_eq(new_owner.key().as_ref(), new_key.as_ref(), 32) {
@@ -232,7 +257,7 @@ pub fn process(
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
     let bump_arr = [bump];
     let seeds = [
-        Seed::from(b"authority"),
+        Seed::from(crate::seeds::AUTHORITY),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(id_seed),
         Seed::from(&bump_arr),
@@ -260,7 +285,8 @@ pub fn process(
         version: crate::state::CURRENT_ACCOUNT_VERSION,
         _padding1: [0; 3],
         counter: 0,
-        _padding2: [0; 4],
+        policy_len: 0,
+        _padding2: [0; 2],
         wallet: *wallet_pda.key(),
     };
     unsafe {
@@ -294,7 +320,10 @@ pub fn process(
                 data[rp_id_hash_offset..rp_id_hash_offset + 32].fill(0);
             }
         },
-        _ => unreachable!(),
+        // Validated to 0 or 1 well before here. An error rather than
+        // `unreachable!()` so a future edit that widens the parse cannot turn a
+        // missed arm into a BPF panic — which costs code size to report less.
+        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
 
     let current_lamports = unsafe { *current_owner.borrow_mut_lamports_unchecked() };

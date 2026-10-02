@@ -25,13 +25,21 @@ fn test_create_wallet_secp256r1_repro() {
 
     let user_seed = rand::random::<[u8; 32]>();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     // Authority seed for Secp256r1 is the credential_id_hash
     let (auth_pda, auth_bump) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), &credential_id_hash],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            &credential_id_hash,
+        ],
         &context.program_id,
     );
 
@@ -89,6 +97,10 @@ fn test_create_wallet_secp256r1_repro() {
     println!("✅ Wallet created with Secp256r1 Authority");
 }
 
+// Two Owner passkeys on one wallet — the multi-device case this exists for. Was
+// red on `develop` since commit 5aecaf7 ("fix owner authority role policy"),
+// which made `new_role == 0` illegal, and stayed unnoticed because the litesvm
+// suite had never run in CI. It asks for role 0 twice, which is now the point.
 #[test]
 fn test_add_multiple_secp256r1_authorities() {
     let mut context = setup_test();
@@ -98,12 +110,20 @@ fn test_add_multiple_secp256r1_authorities() {
     let owner_keypair = solana_sdk::signature::Keypair::new();
     let owner_pubkey = owner_keypair.pubkey();
 
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     let (owner_pda, owner_bump) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), owner_pubkey.as_ref()],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            owner_pubkey.as_ref(),
+        ],
         &context.program_id,
     );
 
@@ -162,7 +182,11 @@ fn test_add_multiple_secp256r1_authorities() {
         .as_bytes()
         .to_vec();
     let (auth_pda1, _auth_bump1) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), &credential_id_hash1],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            &credential_id_hash1,
+        ],
         &context.program_id,
     );
 
@@ -174,24 +198,17 @@ fn test_add_multiple_secp256r1_authorities() {
         args
     };
 
-    let data_payload = {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&add_auth_args);
-        payload.extend_from_slice(&credential_id_hash1);
-        payload.extend_from_slice(&pubkey_bytes1);
-        payload.push(rp_id.len() as u8);
-        payload.extend_from_slice(rp_id);
-        payload
-    };
-
-    let signature = owner_keypair.sign_message(&data_payload);
+    // No trailing signature: the authorizer here is Ed25519, and an Ed25519
+    // authority authenticates by being among the transaction's signers. A
+    // detached signature over the payload would be transmitted and never read
+    // (M-1).
     let mut add_auth_ix_data = vec![1]; // AddAuthority (discriminator 1)
     add_auth_ix_data.extend_from_slice(&add_auth_args);
     add_auth_ix_data.extend_from_slice(&credential_id_hash1);
     add_auth_ix_data.extend_from_slice(&pubkey_bytes1);
     add_auth_ix_data.push(rp_id.len() as u8);
     add_auth_ix_data.extend_from_slice(rp_id);
-    add_auth_ix_data.extend_from_slice(signature.as_ref());
+    add_auth_ix_data.extend_from_slice(&0u16.to_le_bytes());
 
     let add_auth_ix1 = Instruction {
         program_id: context.program_id,
@@ -237,28 +254,25 @@ fn test_add_multiple_secp256r1_authorities() {
         .as_bytes()
         .to_vec();
     let (auth_pda2, _auth_bump2) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), &credential_id_hash2],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            &credential_id_hash2,
+        ],
         &context.program_id,
     );
 
-    let data_payload = {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&add_auth_args);
-        payload.extend_from_slice(&credential_id_hash2);
-        payload.extend_from_slice(&pubkey_bytes2);
-        payload.push(rp_id.len() as u8);
-        payload.extend_from_slice(rp_id);
-        payload
-    };
-
-    let signature = owner_keypair.sign_message(&data_payload);
+    // No trailing signature: the authorizer here is Ed25519, and an Ed25519
+    // authority authenticates by being among the transaction's signers. A
+    // detached signature over the payload would be transmitted and never read
+    // (M-1).
     let mut add_auth_ix_data = vec![1]; // AddAuthority (discriminator 1)
     add_auth_ix_data.extend_from_slice(&add_auth_args);
     add_auth_ix_data.extend_from_slice(&credential_id_hash2);
     add_auth_ix_data.extend_from_slice(&pubkey_bytes2);
     add_auth_ix_data.push(rp_id.len() as u8);
     add_auth_ix_data.extend_from_slice(rp_id);
-    add_auth_ix_data.extend_from_slice(signature.as_ref());
+    add_auth_ix_data.extend_from_slice(&0u16.to_le_bytes());
 
     let add_auth_ix2 = Instruction {
         program_id: context.program_id,

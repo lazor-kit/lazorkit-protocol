@@ -19,7 +19,7 @@ use crate::{
     error::AuthError,
     state::{
         action::{parse_actions, read_u64, write_u64, ActionType, ActionView},
-        session::{has_actions, SESSION_HEADER_SIZE},
+        policy::PolicyLocation,
     },
 };
 
@@ -67,15 +67,16 @@ pub struct TokenAuthoritySnapshot {
 /// Returns early with Ok(()) if no actions exist.
 pub fn evaluate_pre_actions(
     session_data: &[u8],
+    loc: PolicyLocation,
     compact_instructions: &[CompactInstructionRef<'_>],
     accounts: &[AccountInfo],
     current_slot: u64,
 ) -> Result<(), ProgramError> {
-    if !has_actions(session_data) {
+    if !loc.is_present(session_data) {
         return Ok(());
     }
 
-    let actions_buf = &session_data[SESSION_HEADER_SIZE..];
+    let actions_buf = loc.slice(session_data);
     let actions = parse_actions(actions_buf)?;
 
     // Collect whitelist/blacklist program IDs.
@@ -136,14 +137,15 @@ pub fn evaluate_pre_actions(
 /// Snapshot token balances for mints referenced in token actions.
 pub fn snapshot_token_balances(
     session_data: &[u8],
+    loc: PolicyLocation,
     accounts: &[AccountInfo],
     vault_key: &Pubkey,
 ) -> Result<Vec<TokenSnapshot>, ProgramError> {
-    if !has_actions(session_data) {
+    if !loc.is_present(session_data) {
         return Ok(Vec::new());
     }
 
-    let actions_buf = &session_data[SESSION_HEADER_SIZE..];
+    let actions_buf = loc.slice(session_data);
     let actions = parse_actions(actions_buf)?;
 
     let mut mints: Vec<[u8; 32]> = Vec::new();
@@ -180,46 +182,35 @@ pub fn snapshot_token_balances(
 }
 
 /// Snapshot per-token-account authority fields for every vault-owned token
-/// account whose mint appears in a token action.
+/// account in the account list.
 ///
 /// Paired with `verify_token_authorities_unchanged` post-CPI. Together they
 /// prevent `SetAuthority` and `Approve`-style escapes where the session key
 /// would otherwise reassign control of vault-owned token accounts without
 /// moving any lamports (so the balance-based limits would miss it).
+///
+/// Coverage is deliberately mint-agnostic. An earlier version gathered the
+/// mints named by `TokenLimit` / `TokenRecurringLimit` / `TokenMaxPerTx` and
+/// returned early when there were none — which meant the most common session
+/// shape (a SOL allowance plus a program whitelist, no token action) got no
+/// protection at all. A session that never mentions a mint is not a session
+/// that consented to hand that mint's account away, so every vault-owned token
+/// account is frozen for the duration of the CPI loop.
+///
+/// Only `owner`, `delegate` and `close_authority` are frozen; `amount` is
+/// free to move, so ordinary transfers still work and remain governed by the
+/// balance-based limits.
 pub fn snapshot_token_authorities(
     session_data: &[u8],
+    loc: PolicyLocation,
     accounts: &[AccountInfo],
     vault_key: &Pubkey,
 ) -> Result<Vec<TokenAuthoritySnapshot>, ProgramError> {
-    if !has_actions(session_data) {
+    if !loc.is_present(session_data) {
         return Ok(Vec::new());
     }
 
-    let actions_buf = &session_data[SESSION_HEADER_SIZE..];
-    let actions = parse_actions(actions_buf)?;
-
-    // Collect listed mints (same logic as snapshot_token_balances).
-    let mut mints: Vec<[u8; 32]> = Vec::new();
-    for action in &actions {
-        match action.action_type {
-            ActionType::TokenLimit
-            | ActionType::TokenRecurringLimit
-            | ActionType::TokenMaxPerTx => {
-                let mut mint = [0u8; 32];
-                mint.copy_from_slice(&actions_buf[action.data_offset..action.data_offset + 32]);
-                if !mints.iter().any(|m| m == &mint) {
-                    mints.push(mint);
-                }
-            },
-            _ => {},
-        }
-    }
-    if mints.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Scan all SPL-Token-owned accounts; snapshot each vault-owned one whose
-    // mint is listed in the session actions.
+    // Scan all SPL-Token-owned accounts; snapshot every vault-owned one.
     let mut out = Vec::new();
     for acc in accounts {
         let owner = acc.owner();
@@ -232,12 +223,6 @@ pub fn snapshot_token_authorities(
         }
         // vault must currently own it
         if &data[TOKEN_OWNER_OFFSET..TOKEN_OWNER_OFFSET + 32] != vault_key.as_ref() {
-            continue;
-        }
-        // mint must be listed
-        let mut mint = [0u8; 32];
-        mint.copy_from_slice(&data[TOKEN_MINT_OFFSET..TOKEN_MINT_OFFSET + 32]);
-        if !mints.iter().any(|m| m == &mint) {
             continue;
         }
 
@@ -322,6 +307,7 @@ pub fn verify_token_authorities_unchanged(
 /// if a later check fails.
 pub fn evaluate_post_actions(
     session_data: &mut [u8],
+    loc: PolicyLocation,
     accounts: &[AccountInfo],
     vault_key: &Pubkey,
     vault_lamports_before: u64,
@@ -330,7 +316,7 @@ pub fn evaluate_post_actions(
     token_snapshots_before: &[TokenSnapshot],
     current_slot: u64,
 ) -> Result<(), ProgramError> {
-    if !has_actions(session_data) {
+    if !loc.is_present(session_data) {
         return Ok(());
     }
 
@@ -341,7 +327,7 @@ pub fn evaluate_post_actions(
     // If nothing was spent, skip all checks (no state mutation needed for SOL).
     // Token checks still need to run.
 
-    let actions_buf_readonly = &session_data[SESSION_HEADER_SIZE..];
+    let actions_buf_readonly = loc.slice(session_data);
     let actions = parse_actions(actions_buf_readonly)?;
 
     // ── Phase 1: Validate all SOL limits (read-only check) ──────────
@@ -350,7 +336,7 @@ pub fn evaluate_post_actions(
     // This prevents a session with expired limits from becoming unrestricted.
     for action in &actions {
         let action_expired = is_expired(action, current_slot);
-        let abs_data_offset = SESSION_HEADER_SIZE + action.data_offset;
+        let abs_data_offset = loc.abs(action.data_offset);
 
         match action.action_type {
             ActionType::SolMaxPerTx => {
@@ -411,7 +397,7 @@ pub fn evaluate_post_actions(
     // Same policy as SOL limits: expired = treat as fully exhausted.
     for action in &actions {
         let action_expired = is_expired(action, current_slot);
-        let abs_data_offset = SESSION_HEADER_SIZE + action.data_offset;
+        let abs_data_offset = loc.abs(action.data_offset);
 
         match action.action_type {
             ActionType::TokenMaxPerTx
@@ -488,14 +474,14 @@ pub fn evaluate_post_actions(
 
     // ── Phase 2: All checks passed. Now write state mutations. ──────
     // Re-parse using a slice reference — no allocation needed, same bytes, same offsets.
-    let actions = parse_actions(&session_data[SESSION_HEADER_SIZE..])?;
+    let actions = parse_actions(loc.slice(session_data))?;
 
     for action in &actions {
         if is_expired(action, current_slot) {
             continue;
         }
 
-        let abs_data_offset = SESSION_HEADER_SIZE + action.data_offset;
+        let abs_data_offset = loc.abs(action.data_offset);
 
         match action.action_type {
             ActionType::SolLimit => {
@@ -515,10 +501,19 @@ pub fn evaluate_post_actions(
                     let window = read_u64(&session_data[abs_data_offset..], 16);
                     let last_reset = read_u64(&session_data[abs_data_offset..], 24);
 
+                    // The window restarts at the spend that opened it, not at a
+                    // grid boundary. Snapping `last_reset` back to
+                    // `(current_slot / window) * window` made the window expire
+                    // early by however far into it the spend fell: a spend at
+                    // `kW + W - 1` reset and pinned `last_reset = kW`, so a
+                    // spend two slots later at `kW + W + 1` satisfied
+                    // `W + 1 > W` and reset again — two full allowances inside
+                    // a second, against a cap the granter wrote as one per
+                    // window. Recording the spend's own slot makes the
+                    // worst-case rate equal the nominal cap.
                     let (new_spent, new_last_reset) =
                         if current_slot.saturating_sub(last_reset) > window {
-                            let aligned = (current_slot / window) * window;
-                            (sol_spent, aligned)
+                            (sol_spent, current_slot)
                         } else {
                             (spent.saturating_add(sol_spent), last_reset)
                         };
@@ -563,10 +558,13 @@ pub fn evaluate_post_actions(
                     let window = read_u64(&session_data[abs_data_offset..], 48);
                     let last_reset = read_u64(&session_data[abs_data_offset..], 56);
 
+                    // Same fix as SolRecurringLimit above: restart the window at
+                    // the spend that opened it, not at a grid boundary, so a
+                    // spend landing late in a window cannot immediately open a
+                    // second one.
                     let (new_spent, new_last_reset) =
                         if current_slot.saturating_sub(last_reset) > window {
-                            let aligned = (current_slot / window) * window;
-                            (token_spent, aligned)
+                            (token_spent, current_slot)
                         } else {
                             (spent.saturating_add(token_spent), last_reset)
                         };
@@ -590,17 +588,9 @@ fn is_expired(action: &ActionView, current_slot: u64) -> bool {
     action.expires_at != 0 && current_slot > action.expires_at
 }
 
-/// SPL Token program ID
-const SPL_TOKEN_PROGRAM_ID: [u8; 32] = [
-    6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237,
-    95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
-];
-
-/// SPL Token-2022 program ID
-const SPL_TOKEN_2022_PROGRAM_ID: [u8; 32] = [
-    6, 221, 246, 225, 238, 117, 143, 222, 170, 164, 12, 4, 223, 116, 174, 240, 70, 137, 163, 89,
-    77, 149, 128, 12, 61, 73, 196, 253, 210, 164, 82, 159,
-];
+// SPL program ids live in `crate::utils` (single source of truth, pinned by
+// a test) — the Token-2022 constant was previously wrong here.
+use crate::utils::{SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID};
 
 /// Find the total token balance across ALL token accounts for a given mint owned by the vault.
 ///
@@ -660,6 +650,7 @@ fn find_token_balance(
 mod tests {
     use super::*;
     use crate::state::action::ACTION_HEADER_SIZE;
+    use crate::state::session::SESSION_HEADER_SIZE;
 
     fn build_action(action_type: u8, expires_at: u64, data: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -672,7 +663,7 @@ mod tests {
 
     fn build_session_data(actions: &[u8]) -> Vec<u8> {
         let mut data = vec![0u8; SESSION_HEADER_SIZE];
-        data[0] = 3; // discriminator
+        data[0] = crate::state::AccountDiscriminator::Session as u8;
         data.extend_from_slice(actions);
         data
     }
@@ -688,8 +679,10 @@ mod tests {
         slot: u64,
     ) -> Result<(), ProgramError> {
         let gross = before.saturating_sub(after);
+        let loc = PolicyLocation::of(session_data).expect("session data resolves");
         evaluate_post_actions(
             session_data,
+            loc,
             accounts,
             vault_key,
             before,
@@ -714,7 +707,7 @@ mod tests {
     #[test]
     fn test_no_actions_passthrough() {
         let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
-        session_data[0] = 3;
+        session_data[0] = crate::state::AccountDiscriminator::Session as u8;
         let result = eval_post(
             &mut session_data,
             &[],
@@ -973,10 +966,66 @@ mod tests {
         );
         assert!(result.is_ok());
 
-        // Verify last_reset was aligned to window boundary
+        // The new window starts at the spend that opened it, not at the grid
+        // boundary below it. Snapping back to 100 here would leave the window
+        // half spent already, so the next spend at 201 would reset a second
+        // time — two full allowances inside one nominal window.
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
         let last_reset = read_u64(&session_data[abs_offset..], 24);
-        assert_eq!(last_reset, 100); // (150 / 100) * 100 = 100
+        assert_eq!(last_reset, 150);
+    }
+
+    /// The window may not restart twice in quick succession. With a grid-aligned
+    /// reset, a spend landing at the end of a window pinned `last_reset` to the
+    /// window's start, so a spend two slots later cleared `> window` again and
+    /// the cap was worth double what the granter wrote.
+    #[test]
+    fn test_sol_recurring_limit_cannot_double_reset_across_a_boundary() {
+        // limit 1 SOL per 100-slot window.
+        let data = build_sol_recurring(1_000_000, 0, 100, 0);
+        let actions = build_action(2, 0, &data);
+        let mut session_data = build_session_data(&actions);
+
+        // Spend the full allowance late in the first window (slot 199).
+        eval_post(
+            &mut session_data,
+            &[],
+            &Pubkey::default(),
+            5_000_000,
+            4_000_000,
+            &[],
+            199,
+        )
+        .expect("first window's allowance");
+
+        // Two slots later the old code reset again (199 -> aligned 100, and
+        // 201 - 100 = 101 > 100). It must not: only 2 slots of a 100-slot
+        // window have elapsed.
+        let result = eval_post(
+            &mut session_data,
+            &[],
+            &Pubkey::default(),
+            4_000_000,
+            3_000_000,
+            &[],
+            201,
+        );
+        assert!(
+            result.is_err(),
+            "a second full allowance 2 slots later must be refused"
+        );
+
+        // A spend past the real window boundary is allowed again.
+        eval_post(
+            &mut session_data,
+            &[],
+            &Pubkey::default(),
+            4_000_000,
+            3_000_000,
+            &[],
+            300,
+        )
+        .expect("the window genuinely elapsed");
     }
 
     #[test]
@@ -1851,8 +1900,10 @@ mod tests {
 
         // before=20 SOL, after=19.5 SOL → net = 0.5 SOL
         // But gross = 10 SOL (passed explicitly)
+        let loc = PolicyLocation::of(&session_data).expect("session data resolves");
         let result = evaluate_post_actions(
             &mut session_data,
+            loc,
             &[],
             &Pubkey::default(),
             20_000_000_000,
@@ -1870,8 +1921,10 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // Gross = 3 SOL, net = 1 SOL
+        let loc = PolicyLocation::of(&session_data).expect("session data resolves");
         let result = evaluate_post_actions(
             &mut session_data,
+            loc,
             &[],
             &Pubkey::default(),
             20_000_000_000,
@@ -1891,8 +1944,10 @@ mod tests {
         let mut session_data = build_session_data(&actions);
 
         // net = 0.5 SOL, gross = 10 SOL
+        let loc = PolicyLocation::of(&session_data).expect("session data resolves");
         let result = evaluate_post_actions(
             &mut session_data,
+            loc,
             &[],
             &Pubkey::default(),
             20_000_000_000,
@@ -2022,9 +2077,10 @@ mod tests {
     #[test]
     fn test_pre_actions_no_actions_passthrough() {
         let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
-        session_data[0] = 3;
+        session_data[0] = crate::state::AccountDiscriminator::Session as u8;
 
-        let result = evaluate_pre_actions(&session_data, &[], &[], 100);
+        let loc = PolicyLocation::of(&session_data).expect("session data resolves");
+        let result = evaluate_pre_actions(&session_data, loc, &[], &[], 100);
         assert!(result.is_ok());
     }
 

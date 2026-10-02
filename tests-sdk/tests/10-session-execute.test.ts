@@ -19,6 +19,7 @@ import {
   sendTx,
   sendTxExpectError,
   getSlot,
+  waitForSlot,
   type TestContext,
 } from './common';
 import { LazorKitClient, ed25519, session } from '../../sdk/sdk-legacy/src';
@@ -70,6 +71,8 @@ describe('Session Execute', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
@@ -105,6 +108,8 @@ describe('Session Execute', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
@@ -135,6 +140,8 @@ describe('Session Execute', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt: currentSlot + 9000n,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
@@ -170,11 +177,14 @@ describe('Session Execute', () => {
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
       expiresAt,
+      // Deliberately unrestricted: this test exercises the actionless session.
+      unrestricted: true,
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
-    // Wait for the session to expire (~4 seconds at ~2.5 slots/sec)
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // Wait on the chain's own clock, not the wall clock — slot rate on a local
+    // validator varies with load, so a fixed sleep is a coin flip.
+    await waitForSlot(ctx, expiresAt);
 
     const recipient = Keypair.generate().publicKey;
     const { instructions } = await client.execute({

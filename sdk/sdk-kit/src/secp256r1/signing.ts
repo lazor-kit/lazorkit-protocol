@@ -58,6 +58,8 @@ export function prepareSecp256r1(params: {
   slot: bigint;
   counter: number;
   payer: Address;
+  /** The wallet the signing authority belongs to: the wallet PDA, or the v1 wallet for MigrateWallet. */
+  wallet: Address;
   programId: Address;
   publicKeyBytes: Uint8Array;
 }): PreparedSecp256r1 {
@@ -71,6 +73,7 @@ export function prepareSecp256r1(params: {
     authPayload: challengePrefix,
     signedPayload: params.signedPayload,
     payer: params.payer,
+    wallet: params.wallet,
     counter: params.counter,
     programId: params.programId,
   });
@@ -129,6 +132,8 @@ export async function signWithSecp256r1(params: {
   slot: bigint;
   counter: number;
   payer: Address;
+  /** The wallet the signing authority belongs to: the wallet PDA, or the v1 wallet for MigrateWallet. */
+  wallet: Address;
   programId: Address;
 }): Promise<{ authPayload: Uint8Array; precompileIx: Instruction }> {
   const prepared = prepareSecp256r1({
@@ -138,6 +143,7 @@ export async function signWithSecp256r1(params: {
     slot: params.slot,
     counter: params.counter,
     payer: params.payer,
+    wallet: params.wallet,
     programId: params.programId,
     publicKeyBytes: params.signer.publicKeyBytes,
   });
@@ -160,6 +166,7 @@ export function buildDataPayloadForAdd(
   credentialOrPubkey: Uint8Array,
   secp256r1Pubkey?: Uint8Array,
   rpId?: string,
+  policy?: Uint8Array,
 ): Uint8Array {
   const parts: Uint8Array[] = [
     new Uint8Array([newType, newRole]),
@@ -173,6 +180,13 @@ export function buildDataPayloadForAdd(
       parts.push(new Uint8Array([rp.length]), rp);
     }
   }
+  // Must stay byte-identical with createAddAuthorityIx — the program hashes
+  // its own instruction bytes up to this point, so any divergence surfaces as
+  // an unexplained signature failure rather than a format error.
+  const p = policy ?? new Uint8Array(0);
+  const policyLen = new Uint8Array(2);
+  new DataView(policyLen.buffer).setUint16(0, p.length, true);
+  parts.push(policyLen, p);
   return concatBytes(parts);
 }
 

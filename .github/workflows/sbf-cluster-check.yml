@@ -13,29 +13,90 @@ name: SBF cluster feature check
 #      `compile_error!` (otherwise nothing prevents an unflagged build
 #      from silently embedding whichever ID happens to be the default).
 #
-# Runs on every PR touching the program / assertions crate or this workflow.
+#   5. (job release-hashes, on macOS arm64) The release artifacts — mainnet,
+#      mainnet-v1, devnet, devnet-v1 — rebuilt in a fresh target dir, hash to
+#      what scripts/release-hashes.txt records (scripts/check-release-hashes.sh).
+#      A program change that moves a binary fails here until the record is
+#      updated, and a toolchain or dependency drift that moves one fails here
+#      instead of at deploy time. Two more inputs are fixed for it: the script
+#      builds with GITHUB_SHA and GITHUB_REF_NAME unset (security.txt compiles
+#      both in, Actions sets both, the recorded artifacts have them empty), and
+#      it runs on macOS on Apple silicon, the host the record is for:
+#      platform-tools' std embeds the paths it was built under, and the Linux
+#      package builds other bytes. (So the hashes the ubuntu cluster-check job
+#      prints below are neither the release ones nor comparable to them.)
+#
+# The toolchain is pinned (scripts/sbf-toolchain.sh: Agave v4.2.2, whose
+# cargo-build-sbf is 4.1.0, and platform-tools v1.53), not the stable
+# installer: the stable installer's cargo-build-sbf 4.4.0 (2026-09-22) turns
+# LTO off for this crate, so its builds stopped matching the release hashes
+# (a 140200-byte sunset instead of 45856), and builds SBPF v3 unless told
+# `--arch v0`.
+#
+# Every build that succeeds passes `--arch v0` and is checked to be SBPF v0
+# (scripts/assert-sbpf-v0.sh): the program deploys as v0.
+#
+# Runs on every PR touching the program, its crates, the lockfile, cargo's
+# config or the Rust toolchain file, the toolchain pin or the hash record, and
+# on this workflow; on every push to main and develop; and weekly, for drift
+# from outside the repository (a platform-tools download, the runner image).
+# A repo-root .cargo/config.toml alone moves the bytes: `overflow-checks =
+# true` there makes the sunset 49896 bytes instead of 45856.
+#
+# A red run blocks a merge only where the repository makes these checks
+# required (branch protection); the workflow cannot.
 
 on:
   pull_request:
     paths:
       - 'program/**'
       - 'assertions/**'
+      - 'no-padding/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain.toml'
+      - 'scripts/sbf-toolchain.sh'
+      - 'scripts/release-hashes.txt'
+      - 'scripts/check-release-hashes.sh'
+      - 'scripts/assert-sbpf-v0.sh'
       - '.github/workflows/sbf-cluster-check.yml'
   push:
-    branches: [main]
+    branches: [main, develop]
+  # Weekly (Mondays 03:17 UTC), from the default branch's copy of this file.
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   cluster-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Solana toolchain
+      - name: Read the toolchain pin
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          . scripts/sbf-toolchain.sh
+          echo "SBF_AGAVE_RELEASE=$SBF_AGAVE_RELEASE" >> "$GITHUB_ENV"
+          echo "SBF_PLATFORM_TOOLS_VERSION=$SBF_PLATFORM_TOOLS_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install Solana toolchain (pinned)
+        run: |
+          sh -c "$(curl -sSfL "https://release.anza.xyz/$SBF_AGAVE_RELEASE/install")"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
+      - name: Check cargo-build-sbf is the pinned version
+        run: |
+          cargo-build-sbf --version
+          . scripts/sbf-toolchain.sh
+          sbf_toolchain_check strict
+
+      # Keyed on the toolchain too: `--tools-version` does not invalidate
+      # cargo's cache, so objects from another toolchain would be reused.
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
@@ -43,32 +104,72 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: sbf-${{ hashFiles('**/Cargo.lock') }}
+          key: sbf-${{ env.SBF_AGAVE_RELEASE }}-${{ env.SBF_PLATFORM_TOOLS_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build mainnet binary
         working-directory: program
-        run: cargo build-sbf --features mainnet
+        run: cargo build-sbf --features mainnet --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0
 
       - name: Record mainnet hash
         id: mainnet
         run: |
+          ./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
           M=$(shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}')
           echo "sha=$M" >> "$GITHUB_OUTPUT"
           echo "mainnet SBF: $M"
 
       - name: Build devnet binary
         working-directory: program
-        run: cargo build-sbf --features devnet
+        run: cargo build-sbf --features devnet --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0
 
       - name: Record devnet hash
         id: devnet
         run: |
+          ./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
           D=$(shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}')
           echo "sha=$D" >> "$GITHUB_OUTPUT"
           echo "devnet SBF: $D"
 
+      - name: Build sunset binary (mainnet-v1)
+        working-directory: program
+        run: cargo build-sbf --features mainnet-v1 --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0
+
+      - name: Record sunset hash
+        id: sunset
+        run: |
+          ./scripts/assert-sbpf-v0.sh target/deploy/lazorkit_program.so
+          S=$(shasum -a 256 target/deploy/lazorkit_program.so | awk '{print $1}')
+          echo "sha=$S" >> "$GITHUB_OUTPUT"
+          echo "mainnet-v1 sunset SBF: $S ($(stat -c %s target/deploy/lazorkit_program.so) bytes)"
+
+      # rehearsal and rehearsal-v1 pin the same id (3AN3Wn…), so their binaries
+      # differ only by the sunset gate. Comparing mainnet with mainnet-v1 would
+      # prove nothing: different ids always hash differently.
+      # Each into its own directory, hashed from there: nothing can read a
+      # stale or missing file and compare two empty hashes as "identical".
+      - name: Build rehearsal pair (same id, full vs sunset)
+        working-directory: program
+        run: |
+          set -euo pipefail
+          cargo build-sbf --features rehearsal --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 --sbf-out-dir /tmp/sbf-rehearsal
+          cargo build-sbf --features rehearsal-v1 --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 --sbf-out-dir /tmp/sbf-rehearsal-v1
+          ../scripts/assert-sbpf-v0.sh /tmp/sbf-rehearsal/lazorkit_program.so /tmp/sbf-rehearsal-v1/lazorkit_program.so
+          shasum -a 256 /tmp/sbf-rehearsal/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal.sha
+          shasum -a 256 /tmp/sbf-rehearsal-v1/lazorkit_program.so | awk '{print $1}' > /tmp/rehearsal-v1.sha
+          echo "rehearsal    $(cat /tmp/rehearsal.sha) ($(stat -c %s /tmp/sbf-rehearsal/lazorkit_program.so) bytes)"
+          echo "rehearsal-v1 $(cat /tmp/rehearsal-v1.sha) ($(stat -c %s /tmp/sbf-rehearsal-v1/lazorkit_program.so) bytes)"
+
       - name: Verify binaries differ
         run: |
+          if [ ! -s /tmp/rehearsal.sha ] || [ ! -s /tmp/rehearsal-v1.sha ]; then
+            echo "ERROR: a rehearsal hash is missing — the build step did not produce its binary."
+            exit 1
+          fi
+          if [ "$(cat /tmp/rehearsal.sha)" = "$(cat /tmp/rehearsal-v1.sha)" ]; then
+            echo "ERROR: rehearsal and rehearsal-v1 build the same binary at the same id —"
+            echo "       the sunset gate is not being compiled in."
+            exit 1
+          fi
           if [ "${{ steps.mainnet.outputs.sha }}" = "${{ steps.devnet.outputs.sha }}" ]; then
             echo "ERROR: mainnet + devnet SBF binaries are identical."
             echo "       Pattern D's compile-time cluster switch has been"
@@ -86,7 +187,7 @@ jobs:
           # also work, but capturing to a file gives us the log to search
           # afterwards regardless of pipeline state.
           set +e
-          cargo build-sbf > /tmp/build.log 2>&1
+          cargo build-sbf --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 > /tmp/build.log 2>&1
           BUILD_EXIT=$?
           set -e
           cat /tmp/build.log
@@ -97,7 +198,7 @@ jobs:
           fi
           if ! grep -q "pick exactly one cluster" /tmp/build.log; then
             echo "ERROR: build failed but not with the expected compile_error message."
-            echo "       Expected: 'pick exactly one cluster — --features mainnet OR --features devnet'"
+            echo "       Expected: 'pick exactly one cluster feature — mainnet | devnet | staging | ...'"
             exit 1
           fi
           echo "✓ no-feature build correctly rejected by compile_error!"
@@ -106,7 +207,7 @@ jobs:
         working-directory: program
         run: |
           set +e
-          cargo build-sbf --features mainnet --features devnet > /tmp/build-both.log 2>&1
+          cargo build-sbf --features mainnet --features devnet --tools-version "$SBF_PLATFORM_TOOLS_VERSION" --arch v0 > /tmp/build-both.log 2>&1
           BUILD_EXIT=$?
           set -e
           cat /tmp/build-both.log
@@ -120,3 +221,33 @@ jobs:
             exit 1
           fi
           echo "✓ both-features build correctly rejected"
+
+  # The release artifacts, rebuilt on a second machine of the host the record
+  # is for (macOS, Apple silicon), must hash as recorded. No cache: the script
+  # builds in a fresh target dir anyway, so nothing from another toolchain can
+  # leak into what it hashes.
+  release-hashes:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the toolchain pin
+        run: |
+          . scripts/sbf-toolchain.sh
+          echo "SBF_AGAVE_RELEASE=$SBF_AGAVE_RELEASE" >> "$GITHUB_ENV"
+          echo "host: $(sbf_host), release host: $SBF_RELEASE_HOST"
+
+      - name: Install Solana toolchain (pinned)
+        run: |
+          sh -c "$(curl -sSfL "https://release.anza.xyz/$SBF_AGAVE_RELEASE/install")"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Check cargo-build-sbf is the pinned version
+        run: |
+          cargo-build-sbf --version
+          . scripts/sbf-toolchain.sh
+          sbf_toolchain_check strict
+
+      - name: Release artifacts match scripts/release-hashes.txt
+        run: ./scripts/check-release-hashes.sh mainnet mainnet-v1 devnet devnet-v1

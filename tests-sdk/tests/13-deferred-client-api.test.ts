@@ -3,7 +3,9 @@ import {
   Keypair,
   PublicKey,
   SystemProgram,
+  Transaction,
   LAMPORTS_PER_SOL,
+  sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import * as crypto from 'crypto';
 import { setupTest, sendTx, type TestContext } from './common';
@@ -202,6 +204,96 @@ describe('Deferred Client API ergonomics', () => {
     const balAfter = await ctx.connection.getBalance(recipient);
 
     expect(balAfter - balBefore).toBe(LAMPORTS_PER_SOL);
+  });
+
+  // The payer funds the DeferredExec in tx1 and is its refund destination in
+  // tx2, and it is the account a sponsored flow repays from the vault. Two
+  // things used to stop that: the SDK hashed the refund slot as writable only
+  // where the runtime reports the payer as a signer too (DeferredHashMismatch,
+  // 3015), and the program credited the rent before the CPIs, so a CPI naming
+  // the refund destination saw an unbalanced instruction.
+  it('executes a deferred inner transfer to the payer', async () => {
+    const prepared = await client.prepareAuthorize({
+      payer: ctx.payer.publicKey,
+      walletPda,
+      secp256r1: { credentialIdHash: ownerKey.credentialIdHash, authorityPda },
+      instructions: [
+        SystemProgram.transfer({
+          fromPubkey: vaultPda,
+          toPubkey: ctx.payer.publicKey,
+          lamports: 1_000_000,
+        }),
+      ],
+    });
+    const webauthnResponse = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+    const { instructions: authIxs, deferredPayload } = client.finalizeAuthorize(
+      prepared,
+      webauthnResponse,
+    );
+    await sendTx(ctx, authIxs);
+    const rent = (await ctx.connection.getBalance(deferredPayload.deferredExecPda));
+    expect(rent).toBeGreaterThan(0);
+
+    const tx2 = await client.executeDeferredFromPayload({
+      payer: ctx.payer.publicKey,
+      deferredPayload,
+    });
+    const vaultBefore = await ctx.connection.getBalance(vaultPda);
+    await sendTx(ctx, tx2.instructions);
+
+    expect(vaultBefore - (await ctx.connection.getBalance(vaultPda))).toBe(1_000_000);
+    expect(await ctx.connection.getAccountInfo(deferredPayload.deferredExecPda)).toBeNull();
+  });
+
+  // The hand-off: a relayer sends tx2, and the vault repays the sponsor that
+  // paid for tx1. The sponsor is tx2's refund destination but does not sign
+  // it, so the hash must read it writable only — `executor` says who will
+  // send. Hashed as a signer, as when the sponsor sends tx2 itself, this
+  // failed with DeferredHashMismatch (3015).
+  it('executes a deferred inner transfer to the payer when a relayer sends tx2', async () => {
+    const relayer = Keypair.generate();
+    const airdrop = await ctx.connection.requestAirdrop(relayer.publicKey, LAMPORTS_PER_SOL);
+    await ctx.connection.confirmTransaction(airdrop, 'confirmed');
+    const prepared = await client.prepareAuthorize({
+      payer: ctx.payer.publicKey,
+      walletPda,
+      secp256r1: { credentialIdHash: ownerKey.credentialIdHash, authorityPda },
+      instructions: [
+        SystemProgram.transfer({
+          fromPubkey: vaultPda,
+          toPubkey: ctx.payer.publicKey,
+          lamports: 1_000_000,
+        }),
+      ],
+      executor: relayer.publicKey,
+    });
+    const webauthnResponse = await fakeWebAuthnSign(ownerKey, prepared.challenge);
+    const { instructions: authIxs, deferredPayload } = client.finalizeAuthorize(
+      prepared,
+      webauthnResponse,
+    );
+    await sendTx(ctx, authIxs);
+    const rent = await ctx.connection.getBalance(deferredPayload.deferredExecPda);
+
+    // The relayer has only the payload off the wire: it names no refund
+    // destination, and the payer does not sign.
+    const tx2 = await client.executeDeferredFromPayload({
+      payer: relayer.publicKey,
+      deferredPayload: deserializeDeferredPayload(serializeDeferredPayload(deferredPayload)),
+    });
+    const vaultBefore = await ctx.connection.getBalance(vaultPda);
+    const payerBefore = await ctx.connection.getBalance(ctx.payer.publicKey);
+    const tx = new Transaction();
+    for (const ix of tx2.instructions) tx.add(ix);
+    tx.feePayer = relayer.publicKey;
+    await sendAndConfirmTransaction(ctx.connection, tx, [relayer], { commitment: 'confirmed' });
+
+    expect(vaultBefore - (await ctx.connection.getBalance(vaultPda))).toBe(1_000_000);
+    // Repaid, and its rent back; the relayer paid every fee.
+    expect((await ctx.connection.getBalance(ctx.payer.publicKey)) - payerBefore).toBe(
+      1_000_000 + rent,
+    );
+    expect(await ctx.connection.getAccountInfo(deferredPayload.deferredExecPda)).toBeNull();
   });
 
   // ── deserialize error handling ───────────────────────────────────────

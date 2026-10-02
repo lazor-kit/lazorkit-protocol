@@ -141,6 +141,13 @@ pub fn process(
     let payer = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
+    // M-6. The payer's signature was only ever enforced as a side effect: the
+    // System Program demands it during the funding CPI. `initialize_pda_account`
+    // skips that CPI when the PDA already holds enough lamports — anyone can
+    // pre-fund a PDA — so on that path nothing checked it at all.
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
     let wallet_pda = account_info_iter
         .next()
         .ok_or(ProgramError::NotEnoughAccountKeys)?;
@@ -175,28 +182,30 @@ pub fn process(
 
     // Validate Wallet Discriminator (Issue #7)
     let wallet_data = unsafe { wallet_pda.borrow_data_unchecked() };
-    if wallet_data.is_empty() || wallet_data[0] != AccountDiscriminator::Wallet as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    crate::state::wallet::WalletAccount::check(wallet_data)?;
 
     let auth_data = unsafe { authorizer_pda.borrow_mut_data_unchecked() };
 
     // Safe Copy of Header using read_unaligned
-    if auth_data.len() < std::mem::size_of::<AuthorityAccountHeader>() {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    AuthorityAccountHeader::check(auth_data)?;
     let auth_header =
         unsafe { std::ptr::read_unaligned(auth_data.as_ptr() as *const AuthorityAccountHeader) };
 
-    if auth_header.discriminator != AccountDiscriminator::Authority as u8 {
-        return Err(ProgramError::InvalidAccountData);
-    }
     if auth_header.wallet != *wallet_pda.key() {
         return Err(ProgramError::InvalidAccountData);
     }
     // Only Admin (1) or Owner (0) can create sessions.
-    // Spender (2) cannot create sessions.
+    // A Delegate (2) cannot create sessions.
     if auth_header.role != 0 && auth_header.role != 1 {
+        return Err(AuthError::PermissionDenied.into());
+    }
+    // A policy-bearing (bounded) authority may not create a session. A session
+    // carries its OWN action buffer, chosen by the caller and allowed to be
+    // empty (unrestricted) — so a bounded Admin could otherwise mint an
+    // unbounded session and spend past its own cap. Same principle as the
+    // guards in `manage.rs` (AddAuthority) and `authorize.rs` (deferred): a
+    // bounded actor is kept off paths that cannot enforce its bound.
+    if auth_header.policy_len != 0 {
         return Err(AuthError::PermissionDenied.into());
     }
 
@@ -265,7 +274,11 @@ pub fn process(
 
     // Derive Session PDA
     let (session_key, bump) = find_program_address(
-        &[b"session", wallet_pda.key().as_ref(), &args.session_key],
+        &[
+            crate::seeds::SESSION,
+            wallet_pda.key().as_ref(),
+            &args.session_key,
+        ],
         program_id,
     );
     if !sol_assert_bytes_eq(session_pda.key().as_ref(), session_key.as_ref(), 32) {
@@ -279,7 +292,7 @@ pub fn process(
 
     let bump_arr = [bump];
     let seeds = [
-        Seed::from(b"session"),
+        Seed::from(crate::seeds::SESSION),
         Seed::from(wallet_pda.key().as_ref()),
         Seed::from(&args.session_key),
         Seed::from(&bump_arr),

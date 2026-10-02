@@ -10,6 +10,7 @@
 // fixtures so the result is reproducible.
 
 import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
 import { PublicKey } from '@solana/web3.js';
 import { address } from '@solana/kit';
 
@@ -48,11 +49,15 @@ import {
 
 const PROGRAM_BASE58 = '4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS';
 const PAYER_BASE58 = '11111111111111111111111111111112';
+// 32 bytes of 0x57 — easy to spot in a hex dump of the preimage.
+const WALLET_BASE58 = '6swiTCWtSwqi8sm9wzNwKA9NEpJWbXjLcVz654u7zz4W';
 
 const KIT_PROGRAM = address(PROGRAM_BASE58);
 const KIT_PAYER = address(PAYER_BASE58);
+const KIT_WALLET = address(WALLET_BASE58);
 const PK_PROGRAM = new PublicKey(PROGRAM_BASE58);
 const PK_PAYER = new PublicKey(PAYER_BASE58);
+const PK_WALLET = new PublicKey(WALLET_BASE58);
 
 const SLOT = 234_567_890n;
 const COUNTER = 42;
@@ -151,31 +156,89 @@ describe('buildAuthPayload', () => {
 });
 
 describe('buildSecp256r1Challenge', () => {
-  it('SHA256 parity (fundamental: this is what the passkey signs)', () => {
-    const authPayloadPrefix = buildAuthPayloadPrefix({
-      slot: SLOT,
-      counter: COUNTER,
-      sysvarIxIndex: SYSVAR_IX_INDEX,
-    });
-    const a = buildSecp256r1Challenge({
+  const authPayloadPrefix = buildAuthPayloadPrefix({
+    slot: SLOT,
+    counter: COUNTER,
+    sysvarIxIndex: SYSVAR_IX_INDEX,
+  });
+  const kitChallenge = (wallet = KIT_WALLET) =>
+    buildSecp256r1Challenge({
       discriminator,
       authPayload: authPayloadPrefix,
       signedPayload,
       payer: KIT_PAYER,
+      wallet,
       counter: COUNTER,
       programId: KIT_PROGRAM,
     });
-    const b = legacyBuildSecp256r1Challenge({
+  const legacyChallenge = (wallet = PK_WALLET) =>
+    legacyBuildSecp256r1Challenge({
       discriminator,
       authPayload: authPayloadPrefix,
       signedPayload,
       slot: SLOT, // legacy takes slot but doesn't use it (verified in source comment)
       payer: PK_PAYER,
+      wallet,
       counter: COUNTER,
       programId: PK_PROGRAM,
     });
+
+  it('SHA256 parity (fundamental: this is what the passkey signs)', () => {
+    const a = kitChallenge();
+    const b = legacyChallenge();
     expect(a.length).toBe(32);
     expect(bytesEqual(a, b)).toBe(true);
+  });
+
+  // Pinned against the program's sol_sha256 input order. The preimage is
+  // spelled out byte by byte rather than rebuilt with SDK helpers, so a change
+  // to either SDK's order — payer and wallet swapped, the wallet dropped —
+  // fails here instead of surfacing as InvalidMessageHash (3005) on chain.
+  it('fixed vector: discriminator || prefix || signed || payer || wallet || counter_le4 || program_id', () => {
+    const counterLe = new Uint8Array(4);
+    new DataView(counterLe.buffer).setUint32(0, COUNTER, true);
+    const preimage = Buffer.concat([
+      discriminator, // 04
+      authPayloadPrefix, // slot_le8 || counter_le4 || sysvarIxIdx || 0x80
+      signedPayload, // cafebabe1234
+      PK_PAYER.toBytes(), // 00 x31 || 01
+      PK_WALLET.toBytes(), // 57 x32
+      counterLe, // 2a000000
+      PK_PROGRAM.toBytes(),
+    ]);
+    expect(preimage.length).toBe(1 + 14 + 6 + 32 + 32 + 4 + 32);
+    expect(Buffer.from(authPayloadPrefix).toString('hex')).toBe('d238fb0d000000002a0000000180');
+    expect(Buffer.from(PK_WALLET.toBytes()).toString('hex')).toBe('57'.repeat(32));
+
+    const expected = '31f26fb840bdfae901ec007fb8c8be9d12b2e521ec382fbbffddc66f92efd9ae';
+    expect(createHash('sha256').update(preimage).digest('hex')).toBe(expected);
+    expect(Buffer.from(kitChallenge()).toString('hex')).toBe(expected);
+    expect(Buffer.from(legacyChallenge()).toString('hex')).toBe(expected);
+  });
+
+  // The wallet is what stops a passkey assertion crossing wallets: the same
+  // passkey at the same counter, through the same payer, on another wallet
+  // must be asked to sign something else.
+  it('a different wallet yields a different challenge', () => {
+    const other = new Uint8Array(32).fill(0x58);
+    const a = kitChallenge();
+    const b = kitChallenge(address(new PublicKey(other).toBase58()));
+    expect(bytesEqual(a, b)).toBe(false);
+    expect(Buffer.from(b).toString('hex')).toBe(
+      '50c48d8ba2655f8fb6078b63ac9d00a77508ffa602c5589d31b45e9962235084',
+    );
+    expect(bytesEqual(b, legacyChallenge(new PublicKey(other)))).toBe(true);
+    // Nor is the wallet interchangeable with the payer next to it.
+    const swapped = buildSecp256r1Challenge({
+      discriminator,
+      authPayload: authPayloadPrefix,
+      signedPayload,
+      payer: KIT_WALLET,
+      wallet: KIT_PAYER,
+      counter: COUNTER,
+      programId: KIT_PROGRAM,
+    });
+    expect(bytesEqual(a, swapped)).toBe(false);
   });
 });
 
@@ -189,9 +252,23 @@ describe('prepareSecp256r1 + finalizeSecp256r1', () => {
       counter: COUNTER,
       publicKeyBytes: compressedPubkey,
     };
-    const kitPrep = prepareSecp256r1({ ...params, payer: KIT_PAYER, programId: KIT_PROGRAM });
-    const legacyPrep = legacyPrepare({ ...params, payer: PK_PAYER, programId: PK_PROGRAM });
+    const kitPrep = prepareSecp256r1({
+      ...params,
+      payer: KIT_PAYER,
+      wallet: KIT_WALLET,
+      programId: KIT_PROGRAM,
+    });
+    const legacyPrep = legacyPrepare({
+      ...params,
+      payer: PK_PAYER,
+      wallet: PK_WALLET,
+      programId: PK_PROGRAM,
+    });
     expect(bytesEqual(kitPrep.challenge, legacyPrep.challenge)).toBe(true);
+    // prepare hashes the same 14-byte prefix it hands to finalize.
+    expect(Buffer.from(kitPrep.challenge).toString('hex')).toBe(
+      '31f26fb840bdfae901ec007fb8c8be9d12b2e521ec382fbbffddc66f92efd9ae',
+    );
 
     const response = {
       signature,

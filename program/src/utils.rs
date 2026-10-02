@@ -10,6 +10,44 @@ use pinocchio::{
 /// System Program ID (11111111111111111111111111111111)
 pub const SYSTEM_PROGRAM_ID: [u8; 32] = [0u8; 32];
 
+/// SPL Token program id (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`).
+///
+/// Single source of truth. This constant was previously duplicated in
+/// `execute/actions.rs` and `processor/migrate.rs`, and the Token-2022 copy in
+/// `actions.rs` was WRONG (diverged at byte 8), silently disabling every
+/// Token-2022 spending limit and authority-freeze check in the policy engine.
+/// Kept here once, pinned by a test, so it cannot diverge again.
+pub const SPL_TOKEN_PROGRAM_ID: [u8; 32] = [
+    6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237,
+    95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
+];
+
+/// SPL Token-2022 program id (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`).
+pub const SPL_TOKEN_2022_PROGRAM_ID: [u8; 32] = [
+    6, 221, 246, 225, 238, 117, 143, 222, 24, 66, 93, 188, 228, 108, 205, 218, 182, 26, 252, 77,
+    131, 185, 13, 39, 254, 189, 249, 40, 216, 161, 139, 252,
+];
+
+#[cfg(test)]
+mod spl_id_tests {
+    use super::{SPL_TOKEN_2022_PROGRAM_ID, SPL_TOKEN_PROGRAM_ID};
+
+    /// The canonical base58 ids, decoded. A wrong constant here fails open (a
+    /// real token account is never recognised), so pin the exact bytes. Values
+    /// verified against `solana_sdk::pubkey!` in-test.
+    #[test]
+    fn spl_ids_match_canonical() {
+        assert_eq!(
+            SPL_TOKEN_PROGRAM_ID,
+            solana_sdk::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").to_bytes()
+        );
+        assert_eq!(
+            SPL_TOKEN_2022_PROGRAM_ID,
+            solana_sdk::pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").to_bytes()
+        );
+    }
+}
+
 /// Wrapper around the `sol_get_stack_height` syscall
 pub fn get_stack_height() -> u64 {
     #[cfg(target_os = "solana")]
@@ -18,6 +56,11 @@ pub fn get_stack_height() -> u64 {
     }
     #[cfg(not(target_os = "solana"))]
     0
+}
+
+#[inline(always)]
+pub fn is_all_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == 0)
 }
 
 /// Safely initializes a PDA account using transfer-allocate-assign pattern.
@@ -143,4 +186,22 @@ pub fn initialize_pda_account(
     invoke_signed(&assign_ix, &[&target_pda, &system_program], &[signer])?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_all_zero;
+
+    #[test]
+    fn is_all_zero_detects_empty_and_zero_slices() {
+        assert!(is_all_zero(&[]));
+        assert!(is_all_zero(&[0; 32]));
+    }
+
+    #[test]
+    fn is_all_zero_rejects_any_nonzero_byte() {
+        let mut bytes = [0u8; 32];
+        bytes[31] = 1;
+        assert!(!is_all_zero(&bytes));
+    }
 }

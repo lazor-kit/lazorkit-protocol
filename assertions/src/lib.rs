@@ -1,31 +1,123 @@
 #![allow(unexpected_cfgs)]
 #[cfg(target_os = "solana")]
-use pinocchio::syscalls::{sol_curve_validate_point, sol_get_stack_height, sol_memcmp_};
+use pinocchio::syscalls::sol_memcmp_;
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
-    pubkey::{create_program_address, find_program_address, Pubkey},
+    pubkey::{find_program_address, Pubkey},
     ProgramResult,
 };
 use pinocchio_pubkey::declare_id;
-use pinocchio_system::ID as SYSTEM_ID;
 
-// LazorKit Program ID — chosen at build time via the `mainnet` / `devnet`
-// cargo features. Exactly one must be enabled; otherwise the build fails
-// loudly via the `compile_error!` below. This prevents accidental cross-
-// cluster deploys (a binary compiled with one ID malfunctions if deployed
-// to a slot at the other ID — every internal `crate::ID` check fails).
-#[cfg(all(feature = "mainnet", not(feature = "devnet")))]
+// LazorKit Program ID — chosen at build time by exactly one cluster feature.
+// A binary compiled for one ID malfunctions at any other: every internal
+// `crate::ID` check fails, and the entrypoint refuses outright (M-2).
+//
+// v2 lives at its own addresses. The v1 deployments keep theirs, and the only
+// thing ever deployed there again is a *sunset* binary: the handful of
+// instructions a retired v1 wallet still needs to leave (see `SUNSET`). This is
+// how Solana protocols ship a breaking major — Squads v3/v4, Jupiter v4/v6,
+// Token/Token-2022 all run side by side — rather than freezing every user's
+// funds on one flag day.
+//
+//   feature          id                                             runs
+//   mainnet          LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8    v2
+//   devnet           57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv   v2
+//   staging          HQ584adp8ub2FzrTx1fdNmXmrL5yuyVndafPB3x4NYG3   v2
+//   mainnet-v1       LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi    sunset
+//   devnet-v1        4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS   sunset
+//   rehearsal        3AN3WnaAN6SteghykdM96qHSGUJiVAUHWFjiyz31myAA   v2
+//   rehearsal-v1     3AN3WnaAN6SteghykdM96qHSGUJiVAUHWFjiyz31myAA   sunset
+//
+// The v1 ids can only be built as sunset binaries. There is no feature that
+// puts full v2 at a v1 address, so a slip of the flag cannot recreate the
+// flag day this layout exists to avoid.
+
+#[cfg(feature = "mainnet")]
+declare_id!("LazorFroiVuAjcwwQ2me83vTr5nc5NRxSaTg3pmEXC8");
+
+#[cfg(feature = "devnet")]
+declare_id!("57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv");
+
+#[cfg(feature = "staging")]
+declare_id!("HQ584adp8ub2FzrTx1fdNmXmrL5yuyVndafPB3x4NYG3");
+
+#[cfg(feature = "mainnet-v1")]
 declare_id!("LazorjRFNavitUaBu5m3WaNPjU1maipvSW2rZfAFAKi");
 
-#[cfg(all(feature = "devnet", not(feature = "mainnet")))]
+#[cfg(feature = "devnet-v1")]
 declare_id!("4h3XoNReAgEcHVxcZ8sw2aufi9MTr7BbvYYjzjWDyDxS");
 
+#[cfg(any(feature = "rehearsal", feature = "rehearsal-v1"))]
+declare_id!("3AN3WnaAN6SteghykdM96qHSGUJiVAUHWFjiyz31myAA");
+
+/// How many cluster features this build enabled. Exactly one is legal: none
+/// leaves `ID` undeclared, and two would pin two addresses at once.
+const CLUSTER_FEATURES: usize = cfg!(feature = "mainnet") as usize
+    + cfg!(feature = "devnet") as usize
+    + cfg!(feature = "staging") as usize
+    + cfg!(feature = "mainnet-v1") as usize
+    + cfg!(feature = "devnet-v1") as usize
+    + cfg!(feature = "rehearsal") as usize
+    + cfg!(feature = "rehearsal-v1") as usize;
+
+const _: () = assert!(
+    CLUSTER_FEATURES == 1,
+    "LazorKit: pick exactly one cluster feature — mainnet | devnet | staging | \
+     mainnet-v1 | devnet-v1 | rehearsal | rehearsal-v1"
+);
+
+/// The only key allowed to run `InitializeProtocol` (see the program's
+/// `state::protocol_config`). It lives here, in the same cluster arms as the
+/// program id, so no feature spelling can pair the mainnet id with the
+/// committed devnet test key. The arms are positive and exhaustive over the
+/// cluster features: with none of them the build fails, it does not default.
+#[cfg(any(feature = "mainnet", feature = "mainnet-v1"))]
+pub const PROTOCOL_INIT_AUTHORITY: Pubkey =
+    pinocchio_pubkey::pubkey!("4fZM6RPRLkeW8T5dDctZjWaqidFDACyW41Kqztj7uL5V");
+
+/// Every test cluster — devnet, staging, the rehearsal slot and their sunset
+/// twins — reuses the committed devnet test authority
+/// (`keys/devnet-init-authority.json`). None of them carries value.
 #[cfg(any(
-    all(feature = "mainnet", feature = "devnet"),
-    all(not(feature = "mainnet"), not(feature = "devnet"))
+    feature = "devnet",
+    feature = "staging",
+    feature = "devnet-v1",
+    feature = "rehearsal",
+    feature = "rehearsal-v1"
 ))]
-compile_error!("LazorKit: pick exactly one cluster — `--features mainnet` OR `--features devnet`");
+pub const PROTOCOL_INIT_AUTHORITY: Pubkey =
+    pinocchio_pubkey::pubkey!("9AmBA2C7VwtoQXXowpqBsLC4azNXm81BCSXZNiQM6BsW");
+
+/// True in the binary that replaces a retired v1 deployment.
+///
+/// A sunset binary accepts exactly the instructions a v1 wallet needs in order
+/// to leave, and refuses everything else — no new wallets, no Execute, no fee
+/// layer. What remains is reachable by the owner alone (`MigrateWallet`), by
+/// the original payer (`ReclaimDeferred`), or by anyone once there is nothing
+/// left to protect (`CloseExpiredSession`).
+pub const SUNSET: bool = cfg!(any(
+    feature = "mainnet-v1",
+    feature = "devnet-v1",
+    feature = "rehearsal-v1"
+));
+
+// Pin the property that matters rather than the spelling of `SUNSET`: every v1
+// id builds as a sunset binary. If a refactor drops one from the list above,
+// this fails to compile instead of shipping full v2 at a v1 address.
+#[cfg(any(
+    feature = "mainnet-v1",
+    feature = "devnet-v1",
+    feature = "rehearsal-v1"
+))]
+const _: () = assert!(SUNSET, "LazorKit: a v1 id must build as a sunset binary");
+#[cfg(any(
+    feature = "mainnet",
+    feature = "devnet",
+    feature = "staging",
+    feature = "rehearsal"
+))]
+const _: () = assert!(!SUNSET, "LazorKit: a v2 id must build as the full program");
 
 #[allow(unused_imports)]
 use std::mem::MaybeUninit;
@@ -86,99 +178,6 @@ sol_assert_return!(check_any_pda, u8, seeds: &[&[u8]], target_key: &Pubkey, prog
   }
 });
 
-sol_assert_return!(check_self_pda, u8, seeds: &[&[u8]], target_key: &Pubkey | {
-let pda = create_program_address(seeds, &crate::ID)?;
-if sol_assert_bytes_eq(pda.as_ref(), target_key.as_ref(), 32) {
-  Some(seeds[seeds.len()-1][0])
-} else {
-  None
-}
-});
-
-sol_assert_return!(find_self_pda, u8, seeds: &[&[u8]], target_key: &Pubkey | {
-let (pda, bump) = find_program_address(seeds, &crate::ID);
-if sol_assert_bytes_eq(pda.as_ref(), target_key.as_ref(), 32) {
-  Some( bump )
-} else {
-  None
-}
-});
-
-sol_assert!(check_writable_signer, account: &AccountInfo |
-  account.is_writable() && account.is_signer()
-);
-
-sol_assert!(check_writable, account: &AccountInfo |
-  account.is_writable()
-);
-
-sol_assert!(check_key_match, account: &AccountInfo, target_key: &Pubkey |
-  sol_assert_bytes_eq(account.key().as_ref(), target_key.as_ref(), 32)
-);
-
-sol_assert!(check_bytes_match, left: &[u8], right: &[u8], len: usize |
-  sol_assert_bytes_eq(left, right, len)
-);
-
-sol_assert!(check_owner, account: &AccountInfo, owner: &Pubkey |
-  sol_assert_bytes_eq(account.owner().as_ref(), owner.as_ref(), 32)
-);
-
-sol_assert!(check_system_owner, account: &AccountInfo |
-  sol_assert_bytes_eq(account.owner().as_ref(), SYSTEM_ID.as_ref(), 32)
-);
-
-sol_assert!(check_self_owned, account: &AccountInfo |
-  sol_assert_bytes_eq(account.owner().as_ref(), crate::ID.as_ref(), 32)
-);
-
-sol_assert!(check_zero_lamports, account: &AccountInfo |
-  unsafe {
-      *account.borrow_mut_lamports_unchecked() == 0
-  }
-);
-
-sol_assert!(check_stack_height, expected: u64 |
-      get_stack_height(expected)
-);
-
 sol_assert!(check_zero_data, account: &AccountInfo |
   account.data_len() == 0
 );
-
-sol_assert!(check_zero_balance, account: &AccountInfo |
-  unsafe {
-      *account.borrow_mut_lamports_unchecked() == 0 && account.data_len() == 0
-  }
-);
-
-sol_assert!(check_on_curve, point: &[u8] |
-  is_on_curve(point)
-);
-
-sol_assert!(check_signer, account: &AccountInfo |
-  account.is_signer()
-);
-
-#[cfg(target_os = "solana")]
-pub fn is_on_curve(point: &[u8]) -> bool {
-    let mut intermediate = MaybeUninit::<u8>::uninit();
-    unsafe { sol_curve_validate_point(0, point.as_ptr(), intermediate.as_mut_ptr()) == 0 }
-}
-
-#[cfg(not(target_os = "solana"))]
-pub fn is_on_curve(_point: &[u8]) -> bool {
-    unimplemented!()
-}
-
-#[cfg(target_os = "solana")]
-#[inline(always)]
-pub fn get_stack_height(expected: u64) -> bool {
-    unsafe { sol_get_stack_height() == expected }
-}
-
-#[cfg(not(target_os = "solana"))]
-#[inline(always)]
-pub fn get_stack_height(_expected: u64) -> bool {
-    unimplemented!()
-}

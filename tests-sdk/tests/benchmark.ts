@@ -321,6 +321,7 @@ async function benchExecuteSecp256r1(connection: Connection, payer: Keypair): Pr
     slot,
     counter: 1,
     payer: payer.publicKey,
+    wallet: walletPda,
     programId: PROGRAM_ID_DEVNET,
     publicKeyBytes: key.publicKeyBytes,
   });
@@ -567,6 +568,7 @@ async function benchDeferredExecution(
     slot,
     counter: 1,
     payer: payer.publicKey,
+    wallet: walletPda,
     programId: PROGRAM_ID_DEVNET,
     publicKeyBytes: key.publicKeyBytes,
   });
@@ -703,6 +705,7 @@ async function benchDeferredMultiInstruction(
     slot,
     counter: 1,
     payer: payer.publicKey,
+    wallet: walletPda,
     programId: PROGRAM_ID_DEVNET,
     publicKeyBytes: key.publicKeyBytes,
   });
@@ -876,7 +879,10 @@ async function main() {
     console.log('|---|---|---|---|---|---|');
     console.log(`| Compute Units | ${secp256r1Result.cu.toLocaleString()} | ${deferredSingle.authorize.cu.toLocaleString()} | ${deferredSingle.executeDeferred.cu.toLocaleString()} | ${totalDeferredCU.toLocaleString()} | Deferred splits CU across 2 txs |`);
     console.log(`| Tx Size (bytes) | ${secp256r1Result.txSize} | ${deferredSingle.authorize.txSize} | ${deferredSingle.executeDeferred.txSize} | ${deferredSingle.authorize.txSize + deferredSingle.executeDeferred.txSize} | TX2 has no precompile overhead |`);
-    console.log(`| Inner Ix Capacity | ~574 bytes | N/A (hashes only) | ~1,100 bytes | ~1,100 bytes | 1.9x more space for inner instructions |`);
+    // Room left under 1232 bytes once the transaction's own overhead is in (v0,
+    // no ALT, no ComputeBudget ix, the portal's clientDataJSON): an empty passkey
+    // Execute is ~887 bytes, an ExecuteDeferred ~406. Measured 2026-09-29.
+    console.log(`| Inner Ix Capacity | ~345 bytes | N/A (hashes only) | ~825 bytes | ~825 bytes | ~2.4x more space for inner instructions |`);
     console.log(`| Tx Fees | 0.000005 SOL | 0.000005 SOL | 0.000005 SOL | 0.00001 SOL | 2x fee for 2 transactions |`);
     console.log(`| Temp Rent (refunded) | — | ${(deferredRent / LAMPORTS_PER_SOL).toFixed(9)} SOL | refunded | 0 SOL net | DeferredExec rent refunded on close |`);
     console.log(`| Accounts | ${secp256r1Result.accounts} | ${deferredSingle.authorize.accounts} | ${deferredSingle.executeDeferred.accounts} | — | TX2 doesn't need precompile sysvar |`);

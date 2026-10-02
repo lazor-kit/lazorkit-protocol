@@ -1,11 +1,14 @@
 use pinocchio::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, sysvars::rent::Rent,
+    account_info::AccountInfo,
+    program_error::ProgramError,
+    pubkey::{find_program_address, Pubkey},
+    sysvars::rent::Rent,
     ProgramResult,
 };
 
 use crate::{
     error::ProtocolError,
-    state::{protocol_config::ProtocolConfig, treasury_shard::TreasuryShard, AccountDiscriminator},
+    state::{protocol_config::ProtocolConfig, treasury_shard::TreasuryShard},
 };
 
 /// Processes the `WithdrawTreasury` instruction.
@@ -53,17 +56,13 @@ pub fn process(
     // checks below. They'd then get direct lamport manipulation on the real
     // (LazorKit-owned) shard_pda — which Solana's runtime allows because
     // LazorKit owns the shard — draining all treasury shards to themselves.
-    if config_pda.owner() != program_id || shard_pda.owner() != program_id {
+    ProtocolConfig::load(program_id, config_pda)?;
+    if shard_pda.owner() != program_id {
         return Err(ProgramError::IllegalOwner);
     }
 
     // Read config, verify admin + treasury
     let config_data = config_pda.try_borrow_data()?;
-    if config_data.len() < core::mem::size_of::<ProtocolConfig>()
-        || config_data[0] != AccountDiscriminator::ProtocolConfig as u8
-    {
-        return Err(ProtocolError::InvalidProtocolAdmin.into());
-    }
     let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
     if admin.key() != &config.admin {
         return Err(ProtocolError::InvalidProtocolAdmin.into());
@@ -73,14 +72,22 @@ pub fn process(
     }
     drop(config_data);
 
-    // Verify shard
-    let shard_data = shard_pda.try_borrow_data()?;
-    if shard_data.len() < core::mem::size_of::<TreasuryShard>()
-        || shard_data[0] != AccountDiscriminator::TreasuryShard as u8
-    {
-        return Err(ProtocolError::InvalidIntegratorRecord.into());
+    // Verify shard: type, then re-derive its canonical PDA from its own
+    // shard_id — matching `try_collect_fee`. Not strictly required (only the
+    // admin-gated `initialize_treasury_shard` can mint a program-owned shard, at
+    // canonical addresses), but pinning the address here removes the reliance on
+    // that invariant and keeps every shard read consistent.
+    let shard_id = {
+        let shard_data = shard_pda.try_borrow_data()?;
+        TreasuryShard::check(&shard_data).map_err(|_| ProtocolError::InvalidTreasuryShard)?;
+        let shard = unsafe { &*(shard_data.as_ptr() as *const TreasuryShard) };
+        shard.shard_id
+    };
+    let (expected_shard_key, _) =
+        find_program_address(&[crate::seeds::TREASURY_SHARD, &[shard_id]], program_id);
+    if shard_pda.key() != &expected_shard_key {
+        return Err(ProtocolError::InvalidTreasuryShard.into());
     }
-    drop(shard_data);
 
     // Sweep: keep rent-exempt minimum in shard
     let rent = Rent::from_account_info(rent_sysvar)?;

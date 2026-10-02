@@ -32,12 +32,20 @@ fn test_nonce_slot_truncation_fix() {
     let user_seed = rand::random::<[u8; 32]>();
 
     // Derive PDAs
-    let (wallet_pda, _) =
-        Pubkey::find_program_address(&[b"wallet", &user_seed], &context.program_id);
-    let (vault_pda, _) =
-        Pubkey::find_program_address(&[b"vault", wallet_pda.as_ref()], &context.program_id);
+    let (wallet_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::WALLET, &user_seed],
+        &context.program_id,
+    );
+    let (vault_pda, _) = Pubkey::find_program_address(
+        &[lazorkit_program::seeds::VAULT, wallet_pda.as_ref()],
+        &context.program_id,
+    );
     let (auth_pda, auth_bump) = Pubkey::find_program_address(
-        &[b"authority", wallet_pda.as_ref(), &credential_id_hash],
+        &[
+            lazorkit_program::seeds::AUTHORITY,
+            wallet_pda.as_ref(),
+            &credential_id_hash,
+        ],
         &context.program_id,
     );
 

@@ -12,6 +12,7 @@
  *     different signer/writable flags, the most-permissive flags win
  *     (mirrors the on-chain merge semantics).
  */
+import { encodeAccountIndex } from './packing.js';
 import { AccountRole, type AccountMeta, type Instruction, type Address } from '@solana/kit';
 import type { CompactInstruction } from './packing.js';
 
@@ -40,10 +41,18 @@ function flagsFromRole(role: AccountRole): { isSigner: boolean; isWritable: bool
  * `fixedAccounts` are the addresses already in the LazorKit instruction's
  * native account layout. `userInstructions` are the inner instructions
  * to be CPI'd by the wallet.
+ *
+ * `payer` is passed explicitly rather than read off `fixedAccounts[0]`. The
+ * program refuses to forward the fee payer's signature into any inner CPI —
+ * that was the H-3 hole — and relying on position to identify it would be one
+ * refactor away from silently marking the wrong account.
  */
 export function buildCompactLayout(
   fixedAccounts: ReadonlyArray<Address>,
   userInstructions: ReadonlyArray<Instruction>,
+  /// Required, not derived from `fixedAccounts[0]`: an inner instruction may
+  /// legitimately declare the fee payer a signer, which is the H-3 attack shape.
+  payer: Address,
 ): {
   compactInstructions: CompactInstruction[];
   remainingAccounts: AccountMeta[];
@@ -97,9 +106,19 @@ export function buildCompactLayout(
   }
 
   // Compact each user instruction.
+  // Signer forwarding is opt-in on the wire. The intent is already here in
+  // `acc.role`; it used to be discarded at exactly this point, which is why the
+  // program had to infer it — and inferred it for every outer signer, including
+  // the payer. The payer is never flagged: the program would refuse it anyway,
+  // and a request it will always reject is a request worth not making.
   const compactInstructions: CompactInstruction[] = userInstructions.map((ix) => ({
-    programIdIndex: indexMap.get(ix.programAddress)!,
-    accountIndexes: (ix.accounts ?? []).map((a) => indexMap.get(a.address)!),
+    programIdIndex: encodeAccountIndex(indexMap.get(ix.programAddress)!, false),
+    accountIndexes: (ix.accounts ?? []).map((a) =>
+      encodeAccountIndex(
+        indexMap.get(a.address)!,
+        flagsFromRole(a.role).isSigner && a.address !== payer,
+      ),
+    ),
     data: ix.data ? new Uint8Array(ix.data) : new Uint8Array(0),
   }));
 

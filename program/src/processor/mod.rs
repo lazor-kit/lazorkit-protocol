@@ -9,6 +9,7 @@
 
 pub mod authority;
 pub mod execute;
+pub mod migrate;
 pub mod protocol;
 pub mod session;
 pub mod wallet;

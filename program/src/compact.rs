@@ -49,6 +49,14 @@ impl<'a> CompactInstructionRef<'a> {
         }
 
         let program_id_index = bytes[0];
+        // The program-id index carries no flag bit — the program a CPI targets
+        // is never a signer this program forwards. A byte with the high bit set
+        // here is a client that packed an index above 127, which the flag bit
+        // makes unrepresentable; reject it rather than silently masking it into
+        // a different account.
+        if program_id_index > MAX_ACCOUNT_INDEX {
+            return Err(ProgramError::InvalidInstructionData);
+        }
         let num_accounts = bytes[1] as usize;
 
         if bytes.len() < 2 + num_accounts + 2 {
@@ -91,16 +99,20 @@ impl<'a> CompactInstructionRef<'a> {
         let program_id = account_infos[self.program_id_index as usize].key();
 
         let mut accounts: Vec<&AccountInfo> = Vec::with_capacity(self.accounts.len());
-        for &index in self.accounts {
-            if (index as usize) >= account_infos.len() {
+        let mut forward_signer: Vec<bool> = Vec::with_capacity(self.accounts.len());
+        for &byte in self.accounts {
+            let (index, forward) = decode_account_index(byte);
+            if index >= account_infos.len() {
                 return Err(ProgramError::InvalidInstructionData);
             }
-            accounts.push(&account_infos[index as usize]);
+            accounts.push(&account_infos[index]);
+            forward_signer.push(forward);
         }
 
         Ok(DecompressedInstructionRef {
             program_id,
             accounts,
+            forward_signer,
             data: self.data,
         })
     }
@@ -111,6 +123,10 @@ impl<'a> CompactInstructionRef<'a> {
 pub struct DecompressedInstructionRef<'a, 'b> {
     pub program_id: &'b Pubkey,
     pub accounts: Vec<&'b AccountInfo>,
+    /// Parallel to `accounts`: whether the caller asked for that account's
+    /// signer flag to be forwarded into the CPI. See
+    /// [`ACCOUNT_INDEX_FORWARD_SIGNER`].
+    pub forward_signer: Vec<bool>,
     pub data: &'a [u8],
 }
 
@@ -185,6 +201,9 @@ impl CompactInstruction {
         }
 
         let program_id_index = bytes[0];
+        if program_id_index > MAX_ACCOUNT_INDEX {
+            return Err(ProgramError::InvalidInstructionData);
+        }
         let num_accounts = bytes[1] as usize;
 
         if bytes.len() < 2 + num_accounts + 2 {
@@ -260,6 +279,130 @@ pub struct DecompressedInstruction<'a> {
     pub program_id: &'a Pubkey,
     pub accounts: Vec<&'a AccountInfo>,
     pub data: Vec<u8>, // Owned data to avoid lifetime issues
+}
+
+// ─── Account index encoding ──────────────────────────────────────────────
+
+/// Mask selecting the account index from an index byte.
+pub const ACCOUNT_INDEX_MASK: u8 = 0x7f;
+
+/// High bit of an index byte: forward this account's signer flag into the CPI.
+///
+/// Signer forwarding used to be implicit — every outer signer became a signer
+/// of every inner instruction that referenced it, with nobody having said so.
+/// That is how a session limited to 0.001 SOL could move 2 SOL out of the
+/// paymaster's own wallet: the limits watch the vault, and the paymaster is not
+/// the vault. Making it an opt-in bit puts the request inside the compact bytes,
+/// which for a Secp256r1 authority are inside the signed payload — so the
+/// passkey holder signs the elevation, rather than it being inferred.
+///
+/// Costs one bit: indices are capped at 127 rather than 255.
+pub const ACCOUNT_INDEX_FORWARD_SIGNER: u8 = 0x80;
+
+/// Highest addressable account index, given the flag bit.
+pub const MAX_ACCOUNT_INDEX: u8 = ACCOUNT_INDEX_MASK;
+
+/// Split an index byte into `(index, forward_signer)`.
+#[inline]
+pub fn decode_account_index(byte: u8) -> (usize, bool) {
+    (
+        (byte & ACCOUNT_INDEX_MASK) as usize,
+        byte & ACCOUNT_INDEX_FORWARD_SIGNER != 0,
+    )
+}
+
+// ─── Accounts hash ───────────────────────────────────────────────────────
+
+/// Privilege byte hashed after each account key.
+///
+/// Binding the *runtime* flags, not the requested ones: these are what actually
+/// authorise the inner CPI, so they are what the signature must cover. A relayer
+/// that marks a referenced account writable, or adds a signature to it, after
+/// the passkey signed changes this byte and invalidates the signature — noisy,
+/// and safe.
+#[inline]
+pub fn account_flags(is_signer: bool, is_writable: bool) -> u8 {
+    (is_signer as u8) | ((is_writable as u8) << 1)
+}
+
+/// The walk order the accounts hash is defined over, independent of where the
+/// account data comes from: for each compact instruction, the program id first,
+/// then every account it references, each contributing its 32-byte key followed
+/// by its flags byte.
+///
+/// `push` appends one account by index and reports an out-of-range index. The
+/// indirection exists because `AccountInfo` cannot be constructed off-chain, so
+/// a host test could not otherwise exercise this ordering — and the ordering is
+/// the part that silently drifts between the program and the two SDKs.
+///
+/// The forward-signer bit is masked off before lookup: it addresses no account
+/// and must not change the digest.
+pub fn accounts_hash_preimage_with<F>(
+    compact_instructions: &[CompactInstructionRef<'_>],
+    mut push: F,
+) -> Result<Vec<u8>, ProgramError>
+where
+    F: FnMut(usize, &mut Vec<u8>) -> Result<(), ProgramError>,
+{
+    let mut preimage = Vec::with_capacity(compact_instructions.len() * 4 * 33);
+
+    for ix in compact_instructions {
+        let (program_idx, _) = decode_account_index(ix.program_id_index);
+        push(program_idx, &mut preimage)?;
+        for &byte in ix.accounts {
+            let (idx, _) = decode_account_index(byte);
+            push(idx, &mut preimage)?;
+        }
+    }
+
+    Ok(preimage)
+}
+
+/// Build the preimage the accounts hash is taken over, reading privilege from
+/// the runtime's own view of each account.
+///
+/// Split out from the hashing because the digest comes from a syscall that does
+/// not exist on the host — which is why the two copies of this logic in
+/// `immediate.rs` and `deferred.rs` had no test at all and were kept in sync by
+/// a comment.
+pub fn accounts_hash_preimage(
+    accounts: &[AccountInfo],
+    compact_instructions: &[CompactInstructionRef<'_>],
+) -> Result<Vec<u8>, ProgramError> {
+    accounts_hash_preimage_with(compact_instructions, |idx, preimage| {
+        let acc = accounts
+            .get(idx)
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        preimage.extend_from_slice(acc.key().as_ref());
+        preimage.push(account_flags(acc.is_signer(), acc.is_writable()));
+        Ok(())
+    })
+}
+
+/// SHA-256 of [`accounts_hash_preimage`].
+///
+/// Off-chain this returns a fixed sentinel — the syscall does not exist there.
+/// Assert on the preimage in host tests, not on this.
+pub fn compute_accounts_hash(
+    accounts: &[AccountInfo],
+    compact_instructions: &[CompactInstructionRef<'_>],
+) -> Result<[u8; 32], ProgramError> {
+    let preimage = accounts_hash_preimage(accounts, compact_instructions)?;
+
+    #[allow(unused_assignments)]
+    let mut hash = [0u8; 32];
+    #[cfg(target_os = "solana")]
+    unsafe {
+        let parts = [preimage.as_slice()];
+        pinocchio::syscalls::sol_sha256(parts.as_ptr() as *const u8, 1, hash.as_mut_ptr());
+    }
+    #[cfg(not(target_os = "solana"))]
+    {
+        hash = [0xAA; 32];
+        let _ = preimage;
+    }
+
+    Ok(hash)
 }
 
 /// Maximum number of compact instructions per Execute call.
@@ -385,10 +528,11 @@ mod tests {
         assert_eq!(deserialized.accounts.len(), 0);
     }
 
+    /// The flag bit halves the addressable range: 0..=127 are indices, 128..=255
+    /// carry ACCOUNT_INDEX_FORWARD_SIGNER on top of an index.
     #[test]
     fn test_max_accounts() {
-        // Test with 255 accounts (the valid u8 max)
-        let accounts: Vec<u8> = (0..255).collect();
+        let accounts: Vec<u8> = (0..=MAX_ACCOUNT_INDEX).collect();
         let ix = CompactInstruction {
             program_id_index: 0,
             accounts: accounts.clone(),
@@ -397,14 +541,45 @@ mod tests {
 
         let bytes = ix.to_bytes();
         let (deserialized, _) = CompactInstruction::from_bytes(&bytes).unwrap();
-        assert_eq!(deserialized.accounts.len(), 255);
+        assert_eq!(deserialized.accounts.len(), 128);
+        for (i, &byte) in deserialized.accounts.iter().enumerate() {
+            assert_eq!(decode_account_index(byte), (i, false));
+        }
+    }
+
+    #[test]
+    fn index_byte_splits_into_index_and_forward_flag() {
+        assert_eq!(decode_account_index(0), (0, false));
+        assert_eq!(decode_account_index(5), (5, false));
+        assert_eq!(decode_account_index(MAX_ACCOUNT_INDEX), (127, false));
+        assert_eq!(decode_account_index(0x80), (0, true));
+        assert_eq!(decode_account_index(0x85), (5, true));
+        assert_eq!(decode_account_index(0xFF), (127, true));
+    }
+
+    /// A program-id index cannot carry the flag, so a high bit there means the
+    /// client packed an index the format can no longer represent.
+    #[test]
+    fn program_id_index_above_the_ceiling_is_rejected() {
+        let mut bytes = vec![0x80u8, 0];
+        bytes.extend(&0u16.to_le_bytes());
+        assert!(CompactInstruction::from_bytes(&bytes).is_err());
+        assert!(CompactInstructionRef::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn account_flags_encode_signer_and_writable_independently() {
+        assert_eq!(account_flags(false, false), 0b00);
+        assert_eq!(account_flags(true, false), 0b01);
+        assert_eq!(account_flags(false, true), 0b10);
+        assert_eq!(account_flags(true, true), 0b11);
     }
 
     #[test]
     #[should_panic(expected = "account count exceeds u8 max")]
     fn test_256_accounts_panics() {
-        // 256 accounts would silently truncate to 0 via `as u8`.
-        // The assert! guard must catch this.
+        // The *count* is still a u8, independent of the index ceiling: 256
+        // entries would truncate to 0 and corrupt the stream.
         let accounts: Vec<u8> = (0..=255).collect(); // 256 elements
         let ix = CompactInstruction {
             program_id_index: 0,
@@ -518,5 +693,150 @@ mod tests {
         // accounts[1] and accounts[2] would point to different pubkeys
         // causing hash(pubkey[1], pubkey[2]) != hash(pubkey[2], pubkey[1])
         // This is verified at runtime in execute.rs::compute_accounts_hash
+    }
+}
+
+/// Golden-vector coverage for the accounts-hash preimage.
+///
+/// The vectors live in `test-vectors/accounts-hash.json` and are generated by a
+/// third implementation, so neither this file nor either SDK is its own oracle.
+/// `sdk/sdk-kit/tests/packing.test.ts` asserts against the same file, which is
+/// what ties the wire format together across the three codebases — a stale SDK
+/// build or a one-sided encoding change fails here rather than as an
+/// unexplained `InvalidMessageHash` against a validator.
+#[cfg(test)]
+mod accounts_hash_vectors {
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+
+    const VECTORS: &str = include_str!("../../test-vectors/accounts-hash.json");
+
+    /// The vectors address accounts by a 32-byte key whose last byte is the only
+    /// non-zero one, so they can be reconstructed here without a base58 decoder.
+    fn decode_base58(s: &str) -> [u8; 32] {
+        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut bytes: Vec<u8> = vec![0];
+        for c in s.bytes() {
+            let digit = ALPHABET.iter().position(|&a| a == c).expect("base58 char") as u32;
+            let mut carry = digit;
+            for b in bytes.iter_mut().rev() {
+                let v = (*b as u32) * 58 + carry;
+                *b = (v & 0xff) as u8;
+                carry = v >> 8;
+            }
+            while carry > 0 {
+                bytes.insert(0, (carry & 0xff) as u8);
+                carry >>= 8;
+            }
+        }
+        let leading_zeros = s.bytes().take_while(|&c| c == b'1').count();
+        let mut out = vec![0u8; leading_zeros];
+        out.extend_from_slice(&bytes[bytes.len().saturating_sub(32 - leading_zeros)..]);
+        while out.len() < 32 {
+            out.insert(0, 0);
+        }
+        out.try_into().expect("32 bytes")
+    }
+
+    #[test]
+    fn preimage_and_hash_match_the_golden_vectors() {
+        let doc: serde_json::Value = serde_json::from_str(VECTORS).expect("vector file parses");
+        let vectors = doc["vectors"].as_array().expect("vectors array");
+        assert!(!vectors.is_empty());
+
+        for vector in vectors {
+            let name = vector["name"].as_str().unwrap();
+
+            let accounts: Vec<([u8; 32], bool, bool)> = vector["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| {
+                    (
+                        decode_base58(a["address"].as_str().unwrap()),
+                        a["isSigner"].as_bool().unwrap(),
+                        a["isWritable"].as_bool().unwrap(),
+                    )
+                })
+                .collect();
+
+            // Owned first so the borrowed `CompactInstructionRef`s below outlive
+            // nothing temporary.
+            let index_bytes: Vec<Vec<u8>> = vector["compactInstructions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|ix| {
+                    ix["accountIndexes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|i| i.as_u64().unwrap() as u8)
+                        .collect()
+                })
+                .collect();
+
+            let compact: Vec<CompactInstructionRef<'_>> = vector["compactInstructions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(&index_bytes)
+                .map(|(ix, accounts)| CompactInstructionRef {
+                    program_id_index: ix["programIdIndex"].as_u64().unwrap() as u8,
+                    accounts,
+                    data: &[],
+                })
+                .collect();
+
+            let preimage = accounts_hash_preimage_with(&compact, |idx, out| {
+                let (key, is_signer, is_writable) = accounts
+                    .get(idx)
+                    .copied()
+                    .ok_or(ProgramError::InvalidInstructionData)?;
+                out.extend_from_slice(&key);
+                out.push(account_flags(is_signer, is_writable));
+                Ok(())
+            })
+            .expect("preimage builds");
+
+            assert_eq!(
+                hex(&preimage),
+                vector["preimageHex"].as_str().unwrap(),
+                "{name}: preimage diverged from the golden vector"
+            );
+            assert_eq!(
+                hex(&Sha256::digest(&preimage)),
+                vector["hashHex"].as_str().unwrap(),
+                "{name}: hash diverged from the golden vector"
+            );
+        }
+    }
+
+    /// The forward-signer bit addresses no account, so masking it must leave the
+    /// digest alone — otherwise requesting forwarding would silently invalidate
+    /// a signature over the same accounts.
+    #[test]
+    fn the_forward_flag_is_masked_out_of_the_digest() {
+        let doc: serde_json::Value = serde_json::from_str(VECTORS).unwrap();
+        let by_name = |n: &str| -> String {
+            doc["vectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == n)
+                .unwrap_or_else(|| panic!("vector {n} present"))["hashHex"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            by_name("single-transfer"),
+            by_name("forward-flag-does-not-change-the-digest")
+        );
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 }

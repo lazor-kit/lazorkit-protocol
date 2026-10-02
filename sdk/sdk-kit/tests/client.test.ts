@@ -3,21 +3,33 @@
 // These cover the surface that does NOT require an RPC round-trip:
 //   - PDA helpers
 //   - reclaimDeferred (pure tx assembly)
-//   - createWallet (Ed25519, no fee accounts)
+//   - createWallet (Ed25519): fee suffix present with no config; opt-out omits it
+//   - the wallet a prepare* challenge names, behind a stub for the counter read
+//   - the flags prepareExecute / prepareAuthorize hash, behind the same stub
 //
-// Anything requiring `getAccountInfo` / `getSlot` is covered by the
+// Anything else requiring `getAccountInfo` / `getSlot` is covered by the
 // E2E suite under tests-sdk-kit/ against a live validator.
 
+import { createHash } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
-import { address } from '@solana/kit';
+import { AccountRole, address, getAddressEncoder, type Address, type Instruction } from '@solana/kit';
 import {
+  DISC_EXECUTE,
+  DISC_REVOKE_SESSION,
+  SYSTEM_PROGRAM_ADDRESS,
   LazorKit,
   LazorKitClient,
   PROGRAM_ID_DEVNET,
   PROGRAM_ID_MAINNET,
+  buildAuthPayloadPrefix,
+  buildSecp256r1Challenge,
+  deserializeDeferredPayload,
+  serializeDeferredPayload,
+  type DeferredPayload,
 } from '../src/index.js';
 
 const PAYER = address('11111111111111111111111111111112');
+const ZERO_ADDRESS = address('11111111111111111111111111111111');
 const VAULT = address('So11111111111111111111111111111111111111112');
 const KP = address('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
 
@@ -75,10 +87,12 @@ describe('LazorKit class', () => {
   });
 });
 
-describe('createWallet — Ed25519 owner, fee disabled (no RPC needed)', () => {
-  it('builds a single CreateWallet instruction with derived PDAs', async () => {
-    // For the no-fee path, getProtocolConfig must return null. Wire a
-    // mockRpc that returns { value: null } from getAccountInfo.
+describe('createWallet — Ed25519 owner, protocol not initialised', () => {
+  it('still appends the fee suffix, because the program requires it on disc 0', async () => {
+    // getProtocolConfig finds no account: the window between an upgrade and
+    // InitializeProtocol, or a paused protocol. The program rejects a
+    // CreateWallet without the four-account suffix (4008) before it reads the
+    // config, and strips it when nothing is charged — so it must be sent.
     const fakeRpc = {
       getAccountInfo: () => ({ send: async () => ({ value: null }) }),
     };
@@ -89,11 +103,339 @@ describe('createWallet — Ed25519 owner, fee disabled (no RPC needed)', () => {
       userSeed,
       owner: { type: 'ed25519', publicKey: KP },
     });
+    // No RegisterPayer: with no live fee there is nothing to register.
     expect(result.instructions).toHaveLength(1);
     expect(result.walletPda).toBeTypeOf('string');
     expect(result.vaultPda).toBeTypeOf('string');
     expect(result.authorityPda).toBeTypeOf('string');
-    // Discriminator at byte 0.
-    expect(result.instructions[0]!.data?.[0]).toBe(0); // DISC_CREATE_WALLET
+    const ix = result.instructions[0]!;
+    expect(ix.data?.[0]).toBe(0); // DISC_CREATE_WALLET
+
+    const [configPda] = await lk.findProtocolConfig();
+    const [feeRecordPda] = await lk.findFeeRecord(PAYER);
+    const [shard0] = await lk.findTreasuryShard(0);
+    expect(ix.accounts!.slice(-4).map((a) => a.address)).toEqual([
+      configPda,
+      feeRecordPda,
+      shard0,
+      '11111111111111111111111111111111',
+    ]);
+  });
+
+  it('omits the suffix, with no RPC at all, only when built with { protocolFees: false }', async () => {
+    const throwingRpc = {
+      getAccountInfo: () => ({
+        send: async () => {
+          throw new Error('a fee-less client must not probe the protocol config');
+        },
+      }),
+    };
+    const lk = new LazorKit(throwingRpc as never, PROGRAM_ID_DEVNET, { protocolFees: false });
+    const result = await lk.createWallet({
+      payer: PAYER,
+      userSeed: new Uint8Array(32).fill(0x78),
+      owner: { type: 'ed25519', publicKey: KP },
+    });
+    const [configPda] = await lk.findProtocolConfig();
+    expect(result.instructions[0]!.accounts!.map((a) => a.address)).not.toContain(configPda);
+  });
+
+  it('rejects an all-zero Ed25519 owner key', async () => {
+    const lk = new LazorKit(mockRpc as never, PROGRAM_ID_DEVNET);
+    await expect(
+      lk.createWallet({
+        payer: PAYER,
+        userSeed: new Uint8Array(32).fill(0x88),
+        owner: { type: 'ed25519', publicKey: ZERO_ADDRESS },
+      }),
+    ).rejects.toThrow('publicKey must not be all zero bytes');
+  });
+
+  it('rejects all-zero Secp256r1 owner identity bytes', async () => {
+    const lk = new LazorKit(mockRpc as never, PROGRAM_ID_DEVNET);
+    await expect(
+      lk.createWallet({
+        payer: PAYER,
+        userSeed: new Uint8Array(32).fill(0x99),
+        owner: {
+          type: 'secp256r1',
+          credentialIdHash: new Uint8Array(32),
+          compressedPubkey: new Uint8Array(33),
+          rpId: 'lazor.dev',
+        },
+      }),
+    ).rejects.toThrow('credentialIdHash must not be all zero bytes');
+  });
+});
+
+// The attack the wallet binding closes: RevokeSession's signed payload is the
+// session and refund address, neither of which names a wallet. Before, the
+// same passkey revoking the same session address at the same counter, slot
+// and payer on two wallets signed identical bytes.
+describe('prepare* — the challenge names the wallet', () => {
+  it('binds the wallet the authority belongs to', async () => {
+    const SLOT = 12_345n;
+    // Answers readAuthorityCounter: counter 0 at offset 8, so the next is 1.
+    const rpc = {
+      getAccountInfo: () => ({
+        send: async () => ({ value: { data: [Buffer.alloc(12).toString('base64'), 'base64'] } }),
+      }),
+    };
+    const lk = new LazorKit(rpc as never, PROGRAM_ID_DEVNET);
+    const credentialIdHash = new Uint8Array(32).fill(0xc1);
+    const sessionPda = VAULT;
+    const prepare = async (walletPda: Address) =>
+      lk.prepareRevokeSession({
+        payer: PAYER,
+        walletPda,
+        secp256r1: {
+          credentialIdHash,
+          publicKeyBytes: new Uint8Array(33).fill(0x02),
+          authorityPda: (await lk.findAuthority(walletPda, credentialIdHash))[0],
+          slotOverride: SLOT,
+        },
+        sessionPda,
+      });
+    const [walletA] = await lk.findWallet(new Uint8Array(32).fill(0xa1));
+    const [walletB] = await lk.findWallet(new Uint8Array(32).fill(0xb2));
+    const [a, b] = [await prepare(walletA), await prepare(walletB)];
+
+    expect(a.challenge).not.toEqual(b.challenge);
+    const enc = getAddressEncoder();
+    const signedPayload = new Uint8Array(64);
+    signedPayload.set(enc.encode(sessionPda), 0);
+    signedPayload.set(enc.encode(PAYER), 32);
+    expect(a.challenge).toEqual(
+      buildSecp256r1Challenge({
+        discriminator: new Uint8Array([DISC_REVOKE_SESSION]),
+        // 5: the sysvar-instructions account's index in RevokeSession.
+        authPayload: buildAuthPayloadPrefix({ slot: SLOT, counter: 1, sysvarIxIndex: 5 }),
+        signedPayload,
+        payer: PAYER,
+        wallet: walletA,
+        counter: 1,
+        programId: PROGRAM_ID_DEVNET,
+      }),
+    );
+  });
+});
+
+// The accounts hash binds the signer/writable flags the program reads, and the
+// runtime reports those per key over the whole message: the fee payer is always
+// a writable signer, and a key listed twice has the union of its entries. An
+// inner instruction that repays the payer is the ordinary case that exposes a
+// wrong guess — it failed Execute with InvalidMessageHash (3005) and
+// ExecuteDeferred with DeferredHashMismatch (3015).
+describe('prepareExecute / prepareAuthorize — the accounts hash uses runtime flags', () => {
+  const SLOT = 12_345n;
+  // readAuthorityCounter reads counter 0 at offset 8; no protocol config (too short).
+  const rpc = {
+    getAccountInfo: () => ({
+      send: async () => ({ value: { data: [Buffer.alloc(12).toString('base64'), 'base64'] } }),
+    }),
+  };
+  const credentialIdHash = new Uint8Array(32).fill(0xc1);
+  const enc = getAddressEncoder();
+
+  /** `key(32) ‖ flags(1)` per account, in the program's walk order. */
+  const accountsHash = (...walk: [Address, number][]) =>
+    new Uint8Array(
+      createHash('sha256')
+        .update(Buffer.concat(walk.map(([a, f]) => Buffer.concat([enc.encode(a), Buffer.from([f])]))))
+        .digest(),
+    );
+  const transfer = (from: Address, to: Address): Instruction => {
+    const data = new Uint8Array(12);
+    new DataView(data.buffer).setUint32(0, 2, true);
+    new DataView(data.buffer).setBigUint64(4, 1_000_000n, true);
+    return {
+      programAddress: SYSTEM_PROGRAM_ADDRESS,
+      accounts: [
+        { address: from, role: AccountRole.WRITABLE },
+        { address: to, role: AccountRole.WRITABLE },
+      ],
+      data,
+    };
+  };
+  const setup = async () => {
+    const lk = new LazorKit(rpc as never, PROGRAM_ID_DEVNET);
+    const [walletPda] = await lk.findWallet(new Uint8Array(32).fill(0xa1));
+    const [vaultPda] = await lk.findVault(walletPda);
+    const secp256r1 = {
+      credentialIdHash,
+      publicKeyBytes: new Uint8Array(33).fill(0x02),
+      authorityPda: (await lk.findAuthority(walletPda, credentialIdHash))[0],
+      slotOverride: SLOT,
+    };
+    return { lk, walletPda, vaultPda, secp256r1 };
+  };
+
+  it('Execute hashes the payer as a writable signer', async () => {
+    const { lk, walletPda, vaultPda, secp256r1 } = await setup();
+    const prepared = await lk.prepareExecute({
+      payer: PAYER,
+      walletPda,
+      secp256r1,
+      instructions: [transfer(vaultPda, PAYER)],
+    });
+
+    const hash = accountsHash([SYSTEM_PROGRAM_ADDRESS, 0b00], [vaultPda, 0b10], [PAYER, 0b11]);
+    const signedPayload = new Uint8Array([...prepared._internal.packed, ...hash]);
+    expect(prepared.challenge).toEqual(
+      buildSecp256r1Challenge({
+        discriminator: new Uint8Array([DISC_EXECUTE]),
+        authPayload: buildAuthPayloadPrefix({
+          slot: SLOT,
+          counter: 1,
+          sysvarIxIndex: prepared._internal.signing._internal.sysvarIxIndex,
+        }),
+        signedPayload,
+        payer: PAYER,
+        wallet: walletPda,
+        counter: 1,
+        programId: PROGRAM_ID_DEVNET,
+      }),
+    );
+  });
+
+  it('Authorize hashes the refund slot as the payer it is, and the wallet read-only', async () => {
+    const { lk, walletPda, vaultPda, secp256r1 } = await setup();
+    // A second instruction that reads the wallet: ExecuteDeferred passes it
+    // read-only, so that is what the program hashes.
+    const readWallet: Instruction = {
+      programAddress: KP,
+      accounts: [{ address: walletPda, role: AccountRole.READONLY }],
+      data: new Uint8Array([1]),
+    };
+    const prepared = await lk.prepareAuthorize({
+      payer: PAYER,
+      walletPda,
+      secp256r1,
+      instructions: [transfer(vaultPda, PAYER), readWallet],
+    });
+
+    expect(prepared._internal.accountsHash).toEqual(
+      accountsHash(
+        [SYSTEM_PROGRAM_ADDRESS, 0b00],
+        [vaultPda, 0b10],
+        // Index 4, the refund destination: the same key as tx2's payer.
+        [PAYER, 0b11],
+        [KP, 0b00],
+        [walletPda, 0b00],
+      ),
+    );
+  });
+
+  // Arbitrary keys: only their bytes are hashed.
+  const FEE_PAYER = address('Vote111111111111111111111111111111111111111');
+  const RELAYER = address('Stake11111111111111111111111111111111111111');
+  const STRANGER = address('Config1111111111111111111111111111111111111');
+  const executeChallenge = (
+    prepared: Awaited<ReturnType<LazorKit['prepareExecute']>>,
+    walletPda: Address,
+    hash: Uint8Array,
+  ) =>
+    buildSecp256r1Challenge({
+      discriminator: new Uint8Array([DISC_EXECUTE]),
+      authPayload: buildAuthPayloadPrefix({
+        slot: SLOT,
+        counter: 1,
+        sysvarIxIndex: prepared._internal.signing._internal.sysvarIxIndex,
+      }),
+      signedPayload: new Uint8Array([...prepared._internal.packed, ...hash]),
+      payer: PAYER,
+      wallet: walletPda,
+      counter: 1,
+      programId: PROGRAM_ID_DEVNET,
+    });
+  // finalizeAuthorize only packages the response; nothing here verifies it.
+  const unverifiedResponse = {
+    signature: new Uint8Array(64),
+    authenticatorData: new Uint8Array(37),
+    clientDataJsonHash: new Uint8Array(32),
+    clientDataJson: new TextEncoder().encode('{}'),
+  };
+
+  // Another key pays the fee. The fee payer is then an inner account like any
+  // other, except that the runtime reports it a writable signer — which the SDK
+  // can only know if told. Repaying it used to fail with 3005.
+  it('Execute hashes a separate fee payer as a writable signer', async () => {
+    const { lk, walletPda, vaultPda, secp256r1 } = await setup();
+    const instructions = [transfer(vaultPda, FEE_PAYER)];
+
+    const prepared = await lk.prepareExecute({
+      payer: PAYER,
+      walletPda,
+      secp256r1,
+      instructions,
+      feePayer: FEE_PAYER,
+    });
+    const hash = accountsHash([SYSTEM_PROGRAM_ADDRESS, 0b00], [vaultPda, 0b10], [FEE_PAYER, 0b11]);
+    expect(prepared.challenge).toEqual(executeChallenge(prepared, walletPda, hash));
+
+    // Not told, it hashes what the instruction declares.
+    const unaware = await lk.prepareExecute({ payer: PAYER, walletPda, secp256r1, instructions });
+    const declared = accountsHash([SYSTEM_PROGRAM_ADDRESS, 0b00], [vaultPda, 0b10], [FEE_PAYER, 0b10]);
+    expect(unaware.challenge).toEqual(executeChallenge(unaware, walletPda, declared));
+  });
+
+  // A relayer sends tx2. The refund destination is still the Authorize payer —
+  // the program returns the rent to no one else — but it no longer signs tx2;
+  // the relayer does, at index 0. Hashing the payer a signer there, as for the
+  // same-payer case, failed tx2 with 3015.
+  it('Authorize for another executor hashes it at index 0, and the payer writable only', async () => {
+    const { lk, walletPda, vaultPda, secp256r1 } = await setup();
+    const prepared = await lk.prepareAuthorize({
+      payer: PAYER,
+      walletPda,
+      secp256r1,
+      instructions: [transfer(vaultPda, PAYER), transfer(vaultPda, RELAYER)],
+      executor: RELAYER,
+    });
+    expect(prepared._internal.accountsHash).toEqual(
+      accountsHash(
+        [SYSTEM_PROGRAM_ADDRESS, 0b00],
+        [vaultPda, 0b10],
+        [PAYER, 0b10], // index 4, the refund destination
+        [SYSTEM_PROGRAM_ADDRESS, 0b00],
+        [vaultPda, 0b10],
+        [RELAYER, 0b11], // index 0, tx2's payer
+      ),
+    );
+
+    // The payload carries who the hash was built for, across the wire too.
+    const { deferredPayload } = lk.finalizeAuthorize(prepared, unverifiedResponse);
+    const received = deserializeDeferredPayload(serializeDeferredPayload(deferredPayload));
+    expect(received.executor).toBe(RELAYER);
+    expect(received.refundDestination).toBe(PAYER);
+  });
+
+  it('executeDeferredFromPayload refuses a sender the hash was not built for, when it matters', async () => {
+    const { lk, walletPda, vaultPda, secp256r1 } = await setup();
+    const authorize = async (instructions: Instruction[], executor?: Address) =>
+      lk.finalizeAuthorize(
+        await lk.prepareAuthorize({ payer: PAYER, walletPda, secp256r1, instructions, executor }),
+        unverifiedResponse,
+      ).deferredPayload;
+    const tx2 = async (sender: Address, deferredPayload: DeferredPayload) =>
+      (await lk.executeDeferredFromPayload({ payer: sender, deferredPayload })).instructions.at(-1)!;
+
+    // Repays the payer, authorized for the payer to send: a relayer's tx2
+    // would read the refund slot writable only.
+    const forPayer = await authorize([transfer(vaultPda, PAYER)]);
+    await expect(tx2(RELAYER, forPayer)).rejects.toThrow(/DeferredHashMismatch \(3015\)/);
+    expect((await tx2(PAYER, forPayer)).accounts![0].address).toBe(PAYER);
+
+    // Authorized for the relayer: it sends, and the rent still goes to the
+    // payer without being told.
+    const forRelayer = await authorize([transfer(vaultPda, PAYER)], RELAYER);
+    const ix = await tx2(RELAYER, forRelayer);
+    expect(ix.accounts![0].address).toBe(RELAYER);
+    expect(ix.accounts![4].address).toBe(PAYER);
+    await expect(tx2(PAYER, forRelayer)).rejects.toThrow(/DeferredHashMismatch \(3015\)/);
+
+    // Names neither slot: whoever sends it, the hash is the same.
+    const toStranger = await authorize([transfer(vaultPda, STRANGER)]);
+    expect((await tx2(RELAYER, toStranger)).accounts![0].address).toBe(RELAYER);
   });
 });

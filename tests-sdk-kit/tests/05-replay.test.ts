@@ -105,6 +105,7 @@ describe('Replay Prevention (Odometer)', () => {
       slot,
       counter,
       payer: ctx.payer.address,
+      wallet: walletPda,
       programId: PROGRAM_ID_DEVNET,
       publicKeyBytes: ownerKey.publicKeyBytes,
     });

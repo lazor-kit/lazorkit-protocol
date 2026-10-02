@@ -41,6 +41,11 @@ impl Authenticator for Secp256r1Authenticator {
     /// Counter is a program-controlled u32 odometer. Client must submit
     /// `on_chain_counter + 1`.
     ///
+    /// The challenge the passkey signs is
+    /// `SHA256(discriminator || auth_payload[..14] || signed_payload || payer
+    /// || wallet || counter_le4 || program_id)`, where `wallet` is the
+    /// authority header's own `wallet` field (bytes 16..48 of `auth_data`).
+    ///
     /// Programmatic/bot signing should use Ed25519 authorities instead —
     /// Secp256r1 is passkeys-only.
     fn authenticate(
@@ -88,7 +93,18 @@ impl Authenticator for Secp256r1Authenticator {
         };
 
         // --- Odometer validation ---
-        let expected_counter = header.counter.wrapping_add(1);
+        //
+        // The counter lives in the authority account, so removing an authority
+        // and re-adding the same key resets it to zero and makes that key's old
+        // signatures acceptable again. There is no cheaper durable fix: once the
+        // account is closed there is no state left to remember it by, and the
+        // wallet has no monotonic counter of its own to fold into the challenge.
+        //
+        // What bounds it is the slot check above. A replayed signature must
+        // still be inside MAX_SLOT_AGE, so the attacker has ~60 seconds to
+        // remove and re-add the authority — and removing one already requires
+        // Owner or Admin rank, which is enough privilege to do worse directly.
+        let expected_counter = next_counter(header.counter)?;
         if submitted_counter != expected_counter {
             return Err(AuthError::SignatureReused.into());
         }
@@ -109,12 +125,25 @@ impl Authenticator for Secp256r1Authenticator {
 
         // Challenge hash:
         //   SHA256(discriminator || auth_payload[..14] || signed_payload
-        //          || payer || counter || program_id)
+        //          || payer || wallet || counter || program_id)
         //
         // Only the 14-byte fixed prefix of auth_payload is included because the
         // remainder contains clientDataJSON — which is produced by the
         // authenticator *after* signing the challenge, so it can't be in the
         // hash input.
+        //
+        // `wallet` is what stops an assertion crossing wallets. One passkey can
+        // be an authority on several wallets under the same credential and key,
+        // and for some instructions nothing else here tells them apart: the
+        // signed payloads of CreateSession, AddAuthority and TransferOwnership
+        // carry key material and the payer, and the payer is a relayer shared
+        // by every wallet it serves. Without it, an assertion for wallet A
+        // verifies on wallet B whenever the two counters match, while the slot
+        // is fresh. It is read from the authority's own header rather than
+        // passed as another account, so no instruction layout changes; every
+        // caller has already checked `header.wallet` against the wallet account
+        // it acts on, so this is that wallet.
+        let wallet = header.wallet;
         let counter_bytes = expected_counter.to_le_bytes();
         #[allow(unused_assignments)]
         let mut hasher = [0u8; 32];
@@ -126,17 +155,24 @@ impl Authenticator for Secp256r1Authenticator {
                     &auth_payload[..14],
                     signed_payload,
                     payer.key().as_ref(),
+                    wallet.as_ref(),
                     &counter_bytes,
                     program_id.as_ref(),
                 ]
                 .as_ptr() as *const u8,
-                6,
+                7,
                 hasher.as_mut_ptr(),
             );
         }
         #[cfg(not(target_os = "solana"))]
         {
-            let _ = (signed_payload, discriminator, counter_bytes, program_id);
+            let _ = (
+                signed_payload,
+                discriminator,
+                wallet,
+                counter_bytes,
+                program_id,
+            );
             hasher = [0u8; 32];
         }
 
@@ -276,9 +312,17 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
+#[inline(always)]
+fn next_counter(counter: u32) -> Result<u32, ProgramError> {
+    counter
+        .checked_add(1)
+        .ok_or(ProgramError::ArithmeticOverflow)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ct_eq;
+    use super::{ct_eq, next_counter};
+    use pinocchio::program_error::ProgramError;
 
     #[test]
     fn ct_eq_equal() {
@@ -306,5 +350,19 @@ mod tests {
     #[test]
     fn ct_eq_differs_at_middle() {
         assert!(!ct_eq(b"axc", b"abc"));
+    }
+
+    #[test]
+    fn next_counter_increments_without_wrapping() {
+        assert_eq!(next_counter(0).unwrap(), 1);
+        assert_eq!(next_counter(u32::MAX - 1).unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn next_counter_rejects_overflow() {
+        assert!(matches!(
+            next_counter(u32::MAX),
+            Err(ProgramError::ArithmeticOverflow)
+        ));
     }
 }
