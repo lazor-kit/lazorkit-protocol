@@ -46,7 +46,11 @@ import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountIdempotentIx,
   Actions,
+  OWNERSHIP_PROOF_DOMAIN,
+  SIGNED_MESSAGE_DOMAIN,
   createOwnershipChallenge,
+  createTaggedOwnershipChallenge,
+  signedMessageChallenge,
   verifyOwnershipProof,
   recoverPasskeyPublicKeys,
   resolvePasskeyPublicKey,
@@ -60,6 +64,7 @@ import {
   type PasskeyWalletCandidate,
   type WalletFacts,
 } from '../../sdk/sdk-legacy/src';
+import CHALLENGE_DOMAINS from '../../test-vectors/challenge-domains.json';
 import { setupTest, sendTx, sendTxExpectError, getSlot, type TestContext } from './common';
 import { contextual } from './contextReads';
 import {
@@ -193,6 +198,36 @@ describe('verifyOwnershipProof', () => {
     const b = createOwnershipChallenge();
     expect(a.length).toBe(32);
     expect(Buffer.from(a).equals(Buffer.from(b))).toBe(false);
+  });
+
+  it('createTaggedOwnershipChallenge returns the ownership-proof tag, then 32 fresh bytes (59), as the wallet packages do', () => {
+    const { domain, domainHex, challengeLength } = CHALLENGE_DOMAINS.ownershipProof;
+    expect(OWNERSHIP_PROOF_DOMAIN).toBe(domain);
+    const a = createTaggedOwnershipChallenge();
+    const b = createTaggedOwnershipChallenge();
+    expect(a.length).toBe(challengeLength);
+    expect(Buffer.from(a.subarray(0, 27)).toString('hex')).toBe(domainHex);
+    expect(Buffer.from(a.subarray(27)).equals(Buffer.from(b.subarray(27)))).toBe(false);
+  });
+
+  it('verifies a proof over the tagged challenge and one over the 32 bare bytes of createOwnershipChallenge', () => {
+    const tagged = createTaggedOwnershipChallenge();
+    expect(verifyOwnershipProof(candidates, assertion(mine, tagged), RP_ID).map((c) => c.id)).toEqual(['mine']);
+    const bare = createOwnershipChallenge();
+    expect(verifyOwnershipProof(candidates, assertion(mine, bare), RP_ID).map((c) => c.id)).toEqual(['mine']);
+  });
+
+  it("signedMessageChallenge gives the wallet packages' bytes, and an assertion over the raw message is no message signature", () => {
+    expect(SIGNED_MESSAGE_DOMAIN).toBe(CHALLENGE_DOMAINS.signedMessage.domain);
+    for (const vector of CHALLENGE_DOMAINS.signedMessage.vectors) {
+      const message = vector.utf8 ?? new Uint8Array(Buffer.from(vector.hex!, 'hex'));
+      expect(Buffer.from(signedMessageChallenge(message)).toString('hex')).toBe(vector.challengeHex);
+    }
+    const message = crypto.randomBytes(32); // the length of a transaction challenge
+    const challenge = signedMessageChallenge(message);
+    expect(challenge.length).toBe(58);
+    expect(verifyOwnershipProof(candidates, assertion(mine, challenge), RP_ID)).toHaveLength(1);
+    expect(verifyOwnershipProof(candidates, { ...assertion(mine, message), challenge }, RP_ID)).toEqual([]);
   });
 
   it('rejects an assertion over another challenge', () => {

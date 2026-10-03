@@ -44,7 +44,9 @@ export * from './transactions';
 // The chain reads behind `LazorKitClient.findPasskeyWalletCandidates` /
 // `describeWalletCandidates` stay internal; reach them through the client.
 export {
+  OWNERSHIP_PROOF_DOMAIN,
   createOwnershipChallenge,
+  createTaggedOwnershipChallenge,
   verifyOwnershipProof,
   recoverPasskeyPublicKeys,
   resolvePasskeyPublicKey,
@@ -55,3 +57,5 @@ export {
   type AuthorityRoleName,
   type WalletFacts,
 } from './ownership';
+// The challenge a passkey signs for a message, never the message itself.
+export * from './signedMessage';

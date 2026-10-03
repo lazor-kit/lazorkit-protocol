@@ -25,7 +25,11 @@ import { SECP256R1_PROGRAM_ADDRESS } from '../instructions/system.js';
 
 /** Output of `prepareSecp256r1` — everything needed to call the authenticator. */
 export interface PreparedSecp256r1 {
-  /** SHA-256 challenge to pass to `navigator.credentials.get()`. */
+  /**
+   * SHA-256 challenge to pass to `navigator.credentials.get()`: 32 bytes, a
+   * hash of the instruction's inputs, never caller bytes. Signing it approves
+   * this instruction; see `Secp256r1Signer` for what not to sign.
+   */
   challenge: Uint8Array;
   /** Internal state preserved for the finalize step. */
   _internal: {

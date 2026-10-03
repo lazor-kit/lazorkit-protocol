@@ -123,7 +123,11 @@ pub struct ActionView {
 /// The buffer starts immediately after the 80-byte session header.
 /// Returns a Vec of ActionViews indexing into the buffer.
 pub fn parse_actions(buf: &[u8]) -> Result<Vec<ActionView>, ProgramError> {
-    let mut actions = Vec::new();
+    // Sized once from a walk of the headers. The heap is a bump allocator that
+    // never frees, so a Vec grown by push from empty keeps every buffer it
+    // outgrew: 4 + 8 + 16 views, 896 bytes, for a 16-action policy that
+    // needs 512.
+    let mut actions = Vec::with_capacity(count_action_headers(buf));
     let mut cursor = 0;
 
     while cursor < buf.len() {
@@ -159,6 +163,20 @@ pub fn parse_actions(buf: &[u8]) -> Result<Vec<ActionView>, ProgramError> {
     }
 
     Ok(actions)
+}
+
+/// How many action headers `parse_actions` will push for `buf`: every header
+/// that fits, up to the one past `MAX_ACTIONS` it rejects the buffer on. Only
+/// lengths are read; `parse_actions` does the validation.
+fn count_action_headers(buf: &[u8]) -> usize {
+    let mut count = 0;
+    let mut cursor = 0;
+    while count <= MAX_ACTIONS && cursor + ACTION_HEADER_SIZE <= buf.len() {
+        let data_len = u16::from_le_bytes([buf[cursor + 1], buf[cursor + 2]]) as usize;
+        cursor += ACTION_HEADER_SIZE + data_len;
+        count += 1;
+    }
+    count
 }
 
 /// Validate an actions buffer at session creation time.
@@ -396,6 +414,28 @@ mod tests {
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].action_type, ActionType::SolMaxPerTx);
         assert_eq!(actions[1].action_type, ActionType::ProgramWhitelist);
+    }
+
+    /// Allocated once at its final size: on the program's bump heap a Vec
+    /// grown by push keeps every buffer it outgrew.
+    #[test]
+    fn test_parse_allocates_exactly() {
+        for n in [0usize, 1, 5, 16] {
+            let mut buf = Vec::new();
+            for _ in 0..n {
+                buf.extend_from_slice(&build_action(10, 0, &[7u8; 32]));
+            }
+            let actions = parse_actions(&buf).unwrap();
+            assert_eq!(actions.len(), n);
+            assert_eq!(actions.capacity(), n, "{n} actions");
+        }
+
+        // One past the cap is still refused, as before.
+        let mut buf = Vec::new();
+        for _ in 0..=MAX_ACTIONS {
+            buf.extend_from_slice(&build_action(10, 0, &[7u8; 32]));
+        }
+        assert!(parse_actions(&buf).is_err());
     }
 
     #[test]

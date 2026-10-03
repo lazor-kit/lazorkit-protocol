@@ -55,9 +55,16 @@ sign for me."
 - A **dormant user who never signs** a migration keeps their funds (and rent) in
   a v1 vault indefinitely. This is inherent to non-custodial; there is
   deliberately no operator path to move those funds.
-- A **granter can write a weak policy.** A policy bounds only the dimensions its
-  actions cover (a whitelist-only policy caps no amount). "Delegate requires a
-  policy" means non-empty, not spend-limited on every asset. This is a granter
-  choice, documented in `docs/Architecture.md`.
+- A **granter can write a loose policy, not an open one.** Since D13 a policy
+  bounds what it does not name as well: SOL may leave only under a `Sol*`
+  action, and a mint only under a `Token*` action naming it (3037 / 3038), net
+  over the Execute, over the vault's lamports and the token accounts it owns.
+  A whitelist-only policy can lower neither, and what a granter still chooses
+  is the size of each limit. Value the vault controls other than those
+  balances (stake, nonce and seed-derived accounts, positions in other
+  programs, authorities it holds) is bounded only by the program whitelist,
+  and what it releases into the vault during the Execute can leave in the
+  same Execute, since the net does not change; the list is in
+  `docs/Architecture.md` ("What a policy bounds").
 - The **upgrade authority is all-powerful** by Solana's design; the program
   cannot constrain it. Key management is out of scope for the code audit.

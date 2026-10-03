@@ -55,6 +55,14 @@ export function generateAuthenticatorData(rpId: string): Uint8Array {
  *   1. Call `navigator.credentials.get({ challenge, ... })` (or platform equivalent)
  *   2. Return the raw WebAuthn response — signature, authenticatorData, and
  *      the raw clientDataJSON bytes
+ *
+ * Transactions only. The SDK calls `sign` with nothing but the 32-byte
+ * challenge it computed for one instruction ({@link buildSecp256r1Challenge}),
+ * and to the program a passkey signature over a 32-byte value approves
+ * whatever instruction hashes to it. Never pass other bytes through a signer
+ * that signs this way — a message, a nonce from a server, a challenge from a
+ * URL. For a message the passkey signs `signedMessageChallenge(message)`; for
+ * an ownership proof, `createTaggedOwnershipChallenge()`.
  */
 export interface Secp256r1Signer {
   /** Compressed public key (33 bytes). */
@@ -63,7 +71,7 @@ export interface Secp256r1Signer {
   credentialIdHash: Uint8Array;
   /** RP ID string (e.g. "lazorkit.app"). */
   rpId: string;
-  /** Signs the SHA-256 challenge with the passkey. */
+  /** Signs the SHA-256 challenge with the passkey: a 32-byte transaction challenge the SDK computed, never caller bytes. */
   sign(challenge: Uint8Array): Promise<{
     /** 64-byte raw ECDSA signature (r || s), low-S normalized. */
     signature: Uint8Array;

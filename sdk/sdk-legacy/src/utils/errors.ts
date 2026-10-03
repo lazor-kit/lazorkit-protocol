@@ -35,7 +35,8 @@ export const ERROR_NAMES: Record<number, string> = {
   3027: 'ActionTokenRecurringLimitExceeded',
   3028: 'ActionWhitelistBlacklistConflict',
   3029: 'ActionTokenMaxPerTxExceeded',
-  // Session vault + token invariants (defense against System::Assign / SetAuthority escapes)
+  // Vault + token-account invariants for a signer that carries a policy
+  // (defense against System::Assign / SetAuthority escapes)
   3030: 'SessionVaultOwnerChanged',
   3031: 'SessionVaultDataLenChanged',
   3032: 'SessionTokenAuthorityChanged',
@@ -43,7 +44,11 @@ export const ERROR_NAMES: Record<number, string> = {
   3033: 'DelegateRequiresPolicy',
   3034: 'PolicyBearingAuthorityCannotDelegate',
   3035: 'PolicyRankMismatch',
-  // Protocol errors (Commercial binary only — foundation binary never emits these)
+  3036: 'SessionNotExpired',
+  // Assets a policy does not name (v2): SOL with no Sol* action, a mint with no Token* action
+  3037: 'ActionUnlistedSolOutflow',
+  3038: 'ActionUnlistedTokenOutflow',
+  // Protocol errors (fees, the protocol config, and the deployment itself)
   4001: 'ProtocolAlreadyInitialized',
   4002: 'InvalidProtocolAdmin',
   4004: 'InvalidIntegratorRecord',
@@ -59,6 +64,7 @@ export const ERROR_NAMES: Record<number, string> = {
   4015: 'UnauthorizedInitializer',
   4016: 'NoPendingAdmin',
   4017: 'WrongProgramAddress',
+  4018: 'RetiredDeployment',
 };
 
 /**

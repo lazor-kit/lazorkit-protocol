@@ -2,11 +2,11 @@ use crate::{
     auth::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
-    compact::{compute_accounts_hash, parse_compact_instructions_ref_with_len},
+    compact::{compute_accounts_hash, max_inner_accounts, parse_compact_instructions_ref_with_len},
     error::AuthError,
     processor::execute::actions::{
-        evaluate_post_actions, evaluate_pre_actions, snapshot_token_authorities,
-        snapshot_token_balances, verify_token_authorities_unchanged,
+        evaluate_post_actions, evaluate_pre_actions, mint_flows, snapshot_vault_token_accounts,
+        verify_vault_token_accounts,
     },
     state::{authority::AuthorityAccountHeader, policy::PolicyLocation, AccountDiscriminator},
     utils::get_stack_height,
@@ -259,11 +259,6 @@ pub fn process(
     } else {
         0
     };
-    let token_snapshots_before = match policy {
-        // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
-        Some(loc) => snapshot_token_balances(authority_data, loc, accounts, vault_pda.key())?,
-        None => Vec::new(),
-    };
 
     // ── Session invariants (defense against System::Assign / SetAuthority escapes) ──
     // A session that whitelists System Program (a common pattern for SOL transfers)
@@ -272,12 +267,13 @@ pub fn process(
     // attacker, who then drains it in a follow-up tx. Same class of attack via
     // SPL Token's `SetAuthority` / `Approve` on vault-owned token accounts.
     //
-    // Snapshot the vault's metadata + every listed-mint vault-owned token account's
-    // authority fields BEFORE the CPI loop; verify unchanged AFTER.
+    // Snapshot the vault's metadata, and every writable vault-owned token account
+    // whole, BEFORE the CPI loop. Afterwards each must be unchanged but for its
+    // balance, and each mint's balance is measured over these same accounts.
     let vault_owner_before = policy.map(|_| *vault_pda.owner());
     let vault_data_len_before = policy.map(|_| unsafe { vault_pda.borrow_data_unchecked().len() });
-    let token_authority_snapshots = match policy {
-        Some(loc) => snapshot_token_authorities(authority_data, loc, accounts, vault_pda.key())?,
+    let token_accounts_before = match policy {
+        Some(_) => snapshot_vault_token_accounts(accounts, vault_pda.key()),
         None => Vec::new(),
     };
 
@@ -288,9 +284,16 @@ pub fn process(
     // Reuse the same Vecs across all inner CPIs — allocated once, cleared +
     // repushed each iteration. Saves 2 Vec::with_capacity allocations per
     // inner instruction vs. .collect()ing fresh Vecs each time.
-    const MAX_INNER_ACCOUNTS: usize = 32;
-    let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
-    let mut cpi_accounts: Vec<Account> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
+    //
+    // Sized to the widest inner instruction, not to a guess: the heap is a
+    // 32 KiB bump allocator that never frees, so a Vec that outgrows its
+    // capacity leaves the old buffer behind. From a fixed 32 the pair grew
+    // 32 → 64 → 128 for a 128-account instruction, 16 KiB of heap for 9 KiB
+    // of entries, and with the accounts hash an inner instruction of more
+    // than 64 accounts ran the program out of memory.
+    let widest = max_inner_accounts(&compact_instructions);
+    let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(widest);
+    let mut cpi_accounts: Vec<Account> = Vec::with_capacity(widest);
 
     // PDA signer seeds (constant across the loop)
     let vault_bump_arr = [vault_bump];
@@ -384,21 +387,23 @@ pub fn process(
             return Err(AuthError::SessionVaultDataLenChanged.into());
         }
     }
-    // Verify no SetAuthority / Approve on listed-mint vault-owned token accounts.
-    verify_token_authorities_unchanged(&token_authority_snapshots, accounts)?;
+    // Every vault-owned token account kept everything but its balance, and none
+    // that became vault-owned here carries a delegate or close authority.
+    if policy.is_some() {
+        verify_vault_token_accounts(&token_accounts_before, accounts, vault_pda.key())?;
+    }
 
-    // Post-CPI action checks (spending limits)
+    // Post-CPI action checks (spending limits, and assets the policy does not name)
     // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
     if let Some(loc) = policy {
+        let flows = mint_flows(&token_accounts_before, accounts);
         evaluate_post_actions(
             authority_data,
             loc,
-            accounts,
-            vault_pda.key(),
             vault_lamports_before,
             vault_pda.lamports(),
             vault_lamports_gross_out,
-            &token_snapshots_before,
+            &flows,
             current_slot,
         )?;
     }

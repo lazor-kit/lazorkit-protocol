@@ -1,5 +1,5 @@
 use crate::{
-    compact::{compute_accounts_hash, parse_compact_instructions_ref_with_len},
+    compact::{compute_accounts_hash, max_inner_accounts, parse_compact_instructions_ref_with_len},
     error::AuthError,
     state::deferred::DeferredExecAccount,
     utils::get_stack_height,
@@ -135,10 +135,12 @@ pub fn process(
     close_data.fill(0);
 
     // Reuse Vecs across inner CPI iterations — allocated once, cleared +
-    // repushed each iteration. Same optimisation as execute::immediate.
-    const MAX_INNER_ACCOUNTS: usize = 32;
-    let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
-    let mut cpi_accounts: Vec<Account> = Vec::with_capacity(MAX_INNER_ACCOUNTS);
+    // repushed each iteration. Same optimisation as execute::immediate, and
+    // sized the same way: to the widest inner instruction, because a Vec that
+    // grows on the bump-allocated heap leaves its old buffer behind.
+    let widest = max_inner_accounts(&compact_instructions);
+    let mut account_metas: Vec<AccountMeta> = Vec::with_capacity(widest);
+    let mut cpi_accounts: Vec<Account> = Vec::with_capacity(widest);
 
     let vault_bump_arr = [vault_bump];
     let seeds = [

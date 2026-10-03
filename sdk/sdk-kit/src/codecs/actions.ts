@@ -5,6 +5,17 @@
  * They are immutable — once set, they cannot be changed. To change permissions,
  * revoke the session and create a new one.
  *
+ * A policy names what may leave the vault, and nothing it does not name may
+ * (protocol v2): with no `Sol*` action the vault's SOL may not fall, rent the
+ * vault pays for a new account included, and a mint with no `Token*` action
+ * may not leave the vault's token accounts. Both are net over one Execute,
+ * measured on the vault's own lamports and on the token accounts it owns that
+ * the Execute passes writable; inflows always pass. wSOL is a mint, not SOL.
+ * A program whitelist or blacklist names programs, not assets. A policy holds
+ * at most 16 actions, so it can name about 15 mints. Value the vault controls
+ * any other way (stake, nonce or seed-derived accounts, positions in other
+ * programs, authorities it holds) is bounded only by the program whitelist.
+ *
  * Wire format is byte-identical with @lazorkit/sdk-legacy and
  * program/src/state/action.rs. See tests/actions.test.ts for parity proofs.
  *
@@ -16,6 +27,8 @@
  *   Actions.solRecurringLimit({ limit: 1_000_000_000n, window: 216_000n }),
  *   Actions.programWhitelist(address('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4')),
  *   Actions.solMaxPerTx(500_000_000n),
+ *   // Without a Token* action no token may leave, so name each one a swap sells.
+ *   Actions.tokenLimit({ mint: address('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'), remaining: 50_000_000n }),
  * ];
  * const buf = serializeActions(actions);
  * ```
@@ -121,6 +134,11 @@ export type SessionAction =
 
 // ─── Builder Helpers ─────────────────────────────────────────────────
 
+/**
+ * Builders for each action. An asset no action names cannot leave the vault:
+ * name SOL with a `sol*` action (rent the vault pays is SOL) and each mint
+ * that may leave with a `token*` action.
+ */
 export const Actions = {
   /** Lifetime SOL spending cap. */
   solLimit: (remaining: bigint, expiresAt?: bigint): SolLimitAction => ({

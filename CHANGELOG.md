@@ -6,6 +6,289 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — Execute's heap: buffers sized exactly (program; needs a review before the mainnet deploy)
+
+**Program** (both v2 artifacts change: devnet `efea949f…` → `d95e5c2b…`,
+mainnet `b30ce1df…` → `67d47162…`, 152864 bytes each; both sunset artifacts are
+byte-identical)
+
+- Execute and ExecuteDeferred ran out of heap on payloads a v1 transaction
+  (SIMD-0385, 4096 bytes) carries easily, and on some legacy ones. The heap is
+  a 32 KiB bump allocator that never frees, and two buffers grew by doubling,
+  leaving every smaller copy allocated: the accounts-hash preimage, sized for
+  four accounts per inner instruction, and the account-meta and CPI-account
+  buffers reused across inner instructions, sized for 32. On devnet a passkey Execute failed with "memory
+  allocation failed, out of memory" at one inner instruction of 128 accounts,
+  at 70 + 70 and at 100 + 30, all three shapes a legacy transaction carries
+  when the accounts repeat; in litesvm also at 16 instructions of 16 accounts,
+  none wider than 64. Both buffers are now sized once from the parsed
+  instructions (`compact::accounts_hash_entries`, `compact::max_inner_accounts`).
+  For any payload this allocates no more than before, so nothing that landed
+  before can fail. As far as the heap goes, one inner instruction can now name
+  all 255 accounts the compact format allows (127 before), 16 equal ones about
+  41 each (15 before); a CPI of more than 128 accounts also needs SIMD-0339
+  (`increase_cpi_account_info_limit`), active on devnet and mainnet.
+  Nothing else changes: no account, instruction or challenge layout. A payload
+  too large for the heap now fails at the first allocation rather than
+  part-way through the accounts-hash walk.
+- The policy path (a session with actions, or a Delegate) gains the same room.
+  D13's own allocations were already sized once and are unchanged (the actions,
+  parsed twice, 32 bytes each; a 192-byte copy of each vault token account; the
+  mint list, reserved at 48 bytes per copy): it was the reused buffers above
+  that doubled there too. With sixteen actions and the most vault token
+  accounts a v1 transaction's 64 addresses leave, 15 inner instructions after a
+  listed transfer can each name 89 accounts beside a session (52 vault token
+  accounts; 64 on the D13 build before this fix, #48's `efea949f…`) and 24
+  beside a passkey Delegate (51; 8 on `efea949f…`). On that path the heap still
+  binds before a v1 transaction's bytes do, which carry 102 and 81. In a legacy
+  transaction no such payload runs out of heap now; on `efea949f…` one inner
+  instruction wider than 128 accounts did (124 for a passkey Delegate).
+- `docs/Architecture.md` (Compact instruction format) gives the exact sum an
+  Execute allocates on every path, the policy's `64a + 240t` included, and
+  Transaction v1 the largest shapes before and after. A scratch build that logs
+  the allocator's cursor agreed with the sum to the byte on 112 payloads over
+  passkey, ExecuteDeferred, Ed25519, session and passkey-Delegate Executes (on
+  79 more against `efea949f…`, with its doubling terms), and on land or out of
+  memory for all 116 on both.
+- The 16-inner-instruction cap is unchanged, and documented as a limit a v1
+  transaction can reach.
+- Compute: on the policy path's four `c1_compute_units_of_the_policy_path`
+  shapes, 9 CU more than `efea949f…`. Without a policy, measured before D13 on
+  identical state: within 35 CU for an inner instruction of up to two accounts,
+  up to 880 CU less for wider ones, up to 575 CU more for 16 inner instructions
+  of 8 accounts.
+- Tests: `program/tests/heap_capacity_tests.rs` (litesvm; passkey Execute,
+  also at legacy size, ExecuteDeferred, Ed25519 Execute, and on the policy path
+  a session at v1's address cap and at legacy's size cap and a passkey Delegate
+  at v1's address cap and past a check that leaves out the policy) fails
+  against `efea949f…` with out of memory in 9 of 11, all but the
+  16-instruction cap and the legacy policy shape, and passes now; a unit test
+  pins the exact capacities.
+- The wallet packages' v1 heap guard (`lazorkitHeapBytes`, lazor-kit) leaves
+  out the policy's `64a + 240t`, so for a session with actions or a Delegate it
+  can pass a payload that runs out of memory, on this build and on
+  `efea949f…`: it should compute the exact sum (`docs/Architecture.md`,
+  Transaction v1).
+- Devnet's v2 runs the D13 build `efea949f…` (upgraded 2026-10-03) and needs
+  an upgrade to get the fix; this one is not breaking. The v2 hashes in
+  `scripts/release-hashes.txt` and in the deploy checklist's tables changed
+  (`check-release-hashes.sh`: ok for all four). The two-id rehearsal passed
+  18/18 on these artifacts on 2026-10-04, at the mainnet and the devnet ids,
+  and the phase B rollback was rehearsed at the mainnet ids (deploy checklist,
+  Two-id rehearsal).
+
+### Added — ownership proofs and messages get their own passkey challenges
+
+**SDKs** (`@lazorkit/sdk-legacy` 1.4.0, `@lazorkit/sdk` 1.0.0-rc.6)
+
+The programs approve a transaction by the challenge in a passkey signature, and
+a passkey signs whatever challenge it is handed. lazor-kit #113
+(`@lazorkit/wallet` 3.3.1, `@lazorkit/wallet-mobile-adapter` 2.3.1) gave each
+kind of challenge the wallet packages ask a passkey for its own shape; both
+SDKs now give the same bytes. The lengths differ and so do the tags, so no
+challenge of one kind can equal one of another:
+
+| Kind | Challenge | Length |
+|---|---|---|
+| Transaction (unchanged) | SHA-256 of the instruction's inputs | 32 |
+| Message | `tag ‖ SHA-256(tag ‖ message)`, tag = UTF-8 `LazorKit signed message v1` | 58 |
+| Ownership proof | `tag ‖ 32 random bytes`, tag = UTF-8 `LazorKit ownership proof v1` | 59 |
+
+- **New `createTaggedOwnershipChallenge()`**, with the constant
+  `OWNERSHIP_PROOF_DOMAIN`: the tagged 59-byte ownership challenge, the same
+  format as the wallet packages' own `createOwnershipChallenge`. Use it for
+  every new ownership proof. Both READMEs' sign-in and key-recovery examples,
+  the clients' JSDoc and that of `verifyOwnershipProof` and
+  `resolvePasskeyPublicKey` now use it.
+- **`createOwnershipChallenge()` is unchanged**: 32 bare random bytes, as in
+  every release before. It is marked `@deprecated` as a passkey challenge,
+  since 32 random bytes look exactly like a transaction challenge to whatever
+  is asked to sign them, but it is neither removed nor changed (see
+  Compatibility). `verifyOwnershipProof`, `recoverPasskeyPublicKeys`,
+  `resolvePasskeyPublicKey` and `findOwnPasskeyWallet` are unchanged too: they
+  check a proof over exactly the challenge it carries, from 16 bytes up, so
+  proofs over either form verify.
+- **New `signedMessageChallenge(message)`**, with `SIGNED_MESSAGE_DOMAIN` and
+  the type `SignedMessageInput`: the challenge a passkey signs for a message,
+  never the message itself. A string is signed as its UTF-8 bytes, any
+  typed-array view as its bytes; anything else throws a `TypeError`. The same
+  bytes as the wallet packages' `signedMessageChallenge`. Their
+  `verifyWalletMessage` checks a signature over it in the shape their
+  `signMessage` returns: the signature as 64-byte r‖s (low-S or not), not the
+  DER that `navigator.credentials.get` returns, so convert it first; and
+  clientDataJSON and authenticatorData as base64. `verifyOwnershipProof` here
+  takes DER or r‖s. Neither SDK asked a passkey to sign a message before and
+  neither does now; this is for apps that do.
+- **Transactions only, now said where it matters.** `Secp256r1Signer.sign` is
+  called only with the 32-byte challenge the SDK computed for an instruction,
+  and every `prepare*` challenge is a hash of the instruction's inputs, so no
+  caller bytes reach a passkey through either SDK. The JSDoc of
+  `Secp256r1Signer`, `PreparedSecp256r1.challenge` and the `prepare*` results
+  says so, and says not to route a message, a server nonce or a challenge from
+  a URL through such a signer. Both READMEs gain "Messages and ownership
+  proofs: never a transaction challenge": the table above, how to have a
+  passkey sign a message, and how to check one with the key read from the
+  claimed wallet on chain (`findPasskeyWalletCandidates` + `verifyOwnershipProof`
+  over `signedMessageChallenge(message)`, and the wallet account still there).
+- Fixed vectors in `test-vectors/challenge-domains.json`: both tags and the
+  wallet packages' own message vectors (lazor-kit
+  `packages/react/test/sign-message.test.mjs`). Checked once against the
+  wallet's source at lazor-kit 22e0ec2 as well: the same bytes for the four
+  vectors and for 4,000 random messages, lone surrogates included.
+- Tests: `sdk/sdk-kit/tests/challenge-domains.test.ts` (37), on both SDKs'
+  implementations — sdk-legacy's from source, since CI runs no sdk-legacy
+  tests: the message vectors; UTF-8 and typed-array input; 58 bytes under the
+  tag for every message length, 32 included, and never the message;
+  `signedMessageChallenge`'s own `TypeError` for anything else, checked by
+  its message; the tagged ownership format, fresh nonces and the wallet
+  packages' layout; `resolvePasskeyPublicKey` over two tagged challenges
+  (which share their first 27 bytes) and over a tagged and a bare one;
+  `createOwnershipChallenge` still 32 fresh bytes and a proof over them
+  still verifying; with `globalThis.crypto` removed, sdk-legacy's
+  `createOwnershipChallenge` still 32 bytes and the wallet packages'
+  ownership challenge (their code, run on it) made and verified, and that
+  same code throwing on the tagged form; the three lengths, the
+  transaction challenge from both SDKs' `buildSecp256r1Challenge`; and an
+  assertion over a message's raw bytes verifying as no message signature.
+  `tests-sdk/tests/17-ownership.test.ts` (sdk-legacy, the unit half): the
+  tagged format, a proof over either form, the message vectors. On the 1.3.1
+  / rc.5 sources, 31 of the 37 kit tests and the 3 new sdk-legacy ones fail;
+  the 6 that pass pin what must not change (`createOwnershipChallenge` with
+  and without `globalThis.crypto`).
+
+**Compatibility**
+- **No breaking change.** Everything above is new exports or documentation:
+  a minor for sdk-legacy, the next rc for the kit SDK, and both work with the
+  same programs as before. `createOwnershipChallenge()` keeps returning
+  exactly 32 random bytes on purpose: `@lazorkit/wallet` 3.3.1 and
+  `@lazorkit/wallet-mobile-adapter` 2.3.1 depend on sdk-legacy `^1.3.0`, so a
+  fresh install of them gets 1.4.0, and when `globalThis.crypto` is missing at
+  call time (Node 18 has no global WebCrypto by default) they take sdk-legacy's
+  `createOwnershipChallenge` as their 32 random bytes and throw "No source of
+  random bytes for an ownership challenge" on any other length. Checked: their
+  `ownershipProof.ts` (lazor-kit 22e0ec2) run on this sdk-legacy's build with
+  `globalThis.crypto` undefined gives its 59-byte challenge; on a build where
+  `createOwnershipChallenge` returned the tagged form it throws.
+- Those wallet releases need nothing from this one: their connect already
+  signs the tagged form, from their own `createOwnershipChallenge`, and checks
+  it with sdk-legacy's `verifyOwnershipProof`, which takes it unchanged.
+- An app that makes its own ownership proofs should move from
+  `createOwnershipChallenge()` to `createTaggedOwnershipChallenge()`. Every
+  verifier in both SDKs accepts both forms, so the client that asks for the
+  proof and the server that checks it can move in either order.
+- `@lazorkit/sdk` 1.0.0-rc.6 is a prerelease, like the rcs before it; neither
+  wallet package depends on it.
+
+### Fixed — a 255-account instruction wrote past the entrypoint's array (pinocchio 0.9.3)
+
+**Program** (all four artifacts): mainnet `c9f563e2…` → `b30ce1df…` and devnet
+`384e6927…` → `efea949f…`, 152392 bytes each; mainnet-v1 `6080da9f…` →
+`7a86c87c…` and devnet-v1 `2cf15c89…` → `a84a234e…`, 45936 bytes each.
+
+- pinocchio 0.9.2's `entrypoint!` parses an instruction's accounts into a
+  stack array of `MAX_TX_ACCOUNTS` (254) entries and, at that default, does not
+  clamp the count it is handed. The runtime hands over up to 255 and refuses
+  only more (`MaxAccountsExceeded`), so any instruction with 255 accounts, for
+  instance an Execute that repeats one account, wrote one `AccountInfo` past
+  the array, on every artifact. 0.9.3 makes `MAX_TX_ACCOUNTS` 255. The
+  workspace now requires pinocchio 0.9.3 or later, and `entrypoint.rs` asserts
+  at compile time that `MAX_TX_ACCOUNTS` covers 255. The write went unnoticed
+  (a 255-account Execute returned Ok on 0.9.2), and D13's snapshot of the
+  vault's token accounts stays in bounds either way.
+- 0.9.3 also reads `Clock` and `Rent` through `sol_get_sysvar` (SIMD-0127)
+  instead of the per-sysvar syscalls. That syscall is active on mainnet (since
+  epoch 745) and devnet (since epoch 806). An Execute costs 27 CU less in the
+  four shapes `c1_compute_units_of_the_policy_path` measures.
+- Test: `h2_execute_at_the_runtime_account_limit` runs a 255-account Execute
+  (the fee suffix's last account is read, the listed mint charged once) and
+  checks that the runtime refuses 256.
+- `scripts/release-hashes.txt` and the checklist's tables record all four
+  (`check-release-hashes.sh` on the pinned toolchain). The two-id rehearsal
+  passed 18/18 on the current four (with the heap-capacity fix above) on
+  2026-10-04, at both pairs of ids, the migrations running through the 0.9.3
+  sunset binaries.
+
+### Changed — a policy bounds the vault's SOL and every token balance it owns directly (D13)
+
+**Program** (v2 only; both sunset artifacts are byte-identical): devnet
+`3584aec7…` → `384e6927…`, mainnet `4cb80304…` → `c9f563e2…`, 152264 bytes each,
+on pinocchio 0.9.2; the entrypoint fix above then moves all four.
+
+- **What a policy does not name may not leave.** For an Execute whose signer
+  carries a policy — a session with actions, or a Delegate — the vault's net
+  SOL may fall only if a `Sol*` action names SOL (any of `SolLimit`,
+  `SolRecurringLimit`, `SolMaxPerTx`), and its net balance of a mint only if a
+  `Token*` action names that mint. Otherwise the Execute fails with the new
+  `ActionUnlistedSolOutflow` (3037) or `ActionUnlistedTokenOutflow` (3038).
+  Before, a mint no action listed had no balance check at all, so a session
+  holding `TokenLimit(USDC)` and a whitelist of SPL Token could transfer every
+  other token in the vault, and a policy with no SOL action could spend all of
+  its SOL. Net over the Execute, per asset, never across assets; inflows always
+  pass; rent the vault pays for a new account is SOL; wSOL is a mint. There is
+  no opt-out action: a signer that must move arbitrary assets is an unbounded
+  one.
+- **Listed-mint accounting over the pre-loop account set.** Balances are
+  measured over the writable token accounts the vault owned before the CPIs,
+  each counted once. "After" used to cover every account vault-owned at the
+  end, so a session could move a listed mint into a token account it had just
+  initialised for the vault, uncharged, and approve itself on it; that is now
+  charged, and a token account that became vault-owned during the Execute may
+  carry no delegate or close authority (3032). An account passed twice used to
+  be counted twice.
+- **More of each vault token account is frozen** (3032): besides owner,
+  delegate and close authority, its mint, state, is_native and data length,
+  and `delegated_amount` may only fall; its lamports may fall only with a native
+  account's `amount`. This catches re-`Approve` of the same delegate for more,
+  `FreezeAccount`, `WithdrawExcessLamports` and `Reallocate`. Only initialised
+  token accounts count: a mint or a multisig whose bytes 32..64 match the
+  vault no longer reads as one.
+- **Out of reach**, listed in `docs/Architecture.md` ("What a policy bounds"):
+  anything the vault controls other than its lamports and its token accounts'
+  base fields — stake, nonce and seed-derived accounts, positions in other
+  programs, mint and upgrade authorities it holds, confidential balances — is
+  bounded only by the program whitelist, and value released from them into the
+  vault during the Execute can leave again as that asset.
+- Heap: a 192-byte copy per unique writable vault token account and a 48-byte
+  entry per mint, sized exactly; the action buffer is parsed into a Vec sized
+  from a header walk (32 bytes per action, was 896 for 16), twice per Execute
+  instead of four times, and the program check no longer collects Vecs. One
+  vault token account passed 201 times is copied once (develop ran out of heap
+  on it).
+- Compute, a session Execute measured in litesvm against develop: a SOL
+  transfer 24,128 → 23,806 CU, one listed token transfer 30,083 → 29,099, with
+  8 vault token accounts 32,974 → 32,863, with 24 41,195 → 45,888.
+- **Breaking**: a policy with no `Sol*` action can no longer spend SOL, rent
+  included, and a policy moves only the mints it names. Unrestricted sessions
+  and Owner/Admin are unchanged, and ExecuteDeferred is unchanged (a
+  policy-bound signer cannot reach it). Devnet's v2 runs `3584aec7…`; upgrading
+  it to the D13 artifact breaks every SOL-only or whitelist-only session that
+  moves tokens or pays rent, including the session lazor-kit's `SpendingLimits`
+  preset builds (it names SOL only), so it waits for an SDK release and that
+  preset's fix.
+- The v2 hashes in `scripts/release-hashes.txt` and in the deploy checklist's
+  tables changed (with the entrypoint fix above, all four did;
+  `check-release-hashes.sh`: ok for all four). PR #42 (Execute's heap
+  buffers), which landed after this, changed the two v2 artifacts again and
+  re-recorded them; the two-id rehearsal passed 18/18 on the resulting four
+  on 2026-10-04.
+
+**SDKs** (next releases of `@lazorkit/sdk-legacy` and `@lazorkit/sdk`; versions
+are picked when this lands)
+
+- sdk-legacy `ERROR_NAMES` gains 3036 `SessionNotExpired`, 3037, 3038 and 4018
+  `RetiredDeployment`; its README table covers 3032–3038 and 4008–4018.
+- Both SDKs' action, `createSession` and `addAuthority` docs and READMEs say
+  what a policy now bounds, and how to build a swap policy: name the mint it
+  sells, and create the output ATA in a top-level instruction the fee payer
+  funds, or give the policy a `SolLimit` for the rent.
+
+**Tests**: `program/tests/policy_unlisted_assets_tests.rs` (45 litesvm tests:
+positive and negative flows, the unbounded signers, heap shapes, compute units;
+against develop's binary every negative flow but one lands); `actions.rs` unit
+tests for the new phase, the classifier and the per-field freeze; the
+`12-session-actions` suites in `tests-sdk` and `tests-sdk-kit` (three tests gain
+a `solLimit`, five new ones).
+
 ### Fixed — review follow-ups: a failed fee read, the finalized lag, the deploy commands
 
 **SDKs** (`@lazorkit/sdk-legacy` 1.3.1, `@lazorkit/sdk` 1.0.0-rc.5)

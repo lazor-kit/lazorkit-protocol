@@ -31,8 +31,9 @@ suite under `tests-sdk/tests/` covers all of them.
   `FeeRecord` is designed for this; see `docs/Architecture.md` for the
   fee-collection convention.
 - **Session with spending limits** — Admin pre-authorizes an ephemeral
-  session key with SOL/token caps and program white/blacklists. See
-  `tests-sdk/tests/12-session-actions.test.ts`.
+  session key with SOL/token caps and program white/blacklists. SOL and each
+  mint the session may spend have to be named: what the actions do not name
+  cannot leave the vault. See `tests-sdk/tests/12-session-actions.test.ts`.
 
 ## Conventions
 

@@ -129,7 +129,7 @@ import type { AccountInfo, AccountMeta } from '@solana/web3.js';
 // ─── Prepared operation types (for secp256r1 prepare/finalize flow) ──
 
 interface PreparedBase {
-  /** SHA-256 challenge to pass to navigator.credentials.get() */
+  /** SHA-256 challenge to pass to navigator.credentials.get(): 32 bytes, approving this operation only. */
   challenge: Uint8Array;
 }
 
@@ -369,10 +369,11 @@ function assertAddAuthorityRole(
 /// A session with no actions is not "a session with no limits" — it is a key
 /// with *more* power over the vault than a bounded Delegate. The action buffer
 /// is what switches on the vault invariants the program checks after the CPI
-/// (lamport delta, owner, data length, and the token-authority snapshot), so an
-/// empty buffer disables all of them: such a key can reassign the vault or seize
-/// its token accounts. That is a deliberate capability, never a default, so it
-/// has to be asked for by name.
+/// (owner and data length; every vault token account unchanged but for its
+/// balance; no SOL and no mint the actions do not name leaving the vault), so
+/// an empty buffer disables all of them: such a key can reassign the vault,
+/// seize its token accounts, or move any asset it holds. That is a deliberate
+/// capability, never a default, so it has to be asked for by name.
 function assertSessionActions(
   actions: SessionAction[] | undefined,
   unrestricted = false,
@@ -931,7 +932,10 @@ export class LazorKitClient {
     role: number;
     /** Action buffer bounding what this authority may spend. Required for
      *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
-     *  carry one, so a policy always means a bounded spender. */
+     *  carry one, so a policy always means a bounded spender. An asset the
+     *  policy does not name cannot leave the vault: with no `Sol*` action no
+     *  SOL can (rent the vault pays included), and each mint needs a `Token*`
+     *  action. */
     policy?: Uint8Array;
     /** Opt in to creating another Owner. An Owner can manage and revoke every
      *  authority on the wallet, this one included, so it is never the default. */
@@ -1207,8 +1211,10 @@ export class LazorKitClient {
     secp256r1: Secp256r1Params;
     sessionKey: PublicKey;
     expiresAt: bigint;
-    /** Actions bounding what this session may spend. Omitting them creates an
-     *  UNRESTRICTED session and requires `unrestricted: true`. */
+    /** Actions bounding what this session may spend. An asset they do not
+     *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
+     *  vault pays included), and each mint needs a `Token*` action. Omitting
+     *  them creates an UNRESTRICTED session and requires `unrestricted: true`. */
     actions?: SessionAction[];
     /** Opt in to a session with no actions — see `actions`. */
     unrestricted?: boolean;
@@ -1513,7 +1519,7 @@ export class LazorKitClient {
    *
    * @example Passkey user returns
    * ```typescript
-   * const challenge = createOwnershipChallenge();
+   * const challenge = createTaggedOwnershipChallenge();
    * // navigator.credentials.get({ publicKey: { challenge, rpId } }) → proof
    * const { adopt, needsConfirmation } = await client.findOwnPasskeyWallet({
    *   credentialIdHash, rpId, proof,
@@ -1649,10 +1655,10 @@ export class LazorKitClient {
    * Find a returning passkey user's own wallet.
    *
    * Candidates are found by credential-id hash, kept only if `proof` — an
-   * assertion over a challenge from {@link createOwnershipChallenge} — verifies
-   * against the key stored on them, and then described. `adopt` is the one
-   * proven wallet this passkey has signed for, when nothing untrusted can
-   * spend from it; use it. Otherwise `needsConfirmation` lists the proven
+   * assertion over a challenge from {@link createTaggedOwnershipChallenge} —
+   * verifies against the key stored on them, and then described. `adopt` is
+   * the one proven wallet this passkey has signed for, when nothing untrusted
+   * can spend from it; use it. Otherwise `needsConfirmation` lists the proven
    * wallets for the user to choose from (show the vault address; never pick
    * for them). Both empty: this passkey owns no live wallet yet — create one.
    * `unproven` counts wallets that list the credential with some other public
@@ -1670,7 +1676,7 @@ export class LazorKitClient {
    *
    * @example
    * ```typescript
-   * const challenge = createOwnershipChallenge();
+   * const challenge = createTaggedOwnershipChallenge();
    * const credential = await navigator.credentials.get({ publicKey: { challenge, rpId } });
    * const response = credential.response as AuthenticatorAssertionResponse;
    * const { adopt, needsConfirmation } = await client.findOwnPasskeyWallet({
@@ -1927,7 +1933,8 @@ export class LazorKitClient {
    * control this wallet".
    *
    * `policyLen > 0` means the authority is bounded: rank says what it may
-   * manage, the policy says what it may spend. Read the policy itself with
+   * manage, the policy says what it may spend, and an asset the policy does
+   * not name it cannot spend at all. Read the policy itself with
    * `parseActions` over the account bytes after the key material (80 bytes for
    * an Ed25519 authority, 145 for Secp256r1).
    *
@@ -2135,7 +2142,10 @@ export class LazorKitClient {
     role: number;
     /** Action buffer bounding what this authority may spend. Required for
      *  ROLE_DELEGATE, and rejected for any other rank — only a Delegate may
-     *  carry one, so a policy always means a bounded spender. */
+     *  carry one, so a policy always means a bounded spender. An asset the
+     *  policy does not name cannot leave the vault: with no `Sol*` action no
+     *  SOL can (rent the vault pays included), and each mint needs a `Token*`
+     *  action. */
     policy?: Uint8Array;
     /** Opt in to creating another Owner. An Owner can manage and revoke every
      *  authority on the wallet, this one included, so it is never the default. */
@@ -2320,8 +2330,10 @@ export class LazorKitClient {
     adminSigner: AdminSigner;
     sessionKey: PublicKey;
     expiresAt: bigint;
-    /** Actions bounding what this session may spend. Omitting them creates an
-     *  UNRESTRICTED session and requires `unrestricted: true`. */
+    /** Actions bounding what this session may spend. An asset they do not
+     *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
+     *  vault pays included), and each mint needs a `Token*` action. Omitting
+     *  them creates an UNRESTRICTED session and requires `unrestricted: true`. */
     actions?: SessionAction[];
     /** Opt in to a session with no actions — see `actions`. */
     unrestricted?: boolean;

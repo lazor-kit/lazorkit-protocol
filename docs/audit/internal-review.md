@@ -94,3 +94,8 @@ Worth confirming independently, but this is the reasoning we followed.
 2. **The fee layer** — never audited, runs on every fund-moving instruction.
 3. **The policy engine across all paths** — we missed the deferred path once;
    confirm there is no third path that moves value without enforcing a policy.
+   Since D13 the engine also blocks SOL and mints a policy does not name, over
+   a copy of the vault's writable token accounts taken before the CPIs
+   (`snapshot_vault_token_accounts` / `verify_vault_token_accounts` in
+   `processor/execute/actions.rs`); the new-account bypass it closes is
+   `n7a` in `program/tests/policy_unlisted_assets_tests.rs`.
