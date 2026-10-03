@@ -426,20 +426,17 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet is behind this branch.** Devnet's v2 (`57bTNW…`) runs `3584aec7…`
-(`docs/Architecture.md`, Transaction v1): the wallet binding, but neither D13
-nor the heap-capacity fix. It verifies the same signatures as the artifact
-above, since neither changes an account, instruction or challenge layout, but
-it lets a policy move SOL and mints the policy does not name, and it runs out
-of heap on payloads a v1 transaction carries easily and on some legacy ones (a
+**Devnet is behind this branch.** Devnet's v2 (`57bTNW…`) runs `efea949f…`,
+the D13 build (#48), upgraded on 2026-10-03 in slot 507022596 after the SDK
+release that carries the `SpendingLimits` fix (lazor-kit #117; wallet 3.4.0,
+sdk-legacy 1.4.0). A smoke run on it passed the full lifecycle and every D13
+case (3037, 3038, 3032). It has the wallet binding and D13 but not the
+heap-capacity fix: it verifies the same signatures as the artifact above, since
+the fix changes no account, instruction or challenge layout, but it runs out of
+heap on payloads a v1 transaction carries easily and on some legacy ones (a
 passkey Execute of one inner instruction of 128 accounts, or of 70 + 70;
 `program/tests/heap_capacity_tests.rs`). Upgrading it to the devnet artifact
-above is breaking for policy-bound signers: a session or Delegate whose policy
-has no `Sol*` action can no longer spend SOL or pay rent (3037), and one that
-names no mint can no longer move tokens (3038). The web wallet's
-`SpendingLimits` preset in lazor-kit names SOL only, so every session it builds
-would lose all token movement. Upgrade devnet together with the SDK release and
-that preset's fix, not before.
+above is not breaking: it only lets larger payloads fit.
 
 Earlier runs, superseded by the one above: on 2026-09-27 at the devnet ids
 (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain devnet run

@@ -69,10 +69,11 @@ byte-identical)
   can pass a payload that runs out of memory, on this build and on
   `efea949f…`: it should compute the exact sum (`docs/Architecture.md`,
   Transaction v1).
-- Devnet's v2 runs `3584aec7…` and needs an upgrade to get the fix, with D13's
-  conditions (below). The v2 hashes in `scripts/release-hashes.txt` and in the
-  deploy checklist's tables changed (`check-release-hashes.sh`: ok for all
-  four), and the two-id rehearsal has not been re-run on the new artifacts.
+- Devnet's v2 runs the D13 build `efea949f…` (upgraded 2026-10-03) and needs
+  an upgrade to get the fix; this one is not breaking. The v2 hashes in
+  `scripts/release-hashes.txt` and in the deploy checklist's tables changed
+  (`check-release-hashes.sh`: ok for all four), and the two-id rehearsal has
+  not been re-run on the new artifacts.
 
 ### Added — ownership proofs and messages get their own passkey challenges
 
