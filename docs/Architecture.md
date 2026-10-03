@@ -728,22 +728,41 @@ Execute and ExecuteDeferred add two limits that real payloads rarely reached in
 - **16 compact instructions** (`MAX_COMPACT_INSTRUCTIONS`). A 17th fails with
   `InvalidInstructionData` at parse, before any CPI. Kept as it is; a client
   checks it before asking for a signature.
-- **The heap**: 32 KiB, bump-allocated, never freed. The two buffers that
-  scale with the payload, the accounts-hash preimage and the account metas
-  reused across CPIs, are sized once from the parsed instructions, so a passkey
-  Execute without a policy needs
-  `40k + 33(k + M) + (compact bytes + 32) + 44 + 72w + 9M` bytes of the
-  32760 available (32 KiB less the allocator's cursor), plus up to 7 bytes of
-  alignment after each byte buffer, for `k` inner instructions referencing `M`
-  accounts in all and `w` in the widest. ExecuteDeferred drops the
-  `compact bytes + 32` and `44` terms, and an Ed25519 or session Execute the
-  `33(k + M)` term too; a policy adds its own allocations. One inner
-  instruction can name all 255 accounts the format allows, 16 equal ones about
-  41 each. Builds before this sizing (devnet `3584aec7…`; develop's devnet
-  `efea949f…` and mainnet `b30ce1df…`) grew those buffers by doubling and ran
-  out of memory at one instruction of 128 accounts, at 70 + 70, or at 16 of 16;
+- **The heap**: 32 KiB, handed out from the top down and never freed; the
+  allocator's cursor takes the lowest 8 bytes, which leaves 32,760. Every
+  buffer that scales with the payload is allocated once at its final size, so
+  what an Execute needs is a sum. For `k` inner instructions of `n₁ … n_k`
+  accounts (`M` in all, `w` in the widest) in `C` compact bytes, a signer whose
+  policy holds `a` actions, and `t` unique writable vault-owned token accounts
+  in the Execute, in the order they are allocated:
+
+  ```text
+    40k                       the parsed inner instructions
+  + ⌈33(k + M) + C + 76⌉₈     passkey only: accounts-hash preimage, signed payload (C + 32), challenge (44)
+  + 32a + 192t                policy only: the actions; a copy of each vault token account
+  + 72w                       account metas (16) and CPI accounts (56), reused across the CPIs
+  + Σ (8nᵢ + ⌈nᵢ⌉₈)           each inner instruction's account list and signer flags
+  + 48t + 32a                 policy only: the mint list; the actions, parsed again
+  ≤ 32,760
+  ```
+
+  `⌈x⌉₈` rounds up to a multiple of 8, the alignment the next allocation takes;
+  the last allocation of all is not rounded, which without a policy is the last
+  instruction's flags. ExecuteDeferred's preimage term is `⌈33(k + M)⌉₈`, with
+  no payload or challenge, and it has no policy terms (a policy-bound signer
+  cannot reach it). An Ed25519 or session Execute has no preimage term. The
+  policy terms count for a session with actions and for a Delegate, and a zero
+  count allocates nothing. The sum is exact: a scratch build that logs the
+  allocator's cursor at the end of Execute and ExecuteDeferred agreed with it to
+  the byte on 112 payloads (passkey, ExecuteDeferred, Ed25519, a session and a
+  passkey Delegate with sixteen actions), and every payload it put over 32,760
+  ran out of memory. One inner instruction can name all 255 accounts the format
+  allows. Builds before this sizing (devnet `3584aec7…`, develop's `efea949f…`)
+  grew the preimage and the reused buffers by doubling and ran out of memory at
+  one instruction of 128 accounts, at 70 + 70, or at 16 of 16;
   [`program/tests/heap_capacity_tests.rs`](../program/tests/heap_capacity_tests.rs)
-  has both sides.
+  has both sides and the largest policy shapes, and
+  [Transaction v1](#transaction-v1-simd-0385) what fits.
 
 **Bit 7 of an account index byte** requests that this account's signer privilege
 be forwarded into the inner CPI. That caps the addressable account list at 128;
@@ -902,66 +921,70 @@ fail the transaction:
 
 - **16 inner instructions** (`MAX_COMPACT_INSTRUCTIONS`,
   `program/src/compact.rs`). A 17th fails with `InvalidInstructionData`.
-- **A fixed 32 KiB heap.** The allocator hands out 32 KiB from the top down
-  and never frees; its cursor takes the lowest 8 bytes, which leaves 32,760.
-  A v1 `heapSize` request does not change it. A payload that needs more fails
-  with `ProgramFailedToComplete` ("memory allocation failed, out of memory").
-  What a payload needs depends on the instruction that runs it, and no rule on
-  account-meta counts alone describes it: on a passkey Execute one inner
-  instruction of 127 metas runs, while 16 inner instructions of 16 metas each
-  do not. For a passkey Execute without a policy, the program as devnet's
-  `57bTNW…` runs it (`3584aec7…`; D13 leaves this path's allocations as they
-  were) allocates, in this order:
-  1. the parsed inner instructions, 40 bytes each;
-  2. the accounts-hash preimage: 33 bytes for each inner instruction's program
-     and for each of its metas, in a buffer that starts at 132 bytes per
-     inner instruction and doubles whenever it fills, every outgrown copy
-     kept (`accounts_hash_preimage_with`, `program/src/compact.rs`);
-  3. the signed payload (the compact instructions plus 32 bytes) and the
-     44-byte base64url challenge;
-  4. the account-meta (16 bytes each) and CPI-account (56 bytes each)
-     buffers, reused across the inner instructions: room for 32 of each,
-     and a new allocation of double the size each time an instruction has
-     more metas than they hold;
-  5. for each inner instruction, its accounts (8 bytes per meta) and their
-     signer flags (1 byte per meta).
+- **A fixed 32 KiB heap**, 32,760 bytes of it usable. A v1 `heapSize`
+  request does not change it. A payload that needs more fails with
+  `ProgramFailedToComplete` ("memory allocation failed, out of memory"). What
+  a payload needs is the sum under
+  [Compact instruction format](#compact-instruction-format), which depends on
+  the path that runs it: no rule on account-meta counts alone describes it.
 
-  Each byte buffer can add up to 7 bytes of alignment. ExecuteDeferred
-  skips item 3, and an Ed25519 or session Execute skips items 2 and 3. A
-  policy on the authority or session adds, from D13 on, `2 × 32·a + 240·t`
-  bytes: its `a` actions parsed twice (once before the CPIs, once after,
-  each sized exactly), and for each of the `t` unique writable vault-owned
-  token accounts in the Execute a 192-byte copy and at most one 48-byte mint
-  entry. At `a = 16`, `t = 8` that is 2,944 bytes. The table below does not
-  include it. For k equal inner instructions, each with 12 bytes of data, the
-  most metas each can have:
+  Builds before the heap-capacity fix, among them devnet's `57bTNW…`
+  (`3584aec7…`) and develop's D13 build (`efea949f…`), allocated more. Their
+  accounts-hash preimage started at 132 bytes per inner instruction and their
+  reused account-meta and CPI-account buffers at 32 entries, and each doubled
+  whenever it filled, every outgrown copy kept. On a passkey Execute one inner
+  instruction of 127 metas ran, while 16 inner instructions of 16 metas each
+  did not. On devnet, all passkey Executes against `3584aec7…`: 127 metas,
+  64 + 64, 100 + 20, 60 + 60 + 10, 80 + 5 × 8, 5 × 30 and 16 × 12 ran; 128 to
+  200 metas, 70 + 70 to 120 + 120 and 100 + 30 ran out of memory. On our own
+  validator running it, 47 runs over all three paths agreed with that build's
+  sum on both sides of the limit, and on the passkey path to the byte:
+  payloads that need 32,757, 32,759 and 32,760 bytes ran, and 32,765, 32,767
+  and 32,768 did not. The exact sizing allocates less for any payload, so
+  nothing that ran on those builds fails now. For k equal inner instructions,
+  each with 12 bytes of data, the most metas each can have, before → now:
 
   | Inner instructions (k) | Passkey Execute | ExecuteDeferred | Ed25519 or session Execute |
   |---|---|---|---|
-  | 1 | 127 | 127 | 128 |
-  | 2 | 64 | 64 | 128 |
-  | 3–5 | 63 | 63 | 128 |
-  | 6 | 32 | 32 | 128 |
-  | 7–12 | 31 | 31 | 128 |
-  | 13 | 29 | 31 | 128 |
-  | 14 | 15 | 16 | 127 |
-  | 15–16 | 15 | 15 | 118 at 15, 110 at 16 |
+  | 1 | 127 → 255 | 127 → 255 | 128 → 255 |
+  | 2 | 64 → 205 | 64 → 208 | 128 → 255 |
+  | 4 | 63 → 132 | 63 → 135 | 128 → 255 |
+  | 8 | 31 → 76 | 31 → 78 | 128 → 224 |
+  | 12 | 31 → 53 | 31 → 55 | 128 → 179 |
+  | 16 | 15 → 40 | 15 → 42 | 110 → 148 |
 
-  More instruction data leaves less room on a passkey Execute (item 3). The
-  sum agrees with every payload measured against that build, on both sides of
-  the limit. On devnet, all passkey Executes: 127 metas, 64 + 64, 100 + 20,
-  60 + 60 + 10, 80 + 5 × 8, 5 × 30 and 16 × 12 ran; 128 to 200 metas,
-  70 + 70 to 120 + 120 and 100 + 30 ran out of memory. On our own validator
-  running `3584aec7…`, 47 runs over all three paths, among them 16 × 16,
-  8 × 32 and 16 × 24, which ran out of memory on a passkey Execute and ran on
-  an Ed25519 Execute (16 × 16 also ran out on ExecuteDeferred). On the passkey
-  path it agrees to the byte: payloads that need 32,757, 32,759 and 32,760
-  bytes ran, and 32,765, 32,767 and 32,768 did not. The wallet packages' v1
-  path computes this sum (`lazorkitHeapBytes`) and refuses a payload over
-  32,760 bytes before asking for a signature. By it the measured route replays
-  need 8,756 bytes (SOL→USDC), 15,976 (JUP→POPCAT) and 25,456 (BONK→WIF,
-  83 + 7 metas) on a passkey Execute. A build that sizes these buffers exactly
-  from the parsed instructions allocates less for any payload.
+  255 is the format's maximum. Above 128 metas the figures come from the sum:
+  litesvm 0.6 caps a CPI at 128 account infos, Agave 4.x at 255. More
+  instruction data leaves less room on a passkey Execute.
+
+  A policy is where 64 addresses tell. Beside a session's Execute with a
+  separate fee payer, SPL Token and a transfer's destination, they leave room
+  for 52 writable vault token accounts (51 beside a passkey Delegate's), at
+  240 bytes each, where a legacy transaction's 1232 bytes hold 19 (about 9).
+  With sixteen actions, at that cap, one listed SPL transfer and then k − 1
+  equal inner instructions, the most metas each can have, before → now, and in
+  brackets what the v1 transaction itself has room for:
+
+  | | k = 2 | k = 4 | k = 8 | k = 16 |
+  |---|---|---|---|---|
+  | Session, 52 vault token accounts | 128 → 236 (255) | 108 → 192 (255) | 64 → 139 (237) | 64 → 89 (102) |
+  | Passkey Delegate, 51 | 64 → 166 (255) | 40 → 94 (255) | 16 → 49 (193) | 8 → 24 (81) |
+
+  On the policy path at the address cap the heap binds before the bytes do
+  (the passkey figures in brackets are with the test suite's clientDataJSON,
+  41 bytes shorter than the portal's). In a legacy transaction no payload of
+  that kind runs out of heap now: the largest need 24,848 bytes beside a
+  session and 30,976 beside a passkey Delegate, each with one inner
+  instruction of 255 metas. Before, one inner instruction wider than 128 metas
+  ran out (124 beside a passkey Delegate).
+
+  The wallet packages' v1 path computes the earlier builds' sum
+  (`lazorkitHeapBytes`) and refuses a payload over 32,760 bytes by it before
+  asking for a signature. By that sum the measured route replays need 8,756
+  bytes (SOL→USDC), 15,976 (JUP→POPCAT) and 25,456 (BONK→WIF, 83 + 7 metas) on
+  a passkey Execute; by the exact one 4,596, 7,153 and 10,155. Against a build
+  with the exact sizing the old guard is safe but refuses payloads that fit,
+  so it should follow the build the cluster runs.
 
 **Config.**
 
