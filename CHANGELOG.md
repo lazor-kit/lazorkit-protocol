@@ -72,8 +72,9 @@ byte-identical)
 - Devnet's v2 runs the D13 build `efea949f…` (upgraded 2026-10-03) and needs
   an upgrade to get the fix; this one is not breaking. The v2 hashes in
   `scripts/release-hashes.txt` and in the deploy checklist's tables changed
-  (`check-release-hashes.sh`: ok for all four), and the two-id rehearsal has
-  not been re-run on the new artifacts.
+  (`check-release-hashes.sh`: ok for all four). The two-id rehearsal passed
+  18/18 on these artifacts on 2026-10-04, at the mainnet and the devnet ids,
+  with the phase B rollback (deploy checklist, Two-id rehearsal).
 
 ### Added — ownership proofs and messages get their own passkey challenges
 
@@ -201,8 +202,10 @@ challenge of one kind can equal one of another:
   (the fee suffix's last account is read, the listed mint charged once) and
   checks that the runtime refuses 256.
 - `scripts/release-hashes.txt` and the checklist's tables record all four
-  (`check-release-hashes.sh` on the pinned toolchain); the two-id rehearsal
-  has not been run on them.
+  (`check-release-hashes.sh` on the pinned toolchain). The two-id rehearsal
+  passed 18/18 on the current four (with the heap-capacity fix above) on
+  2026-10-04, at both pairs of ids, the migrations running through the 0.9.3
+  sunset binaries.
 
 ### Changed — a policy bounds the vault's SOL and every token balance it owns directly (D13)
 
@@ -263,10 +266,10 @@ on pinocchio 0.9.2; the entrypoint fix above then moves all four.
   preset's fix.
 - The v2 hashes in `scripts/release-hashes.txt` and in the deploy checklist's
   tables changed (with the entrypoint fix above, all four did;
-  `check-release-hashes.sh`: ok for all four), and the two-id rehearsal has
-  not been re-run on the new artifacts. PR #42 (Execute's heap buffers)
-  changes the two v2 artifacts as well: whichever lands second rebuilds and
-  re-records them.
+  `check-release-hashes.sh`: ok for all four). PR #42 (Execute's heap
+  buffers), which landed after this, changed the two v2 artifacts again and
+  re-recorded them; the two-id rehearsal passed 18/18 on the resulting four
+  on 2026-10-04.
 
 **SDKs** (next releases of `@lazorkit/sdk-legacy` and `@lazorkit/sdk`; versions
 are picked when this lands)
