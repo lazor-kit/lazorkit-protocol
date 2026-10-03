@@ -198,10 +198,10 @@ else's wallet), or on an authority since removed, cannot be told apart this
 way.
 
 ```typescript
-import { createOwnershipChallenge, selectWalletByAddress } from '@lazorkit/sdk-legacy';
+import { createTaggedOwnershipChallenge, selectWalletByAddress } from '@lazorkit/sdk-legacy';
 
 const rpId = 'your-app.com';
-const challenge = createOwnershipChallenge(); // fresh for every sign-in, never reused
+const challenge = createTaggedOwnershipChallenge(); // fresh for every sign-in, never reused
 
 const credential = (await navigator.credentials.get({
   publicKey: { challenge, rpId, userVerification: 'preferred' },
@@ -331,7 +331,7 @@ both to `resolvePasskeyPublicKey`:
 
 ```typescript
 import {
-  createOwnershipChallenge,
+  createTaggedOwnershipChallenge,
   resolvePasskeyPublicKey,
   type OwnershipProof,
 } from '@lazorkit/sdk-legacy';
@@ -340,7 +340,7 @@ const sameBytes = (a: ArrayBuffer, b: ArrayBuffer) =>
   a.byteLength === b.byteLength && new Uint8Array(a).every((x, i) => x === new Uint8Array(b)[i]);
 
 async function recoverPublicKey(credential: PublicKeyCredential, proof: OwnershipProof) {
-  const challenge = createOwnershipChallenge(); // not the sign-in challenge: a new one
+  const challenge = createTaggedOwnershipChallenge(); // not the sign-in challenge: a new one
   const again = (await navigator.credentials.get({
     publicKey: {
       challenge,
@@ -594,6 +594,57 @@ async function getWebAuthnResponse(
   };
 }
 ```
+
+### Messages and ownership proofs: never a transaction challenge
+
+The program approves a transaction by the challenge in a passkey signature,
+and a passkey signs whatever challenge it is handed. So each kind of challenge
+has its own shape — the same bytes as `@lazorkit/wallet` 3.3.1 and
+`@lazorkit/wallet-mobile-adapter` 2.3.1 — and no challenge of one kind can be
+another:
+
+| Kind | Challenge | Length |
+|---|---|---|
+| Transaction (every `prepare*`, `Secp256r1Signer.sign`) | SHA-256 of the instruction's inputs | 32 |
+| Message | `signedMessageChallenge(message)`: `tag ‖ SHA-256(tag ‖ message)`, tag = UTF-8 `LazorKit signed message v1` (`SIGNED_MESSAGE_DOMAIN`) | 58 |
+| Ownership proof | `createTaggedOwnershipChallenge()`: `tag ‖ 32 random bytes`, tag = UTF-8 `LazorKit ownership proof v1` (`OWNERSHIP_PROOF_DOMAIN`) | 59 |
+
+A `Secp256r1Signer` and the `prepare*` challenges are for transactions only.
+Never hand a passkey other bytes as its challenge — a message, a nonce from a
+server, a challenge from a URL: a 32-byte value is, to the program, an
+approval of whatever transaction hashes to it. To have a passkey sign a
+message, pass `signedMessageChallenge(message)` to `navigator.credentials.get`
+(a string is signed as its UTF-8 bytes). To check the signature, read the key
+from the claimed wallet on chain, never from the client. `verifyWalletMessage`
+in `@lazorkit/wallet` does, and takes the signature as its `signMessage`
+returns it: 64-byte r‖s (low-S or not), not the DER the browser returns, so
+convert that first; clientDataJSON and authenticatorData as base64. With this
+SDK, which takes DER or r‖s:
+
+```typescript
+import { signedMessageChallenge, verifyOwnershipProof } from '@lazorkit/sdk-legacy';
+
+// The passkey's Owner authorities under this rpId, on the wallet the signer claims.
+const candidates = (await client.findPasskeyWalletCandidates({ credentialIdHash, rpId }))
+  .filter((c) => c.walletPda.equals(claimed) || c.vaultPda.equals(claimed));
+const [signer] = verifyOwnershipProof(candidates, {
+  challenge: signedMessageChallenge(message),
+  signature, authenticatorData, clientDataJson, // from the assertion
+}, rpId);
+// A migrated v1 wallet leaves its authorities behind: the wallet must still exist.
+const wallet = signer && (await connection.getAccountInfo(signer.walletPda));
+const verified = !!signer && !!wallet && wallet.owner.equals(signer.programId);
+```
+
+`createOwnershipChallenge()` still returns 32 bare random bytes, as it always
+has: the wallet packages read it as a source of random bytes where
+`globalThis.crypto` is missing, and need exactly 32. It is deprecated as a
+passkey challenge, since those bytes look exactly like a transaction
+challenge. Use `createTaggedOwnershipChallenge()` for every new proof; the
+wallet packages' own `createOwnershipChallenge` already gives that form.
+`verifyOwnershipProof`, `recoverPasskeyPublicKeys` and `findOwnPasskeyWallet`
+check a proof over exactly the challenge it carries, of any length from 16
+bytes, so proofs over either form verify.
 
 ## High-level client API
 

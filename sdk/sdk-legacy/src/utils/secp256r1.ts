@@ -34,6 +34,14 @@ export function generateAuthenticatorData(rpId: string): Uint8Array {
  * 2. Return the raw WebAuthn response — signature, authenticatorData, and the
  *    raw clientDataJSON bytes (the on-chain program validates `challenge` and
  *    `type` fields directly from these bytes)
+ *
+ * Transactions only. The SDK calls `sign` with nothing but the 32-byte
+ * challenge it computed for one instruction ({@link buildSecp256r1Challenge}),
+ * and to the program a passkey signature over a 32-byte value approves
+ * whatever instruction hashes to it. Never pass other bytes through a signer
+ * that signs this way — a message, a nonce from a server, a challenge from a
+ * URL. For a message the passkey signs `signedMessageChallenge(message)`; for
+ * an ownership proof, `createTaggedOwnershipChallenge()`.
  */
 export interface Secp256r1Signer {
   /** Compressed public key (33 bytes) */
@@ -43,7 +51,8 @@ export interface Secp256r1Signer {
   /** RP ID string (e.g. "lazorkit.app") */
   rpId: string;
   /**
-   * Signs the SHA-256 challenge with the passkey.
+   * Signs the SHA-256 challenge with the passkey: a 32-byte transaction
+   * challenge the SDK computed, never caller bytes.
    * MUST return the raw `clientDataJson` bytes — the SDK no longer supports
    * the on-chain-reconstructed (Mode 0) flow.
    */

@@ -129,7 +129,7 @@ import type { AccountInfo, AccountMeta } from '@solana/web3.js';
 // ─── Prepared operation types (for secp256r1 prepare/finalize flow) ──
 
 interface PreparedBase {
-  /** SHA-256 challenge to pass to navigator.credentials.get() */
+  /** SHA-256 challenge to pass to navigator.credentials.get(): 32 bytes, approving this operation only. */
   challenge: Uint8Array;
 }
 
@@ -1513,7 +1513,7 @@ export class LazorKitClient {
    *
    * @example Passkey user returns
    * ```typescript
-   * const challenge = createOwnershipChallenge();
+   * const challenge = createTaggedOwnershipChallenge();
    * // navigator.credentials.get({ publicKey: { challenge, rpId } }) → proof
    * const { adopt, needsConfirmation } = await client.findOwnPasskeyWallet({
    *   credentialIdHash, rpId, proof,
@@ -1649,10 +1649,10 @@ export class LazorKitClient {
    * Find a returning passkey user's own wallet.
    *
    * Candidates are found by credential-id hash, kept only if `proof` — an
-   * assertion over a challenge from {@link createOwnershipChallenge} — verifies
-   * against the key stored on them, and then described. `adopt` is the one
-   * proven wallet this passkey has signed for, when nothing untrusted can
-   * spend from it; use it. Otherwise `needsConfirmation` lists the proven
+   * assertion over a challenge from {@link createTaggedOwnershipChallenge} —
+   * verifies against the key stored on them, and then described. `adopt` is
+   * the one proven wallet this passkey has signed for, when nothing untrusted
+   * can spend from it; use it. Otherwise `needsConfirmation` lists the proven
    * wallets for the user to choose from (show the vault address; never pick
    * for them). Both empty: this passkey owns no live wallet yet — create one.
    * `unproven` counts wallets that list the credential with some other public
@@ -1670,7 +1670,7 @@ export class LazorKitClient {
    *
    * @example
    * ```typescript
-   * const challenge = createOwnershipChallenge();
+   * const challenge = createTaggedOwnershipChallenge();
    * const credential = await navigator.credentials.get({ publicKey: { challenge, rpId } });
    * const response = credential.response as AuthenticatorAssertionResponse;
    * const { adopt, needsConfirmation } = await client.findOwnPasskeyWallet({
