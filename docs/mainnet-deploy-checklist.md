@@ -431,8 +431,9 @@ ok    the v1 session is closed
 nor the heap-capacity fix. It verifies the same signatures as the artifact
 above, since neither changes an account, instruction or challenge layout, but
 it lets a policy move SOL and mints the policy does not name, and it runs out
-of heap on payloads only a v1 transaction can carry
-(`program/tests/heap_capacity_tests.rs`). Upgrading it to the devnet artifact
+of heap on payloads a v1 transaction carries easily and on some legacy ones (a
+passkey Execute of one inner instruction of 128 accounts, or of 70 + 70;
+`program/tests/heap_capacity_tests.rs`). Upgrading it to the devnet artifact
 above is breaking for policy-bound signers: a session or Delegate whose policy
 has no `Sol*` action can no longer spend SOL or pay rent (3037), and one that
 names no mint can no longer move tokens (3038). The web wallet's

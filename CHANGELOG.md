@@ -13,18 +13,21 @@ mainnet `b30ce1df…` → `67d47162…`, 152864 bytes each; both sunset artifact
 byte-identical)
 
 - Execute and ExecuteDeferred ran out of heap on payloads a v1 transaction
-  (SIMD-0385, 4096 bytes) carries easily. The heap is a 32 KiB bump allocator
-  that never frees, and two buffers grew by doubling, leaving every smaller copy
-  allocated: the accounts-hash preimage, sized for four accounts per inner
-  instruction, and the account-meta and CPI-account buffers reused across inner
-  instructions, sized for 32. On devnet a passkey Execute failed with "memory
+  (SIMD-0385, 4096 bytes) carries easily, and on some legacy ones. The heap is
+  a 32 KiB bump allocator that never frees, and two buffers grew by doubling,
+  leaving every smaller copy allocated: the accounts-hash preimage, sized for
+  four accounts per inner instruction, and the account-meta and CPI-account
+  buffers reused across inner instructions, sized for 32. On devnet a passkey Execute failed with "memory
   allocation failed, out of memory" at one inner instruction of 128 accounts,
-  at 70 + 70 and at 100 + 30; in litesvm also at 16 instructions of 16 accounts,
+  at 70 + 70 and at 100 + 30, all three shapes a legacy transaction carries
+  when the accounts repeat; in litesvm also at 16 instructions of 16 accounts,
   none wider than 64. Both buffers are now sized once from the parsed
   instructions (`compact::accounts_hash_entries`, `compact::max_inner_accounts`).
   For any payload this allocates no more than before, so nothing that landed
-  before can fail. One inner instruction can now name all 255 accounts the
-  compact format allows (127 before), 16 equal ones about 41 each (15 before).
+  before can fail. As far as the heap goes, one inner instruction can now name
+  all 255 accounts the compact format allows (127 before), 16 equal ones about
+  41 each (15 before); a CPI of more than 128 accounts also needs SIMD-0339
+  (`increase_cpi_account_info_limit`), active on devnet and mainnet.
   Nothing else changes: no account, instruction or challenge layout. A payload
   too large for the heap now fails at the first allocation rather than
   part-way through the accounts-hash walk.
@@ -35,31 +38,37 @@ byte-identical)
   that doubled there too. With sixteen actions and the most vault token
   accounts a v1 transaction's 64 addresses leave, 15 inner instructions after a
   listed transfer can each name 89 accounts beside a session (52 vault token
-  accounts; 64 on develop's `efea949f…`) and 24 beside a passkey Delegate (51;
-  8 on develop). On that path the heap still binds before a v1 transaction's
-  bytes do, which carry 102 and 81. In a legacy transaction no such payload runs
-  out of heap now; on develop one inner instruction wider than 128 accounts did
-  (124 for a passkey Delegate).
+  accounts; 64 on the D13 build before this fix, #48's `efea949f…`) and 24
+  beside a passkey Delegate (51; 8 on `efea949f…`). On that path the heap still
+  binds before a v1 transaction's bytes do, which carry 102 and 81. In a legacy
+  transaction no such payload runs out of heap now; on `efea949f…` one inner
+  instruction wider than 128 accounts did (124 for a passkey Delegate).
 - `docs/Architecture.md` (Compact instruction format) gives the exact sum an
   Execute allocates on every path, the policy's `64a + 240t` included, and
   Transaction v1 the largest shapes before and after. A scratch build that logs
   the allocator's cursor agreed with the sum to the byte on 112 payloads over
   passkey, ExecuteDeferred, Ed25519, session and passkey-Delegate Executes (on
-  79 more against develop's build, with its doubling terms), and on land or out
-  of memory for all 116 on both.
+  79 more against `efea949f…`, with its doubling terms), and on land or out of
+  memory for all 116 on both.
 - The 16-inner-instruction cap is unchanged, and documented as a limit a v1
   transaction can reach.
 - Compute: on the policy path's four `c1_compute_units_of_the_policy_path`
-  shapes, 9 CU more than develop. Without a policy, measured before D13 on
+  shapes, 9 CU more than `efea949f…`. Without a policy, measured before D13 on
   identical state: within 35 CU for an inner instruction of up to two accounts,
   up to 880 CU less for wider ones, up to 575 CU more for 16 inner instructions
   of 8 accounts.
 - Tests: `program/tests/heap_capacity_tests.rs` (litesvm; passkey Execute,
-  ExecuteDeferred, Ed25519 Execute, and on the policy path a session at v1's
-  address cap and at legacy's size cap and a passkey Delegate at v1's address
-  cap) fails against `efea949f…` with out of memory in 7 of 9, all but the
-  16-instruction cap and the legacy shape, and passes now; a unit test pins the
-  exact capacities.
+  also at legacy size, ExecuteDeferred, Ed25519 Execute, and on the policy path
+  a session at v1's address cap and at legacy's size cap and a passkey Delegate
+  at v1's address cap and past a check that leaves out the policy) fails
+  against `efea949f…` with out of memory in 9 of 11, all but the
+  16-instruction cap and the legacy policy shape, and passes now; a unit test
+  pins the exact capacities.
+- The wallet packages' v1 heap guard (`lazorkitHeapBytes`, lazor-kit) leaves
+  out the policy's `64a + 240t`, so for a session with actions or a Delegate it
+  can pass a payload that runs out of memory, on this build and on
+  `efea949f…`: it should compute the exact sum (`docs/Architecture.md`,
+  Transaction v1).
 - Devnet's v2 runs `3584aec7…` and needs an upgrade to get the fix, with D13's
   conditions (below). The v2 hashes in `scripts/release-hashes.txt` and in the
   deploy checklist's tables changed (`check-release-hashes.sh`: ok for all

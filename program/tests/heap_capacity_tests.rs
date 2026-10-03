@@ -10,11 +10,13 @@
 //! - the account-meta and CPI-account buffers Execute and ExecuteDeferred reuse
 //!   across inner instructions (16 + 56 bytes per account), started at 32.
 //!
-//! A 1232-byte transaction left little room to grow them. A v1 transaction
+//! A 1232-byte transaction left little room to grow them, and a v1 transaction
 //! (SIMD-0385, 4096 bytes) leaves plenty: on devnet, against the deployed
 //! program, a passkey Execute ran out of memory with one inner instruction of
 //! 128 accounts, with 70 + 70 and with 100 + 30, while 127, 64 + 64 and 100 + 20
-//! fitted. The builds before this fix (develop's `efea949f…`; devnet's
+//! fitted. Those three also fit a legacy transaction when the accounts repeat
+//! (`passkey_execute_that_ran_out_of_memory_fits_a_legacy_transaction`). The
+//! builds before this fix (the D13 build, #48's `efea949f…`; devnet's
 //! `3584aec7…` on the tests without a policy) fail every test here except the
 //! 16-instruction cap and the legacy policy shape the same way, "memory
 //! allocation failed, out of memory" — including payloads that never pass 64
@@ -44,17 +46,22 @@
 //! accounts. `⌈x⌉₈` rounds up to a multiple of 8 (the next allocation's
 //! alignment), except for the last allocation of all. ExecuteDeferred's
 //! preimage term is `⌈33(k + M)⌉₈` and it has no policy; an Ed25519 or session
-//! Execute has no preimage term. One inner instruction can now name all 255
-//! accounts the format allows (127 before); 16 equal ones about 41 each (15
-//! before). `the_accounts_hash_preimage_is_the_remaining_ceiling` pins the new
-//! limit, the `policy_*` tests the largest policy shapes a v1 and a legacy
-//! transaction can address, and the 16-instruction cap stays as it was.
+//! Execute has no preimage term. As far as the heap goes, one inner
+//! instruction can now name all 255 accounts the format allows (127 before);
+//! 16 equal ones about 41 each (15 before).
+//! `the_accounts_hash_preimage_is_the_remaining_ceiling` pins the new limit,
+//! the `policy_*_cap` tests the largest policy shapes a v1 and a legacy
+//! transaction can address,
+//! `policy_passkey_delegate_past_a_check_without_the_policy_terms` that a heap
+//! check has to count the policy, and the 16-instruction cap stays as it was.
 //!
 //! Without a policy the inner program is SPL Memo v1, which litesvm preloads
 //! and which reads no account: it stands in for the Noop program of the devnet
 //! measurements, so only LazorKit's own work is measured. litesvm 0.6 caps a
-//! CPI at 128 account infos (Agave 4.x allows 255), so no inner instruction
-//! here is wider.
+//! CPI at 128 account infos, so no inner instruction here is wider. The
+//! runtime allows 255 only under SIMD-0339 (`increase_cpi_account_info_limit`,
+//! gated in Agave 4.0, always on from 4.1, active on devnet and mainnet);
+//! without it a wider inner instruction fails at the CPI whatever the heap.
 //!
 //! Run:  cargo test --features devnet -p lazorkit-program --test heap_capacity_tests
 
@@ -127,8 +134,13 @@ struct Payload {
 
 impl Payload {
     fn new() -> Self {
+        Self::with_fillers(FILLERS)
+    }
+
+    fn with_fillers(n: usize) -> Self {
+        assert!((1..=FILLERS).contains(&n));
         Self {
-            fillers: (0..FILLERS).map(|_| Pubkey::new_unique()).collect(),
+            fillers: (0..n).map(|_| Pubkey::new_unique()).collect(),
         }
     }
 
@@ -138,7 +150,7 @@ impl Payload {
             .iter()
             .map(|&n| {
                 let accounts = (0..n)
-                    .map(|j| IDX_FIRST_FILLER + (j % FILLERS) as u8)
+                    .map(|j| IDX_FIRST_FILLER + (j % self.fillers.len()) as u8)
                     .collect();
                 (IDX_MEMO, accounts, b"lazorkit".to_vec())
             })
@@ -154,7 +166,7 @@ impl Payload {
             preimage.extend_from_slice(memo_v1().as_ref());
             preimage.push(0);
             for j in 0..n {
-                preimage.extend_from_slice(self.fillers[j % FILLERS].as_ref());
+                preimage.extend_from_slice(self.fillers[j % self.fillers.len()].as_ref());
                 preimage.push(0);
             }
         }
@@ -225,6 +237,10 @@ struct PasskeyFixture {
 
 impl PasskeyFixture {
     fn new() -> Self {
+        Self::with_payload(Payload::new())
+    }
+
+    fn with_payload(payload: Payload) -> Self {
         let mut context = setup_test();
         let pk = Passkey::new();
         let w = create_passkey_wallet(&mut context, &pk);
@@ -232,13 +248,38 @@ impl PasskeyFixture {
             context,
             pk,
             w,
-            payload: Payload::new(),
+            payload,
         }
     }
 
     /// A passkey Execute whose inner instructions reference `widths` accounts.
     /// Checks the counter moved exactly when the transaction landed.
     fn execute(&mut self, widths: &[usize]) -> Outcome {
+        let (ixs, counter) = self.execute_instructions(widths);
+        let payer = self.context.payer.insecure_clone();
+        let result = outcome(send(&mut self.context, &ixs, &[&payer]));
+        let expected = if result == Outcome::Landed {
+            counter
+        } else {
+            counter - 1
+        };
+        assert_eq!(
+            authority_counter(&self.context.svm, self.w.authority),
+            expected
+        );
+        result
+    }
+
+    /// Bytes of [`Self::execute`]'s transaction as a legacy one.
+    fn legacy_size(&self, widths: &[usize]) -> usize {
+        let (ixs, _) = self.execute_instructions(widths);
+        let message = Message::new(&ixs, Some(&self.context.payer.pubkey()));
+        1 + 64 * message.header.num_required_signatures as usize + message.serialize().len()
+    }
+
+    /// The compute-unit limit, the precompile and the Execute, signed as the
+    /// next counter, which it returns.
+    fn execute_instructions(&self, widths: &[usize]) -> (Vec<Instruction>, u32) {
         let compact = self.payload.compact(widths);
         let mut signed_payload = compact.clone();
         signed_payload.extend_from_slice(&self.payload.accounts_hash(widths));
@@ -267,23 +308,7 @@ impl PasskeyFixture {
             accounts: with_protocol_fee_accounts(accounts, &self.context),
             data,
         };
-
-        let payer = self.context.payer.insecure_clone();
-        let result = outcome(send(
-            &mut self.context,
-            &[compute_limit(), precompile, execute],
-            &[&payer],
-        ));
-        let expected = if result == Outcome::Landed {
-            counter
-        } else {
-            counter - 1
-        };
-        assert_eq!(
-            authority_counter(&self.context.svm, self.w.authority),
-            expected
-        );
-        result
+        (vec![compute_limit(), precompile, execute], counter)
     }
 
     /// Authorize (tx1) then ExecuteDeferred (tx2) of the same payload. tx1
@@ -424,6 +449,29 @@ fn passkey_execute_with_an_inner_instruction_over_64_accounts() {
     }
 }
 
+/// The old builds did not need a v1 transaction to run out of memory. The heap
+/// does not depend on how many of the referenced accounts are distinct, so
+/// over two of them the devnet shapes fit a 1232-byte legacy transaction, with
+/// room for the portal's clientDataJSON (41 bytes longer than this suite's) but
+/// not for Chrome's padding of it. They need 34,304, 34,350 and 34,246 bytes
+/// on devnet's `3584aec7…` and on #48's `efea949f…`, and 14,888, 11,310 and
+/// 13,046 now.
+#[test]
+fn passkey_execute_that_ran_out_of_memory_fits_a_legacy_transaction() {
+    let mut f = PasskeyFixture::with_payload(Payload::with_fillers(2));
+    for widths in [&[128][..], &[70, 70], &[100, 30]] {
+        let bytes = f.legacy_size(widths);
+        assert!(
+            bytes + PORTAL_CLIENT_DATA_EXTRA <= LEGACY_MAX_BYTES,
+            "{widths:?}: {bytes} bytes"
+        );
+        assert_lands(
+            &format!("passkey Execute {widths:?}, legacy-sized"),
+            f.execute(widths),
+        );
+    }
+}
+
 /// Never more than 64 accounts in one instruction, and still out of memory
 /// before: with 16 instructions the preimage started at 2112 bytes and doubled
 /// to 16896, leaving the 2112-, 4224- and 8448-byte buffers behind it. A heap
@@ -522,6 +570,9 @@ const TRANSFER_AMOUNT: u64 = 100;
 const V1_MAX_BYTES: usize = 4096;
 const V1_MAX_ADDRESSES: usize = 64;
 const LEGACY_MAX_BYTES: usize = 1232;
+
+/// How much longer the portal's clientDataJSON is than this suite's.
+const PORTAL_CLIENT_DATA_EXTRA: usize = 41;
 
 /// Both policy layouts: `0` payer · `1` wallet · `2` session or authority ·
 /// `3` vault · `4` session key or Instructions sysvar · `5` SPL Token ·
@@ -884,9 +935,9 @@ fn lookup_table(svm: &mut litesvm::LiteSVM, addresses: &[Pubkey]) -> AddressLook
 /// wallet, the session, the vault, the session key, SPL Token, the
 /// destination and the four fee accounts, is 52. Fifteen System transfers of
 /// 89 accounts fit the heap and 90 do not; the transaction has room for 102.
-/// On the policy path the heap binds before a v1 transaction does. Develop's
-/// build (`efea949f…`), whose reused buffers doubled from 32, ran out of
-/// memory past 64.
+/// On the policy path the heap binds before a v1 transaction does. The D13
+/// build before this fix (#48, `efea949f…`), whose reused buffers doubled from
+/// 32, ran out of memory past 64.
 #[test]
 fn policy_session_at_the_v1_address_cap() {
     let t = V1_MAX_ADDRESSES - 12;
@@ -912,8 +963,8 @@ fn policy_session_at_the_v1_address_cap() {
 /// fixed addresses are the payer, the program, the Secp256r1 program, the
 /// wallet, the authority, the vault, the Instructions sysvar, SPL Token, the
 /// destination and the four fee accounts, which leaves 51 for vault token
-/// accounts. Fifteen System transfers of 24 accounts fit and 25 do not
-/// (develop: 8), where the transaction has room for 81 (with this suite's
+/// accounts. Fifteen System transfers of 24 accounts fit and 25 do not (8 on
+/// `efea949f…`), where the transaction has room for 81 (with this suite's
 /// clientDataJSON). The tightest path the program has.
 #[test]
 fn policy_passkey_delegate_at_the_v1_address_cap() {
@@ -929,10 +980,10 @@ fn policy_passkey_delegate_at_the_v1_address_cap() {
 
 /// A legacy transaction addresses at most 19 vault token accounts beside a
 /// session with sixteen actions and one listed transfer, far from the heap's
-/// limit on this build and on develop's alike. In 1232 bytes only an inner
-/// instruction wider than 128 accounts tells the two builds apart (develop's
-/// reused buffers doubled to 256 entries, 34,560 bytes, for it), and litesvm
-/// 0.6 cannot pass one to a CPI.
+/// limit on this build and on `efea949f…` alike. In 1232 bytes only an inner
+/// instruction wider than 128 accounts tells the two builds apart
+/// (`efea949f…`'s reused buffers doubled to 256 entries, 34,560 bytes, for it),
+/// and litesvm 0.6 cannot pass one to a CPI.
 #[test]
 fn policy_session_at_the_legacy_size_cap() {
     let t = 19;
@@ -940,4 +991,18 @@ fn policy_session_at_the_legacy_size_cap() {
     let mut f = PolicyFixture::new(t, false);
     assert!(f.legacy_size(&[]) <= LEGACY_MAX_BYTES);
     assert_lands("session, t = 19, legacy", f.execute(&[]));
+}
+
+/// A heap check that leaves out the policy's `64a + 240t` is not safe on the
+/// policy path. The wallet packages' v1 guard (`lazorkitHeapBytes` in
+/// lazor-kit) computes the earlier builds' sum without a policy: beside a
+/// passkey Delegate with sixteen actions and 49 vault token accounts, a listed
+/// transfer and twelve System transfers of 32 accounts come to 32,728 bytes by
+/// it, under the limit, and need 32,968, so the guard passes a payload that
+/// runs out of memory. Twelve of 31 need 32,392 and run.
+#[test]
+fn policy_passkey_delegate_past_a_check_without_the_policy_terms() {
+    let mut f = PolicyFixture::new(49, true);
+    assert_lands("passkey Delegate, t = 49, 12 × 31", f.execute(&[31; 12]));
+    assert_eq!(f.execute(&[32; 12]), Outcome::OutOfMemory);
 }
