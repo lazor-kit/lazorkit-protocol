@@ -74,7 +74,8 @@ byte-identical)
   `scripts/release-hashes.txt` and in the deploy checklist's tables changed
   (`check-release-hashes.sh`: ok for all four). The two-id rehearsal passed
   18/18 on these artifacts on 2026-10-04, at the mainnet and the devnet ids,
-  with the phase B rollback (deploy checklist, Two-id rehearsal).
+  and the phase B rollback was rehearsed at the mainnet ids (deploy checklist,
+  Two-id rehearsal).
 
 ### Added — ownership proofs and messages get their own passkey challenges
 

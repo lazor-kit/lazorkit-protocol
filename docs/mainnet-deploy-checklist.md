@@ -352,10 +352,10 @@ The rollout this checklist describes, run end to end by
 `scripts/rehearse/two-id-rehearsal.mjs`.
 
 **Latest: 2026-10-04, on `3979196`** (develop after #42), at both pairs of
-ids, **18/18** each, followed by the phase B rollback. These artifacts carry
-D13 (#48), pinocchio 0.9.3 and the heap-capacity fix (#42), so the sunset
-binary that ran both migrations is the one with 0.9.3's entrypoint (all 255
-accounts) and its `sol_get_sysvar` reads of `Clock` and `Rent`.
+ids, **18/18** each, then the phase B rollback at the mainnet ids. These
+artifacts carry D13 (#48), pinocchio 0.9.3 and the heap-capacity fix (#42), so
+the sunset binary that ran both migrations is the one with 0.9.3's entrypoint
+(all 255 accounts) and its `sol_get_sysvar` reads of `Clock` and `Rent`.
 
 - **Build.** `OUT=<dir> ./scripts/check-release-hashes.sh` — the §2 build of
   all four, each into `OUT/<feature>/`: Agave 4.2.2 (cargo-build-sbf 4.1.0),
@@ -393,7 +393,9 @@ programdata is still v1's size), and its programdata dumped with the dump's
 exact bytes (`cmp` equal, `8ad5abf5…`). After it, a `CreateWallet` through the
 0.3.2 SDK landed at `LazorjRF…`, so the restored binary runs, and the two
 wallets migrated before the rollback were still closed there: the rollback
-restores the program, not the wallets.
+restores the program, not the wallets. Those two checks came from an ad hoc
+probe run after the script, not from `two-id-rehearsal.mjs`, which has no
+rollback step; the upgrade, dump and `cmp` are the commands to repeat in §3.
 
 At the **devnet ids** (`legacyProgramIdFor(57bTNW…) = 4h3XoNRe…`), on a fresh
 validator: the v1 dump preloaded at `4h3XoNRe…`, v2 at `57bTNW…`, then
@@ -437,25 +439,25 @@ passkey Execute of one inner instruction of 128 accounts, or of 70 + 70;
 `program/tests/heap_capacity_tests.rs`). Upgrading it to the devnet artifact
 above is not breaking: it only lets larger payloads fit.
 
-Earlier runs, superseded by the one above: on 2026-09-28 after the wallet
-binding (the passkey challenge hashes the authority's wallet after the payer,
-and ExecuteDeferred moves its rent after its CPIs), at both pairs of ids, then
-again that day at the mainnet ids after its review, with the phase B rollback
-(18/18 each, on the builds before D13, pinocchio 0.9.3 and the heap-capacity
-fix: v2 devnet `3584aec7…` and mainnet `4cb80304…`, 150776 bytes each; sunset
-devnet-v1 `2cf15c89…` and mainnet-v1 `6080da9f…`, 45856 bytes each); on
-2026-09-27 at the devnet ids
-(14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain devnet run
-against the rehearsal slot (`3AN3Wn…`) proved the 4018 refusal before a flaky
-public RPC cut it short; and on 2026-09-28 at the mainnet ids (18/18, v2
-`83913449…`, sunset `03231e46…`), re-run that day after a review found the
-migration's signed payload read a 3-account stride while each token had become
-4 accounts — every passkey migration of two or more token accounts failed, and
-the earlier runs moved one token per wallet, so they could not see it. Since
-then the passkey wallet holds an SPL token and a Token-2022 token with a 1%
-transfer fee, received by transfer so its account holds withheld fees (which
-block closing it until harvested — the SDK harvests them in the migration
-transaction).
+Earlier runs, superseded by the one above, oldest first: on 2026-09-27 at the
+devnet ids (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain
+devnet run against the rehearsal slot (`3AN3Wn…`) proved the 4018 refusal
+before a flaky public RPC cut it short; earlier on 2026-09-28, before the
+wallet binding, at the mainnet ids (18/18, v2 `83913449…`, sunset
+`03231e46…`), re-run that day after a review found the migration's signed
+payload read a 3-account stride while each token had become 4 accounts — every
+passkey migration of two or more token accounts failed, and the earlier runs
+moved one token per wallet, so they could not see it; and later on 2026-09-28,
+after the wallet binding (the passkey challenge hashes the authority's wallet
+after the payer, and ExecuteDeferred moves its rent after its CPIs), at both
+pairs of ids, then again that day at the mainnet ids after its review, with the
+phase B rollback (18/18 each, on the builds before D13, pinocchio 0.9.3 and the
+heap-capacity fix: v2 devnet `3584aec7…` and mainnet `4cb80304…`, 150776 bytes
+each; sunset devnet-v1 `2cf15c89…` and mainnet-v1 `6080da9f…`, 45856 bytes
+each). Since the stride fix, the passkey wallet holds an SPL token and a
+Token-2022 token with a 1% transfer fee, received by transfer so its account
+holds withheld fees (which block closing it until harvested — the SDK harvests
+them in the migration transaction).
 
 §3 still has to be run at deploy time: the artifacts that ship are the ones
 built from the merged release commit, and those are the ones to rehearse.
