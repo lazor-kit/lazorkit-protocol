@@ -108,6 +108,114 @@ challenge of one kind can equal one of another:
 - `@lazorkit/sdk` 1.0.0-rc.6 is a prerelease, like the rcs before it; neither
   wallet package depends on it.
 
+### Fixed — a 255-account instruction wrote past the entrypoint's array (pinocchio 0.9.3)
+
+**Program** (all four artifacts): mainnet `c9f563e2…` → `b30ce1df…` and devnet
+`384e6927…` → `efea949f…`, 152392 bytes each; mainnet-v1 `6080da9f…` →
+`7a86c87c…` and devnet-v1 `2cf15c89…` → `a84a234e…`, 45936 bytes each.
+
+- pinocchio 0.9.2's `entrypoint!` parses an instruction's accounts into a
+  stack array of `MAX_TX_ACCOUNTS` (254) entries and, at that default, does not
+  clamp the count it is handed. The runtime hands over up to 255 and refuses
+  only more (`MaxAccountsExceeded`), so any instruction with 255 accounts, for
+  instance an Execute that repeats one account, wrote one `AccountInfo` past
+  the array, on every artifact. 0.9.3 makes `MAX_TX_ACCOUNTS` 255. The
+  workspace now requires pinocchio 0.9.3 or later, and `entrypoint.rs` asserts
+  at compile time that `MAX_TX_ACCOUNTS` covers 255. The write went unnoticed
+  (a 255-account Execute returned Ok on 0.9.2), and D13's snapshot of the
+  vault's token accounts stays in bounds either way.
+- 0.9.3 also reads `Clock` and `Rent` through `sol_get_sysvar` (SIMD-0127)
+  instead of the per-sysvar syscalls. That syscall is active on mainnet (since
+  epoch 745) and devnet (since epoch 806). An Execute costs 27 CU less in the
+  four shapes `c1_compute_units_of_the_policy_path` measures.
+- Test: `h2_execute_at_the_runtime_account_limit` runs a 255-account Execute
+  (the fee suffix's last account is read, the listed mint charged once) and
+  checks that the runtime refuses 256.
+- `scripts/release-hashes.txt` and the checklist's tables record all four
+  (`check-release-hashes.sh` on the pinned toolchain); the two-id rehearsal
+  has not been run on them.
+
+### Changed — a policy bounds the vault's SOL and every token balance it owns directly (D13)
+
+**Program** (v2 only; both sunset artifacts are byte-identical): devnet
+`3584aec7…` → `384e6927…`, mainnet `4cb80304…` → `c9f563e2…`, 152264 bytes each,
+on pinocchio 0.9.2; the entrypoint fix above then moves all four.
+
+- **What a policy does not name may not leave.** For an Execute whose signer
+  carries a policy — a session with actions, or a Delegate — the vault's net
+  SOL may fall only if a `Sol*` action names SOL (any of `SolLimit`,
+  `SolRecurringLimit`, `SolMaxPerTx`), and its net balance of a mint only if a
+  `Token*` action names that mint. Otherwise the Execute fails with the new
+  `ActionUnlistedSolOutflow` (3037) or `ActionUnlistedTokenOutflow` (3038).
+  Before, a mint no action listed had no balance check at all, so a session
+  holding `TokenLimit(USDC)` and a whitelist of SPL Token could transfer every
+  other token in the vault, and a policy with no SOL action could spend all of
+  its SOL. Net over the Execute, per asset, never across assets; inflows always
+  pass; rent the vault pays for a new account is SOL; wSOL is a mint. There is
+  no opt-out action: a signer that must move arbitrary assets is an unbounded
+  one.
+- **Listed-mint accounting over the pre-loop account set.** Balances are
+  measured over the writable token accounts the vault owned before the CPIs,
+  each counted once. "After" used to cover every account vault-owned at the
+  end, so a session could move a listed mint into a token account it had just
+  initialised for the vault, uncharged, and approve itself on it; that is now
+  charged, and a token account that became vault-owned during the Execute may
+  carry no delegate or close authority (3032). An account passed twice used to
+  be counted twice.
+- **More of each vault token account is frozen** (3032): besides owner,
+  delegate and close authority, its mint, state, is_native and data length,
+  and `delegated_amount` may only fall; its lamports may fall only with a native
+  account's `amount`. This catches re-`Approve` of the same delegate for more,
+  `FreezeAccount`, `WithdrawExcessLamports` and `Reallocate`. Only initialised
+  token accounts count: a mint or a multisig whose bytes 32..64 match the
+  vault no longer reads as one.
+- **Out of reach**, listed in `docs/Architecture.md` ("What a policy bounds"):
+  anything the vault controls other than its lamports and its token accounts'
+  base fields — stake, nonce and seed-derived accounts, positions in other
+  programs, mint and upgrade authorities it holds, confidential balances — is
+  bounded only by the program whitelist, and value released from them into the
+  vault during the Execute can leave again as that asset.
+- Heap: a 192-byte copy per unique writable vault token account and a 48-byte
+  entry per mint, sized exactly; the action buffer is parsed into a Vec sized
+  from a header walk (32 bytes per action, was 896 for 16), twice per Execute
+  instead of four times, and the program check no longer collects Vecs. One
+  vault token account passed 201 times is copied once (develop ran out of heap
+  on it).
+- Compute, a session Execute measured in litesvm against develop: a SOL
+  transfer 24,128 → 23,806 CU, one listed token transfer 30,083 → 29,099, with
+  8 vault token accounts 32,974 → 32,863, with 24 41,195 → 45,888.
+- **Breaking**: a policy with no `Sol*` action can no longer spend SOL, rent
+  included, and a policy moves only the mints it names. Unrestricted sessions
+  and Owner/Admin are unchanged, and ExecuteDeferred is unchanged (a
+  policy-bound signer cannot reach it). Devnet's v2 runs `3584aec7…`; upgrading
+  it to the D13 artifact breaks every SOL-only or whitelist-only session that
+  moves tokens or pays rent, including the session lazor-kit's `SpendingLimits`
+  preset builds (it names SOL only), so it waits for an SDK release and that
+  preset's fix.
+- The v2 hashes in `scripts/release-hashes.txt` and in the deploy checklist's
+  tables changed (with the entrypoint fix above, all four did;
+  `check-release-hashes.sh`: ok for all four), and the two-id rehearsal has
+  not been re-run on the new artifacts. PR #42 (Execute's heap buffers)
+  changes the two v2 artifacts as well: whichever lands second rebuilds and
+  re-records them.
+
+**SDKs** (next releases of `@lazorkit/sdk-legacy` and `@lazorkit/sdk`; versions
+are picked when this lands)
+
+- sdk-legacy `ERROR_NAMES` gains 3036 `SessionNotExpired`, 3037, 3038 and 4018
+  `RetiredDeployment`; its README table covers 3032–3038 and 4008–4018.
+- Both SDKs' action, `createSession` and `addAuthority` docs and READMEs say
+  what a policy now bounds, and how to build a swap policy: name the mint it
+  sells, and create the output ATA in a top-level instruction the fee payer
+  funds, or give the policy a `SolLimit` for the rent.
+
+**Tests**: `program/tests/policy_unlisted_assets_tests.rs` (45 litesvm tests:
+positive and negative flows, the unbounded signers, heap shapes, compute units;
+against develop's binary every negative flow but one lands); `actions.rs` unit
+tests for the new phase, the classifier and the per-field freeze; the
+`12-session-actions` suites in `tests-sdk` and `tests-sdk-kit` (three tests gain
+a `solLimit`, five new ones).
+
 ### Fixed — review follow-ups: a failed fee read, the finalized lag, the deploy commands
 
 **SDKs** (`@lazorkit/sdk-legacy` 1.3.1, `@lazorkit/sdk` 1.0.0-rc.5)

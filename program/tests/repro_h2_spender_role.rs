@@ -116,33 +116,6 @@ fn owner_adds(
     )
 }
 
-/// `Execute` authorized by an arbitrary authority PDA + its Ed25519 signer.
-fn execute_as(
-    context: &TestContext,
-    wallet: &WalletFixture,
-    authority_pda: Pubkey,
-    signer: &Keypair,
-    recipient: Pubkey,
-    lamports: u64,
-) -> Instruction {
-    Instruction {
-        program_id: context.program_id,
-        accounts: with_protocol_fee_accounts(
-            vec![
-                AccountMeta::new(context.payer.pubkey(), true),
-                AccountMeta::new_readonly(wallet.wallet_pda, false),
-                AccountMeta::new(authority_pda, false),
-                AccountMeta::new(wallet.vault_pda, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new(recipient, false),
-                AccountMeta::new_readonly(signer.pubkey(), true),
-            ],
-            context,
-        ),
-        data: vault_transfer_execute_data(lamports),
-    }
-}
-
 fn lamports_of(context: &TestContext, key: &Pubkey) -> u64 {
     context
         .svm

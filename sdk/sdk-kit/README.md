@@ -48,6 +48,15 @@ This SDK targets protocol v2, which is **not wire-compatible with v1**:
   alongside its key, so v1 signatures no longer verify.
 - `AddAuthority` carries a rank and an optional spending policy. A Delegate must
   have one; creating an Owner requires `allowOwner: true`.
+- A policy (a Delegate's, or a session's actions) names what may leave the
+  vault, and nothing it does not name may: with no `Sol*` action the vault's
+  SOL may not fall (error 3037; rent the vault pays for a new account counts),
+  and a mint with no `Token*` action may not leave the vault's token accounts
+  (3038). Net over one Execute, inflows always pass, and wSOL is a mint. A
+  program whitelist names programs, not assets. For a swap, name the mint it
+  sells, and create its output ATA in a top-level instruction the fee payer
+  funds, before the Execute, or give the policy a `SolLimit` that covers the
+  rent.
 - `AddAuthority`/`RemoveAuthority` need the wallet account **writable**.
 - Serialized `DeferredPayload`s carry a version and are rejected across the
   boundary — re-authorize rather than replaying one.

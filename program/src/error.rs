@@ -36,6 +36,12 @@ pub enum AuthError {
     // Session vault + token invariants (defense against System::Assign / SetAuthority escapes)
     SessionVaultOwnerChanged = 3030,
     SessionVaultDataLenChanged = 3031,
+    /// A vault-owned token account changed other than its balance, or a token
+    /// account that became vault-owned during the Execute carries a delegate
+    /// or close authority. Raised for any signer that carries a policy, not
+    /// only sessions: mint, owner, delegate, close authority, state, is_native
+    /// and data length are frozen, `delegated_amount` may only fall, and the
+    /// account's lamports may fall only with a native account's `amount`.
     SessionTokenAuthorityChanged = 3032,
     // Rank + policy (authority-level spending limits)
     /// A Delegate authority was created without a policy. Rank says what an
@@ -59,6 +65,15 @@ pub enum AuthError {
     /// expired session can no longer authorise anything, and that is only true
     /// once the slot is strictly past `expires_at`.
     SessionNotExpired = 3036,
+    /// The vault's SOL balance fell during an Execute whose policy names no SOL
+    /// action (`SolLimit`, `SolRecurringLimit` or `SolMaxPerTx`). A policy lists
+    /// what may leave; an asset it does not name may not. Rent the vault pays for
+    /// a new account is SOL leaving the vault.
+    ActionUnlistedSolOutflow = 3037,
+    /// The vault's balance of a mint, summed over its token accounts in the
+    /// Execute, fell and no `Token*` action names that mint. wSOL is a mint like
+    /// any other; a SOL action does not name it.
+    ActionUnlistedTokenOutflow = 3038,
 }
 
 impl From<AuthError> for ProgramError {
