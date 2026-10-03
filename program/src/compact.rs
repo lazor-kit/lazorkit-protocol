@@ -325,6 +325,30 @@ pub fn account_flags(is_signer: bool, is_writable: bool) -> u8 {
     (is_signer as u8) | ((is_writable as u8) << 1)
 }
 
+/// Bytes one account adds to the accounts-hash preimage: its 32-byte key and
+/// its flags byte.
+pub const ACCOUNTS_HASH_ENTRY_LEN: usize = 33;
+
+/// How many accounts the accounts hash walks: every instruction's program id
+/// and every account it references.
+pub fn accounts_hash_entries(compact_instructions: &[CompactInstructionRef<'_>]) -> usize {
+    compact_instructions
+        .iter()
+        .map(|ix| 1 + ix.accounts.len())
+        .sum()
+}
+
+/// The most accounts any one compact instruction references: the size of the
+/// account-meta and CPI-account buffers Execute and ExecuteDeferred reuse
+/// across their inner instructions.
+pub fn max_inner_accounts(compact_instructions: &[CompactInstructionRef<'_>]) -> usize {
+    compact_instructions
+        .iter()
+        .map(|ix| ix.accounts.len())
+        .max()
+        .unwrap_or(0)
+}
+
 /// The walk order the accounts hash is defined over, independent of where the
 /// account data comes from: for each compact instruction, the program id first,
 /// then every account it references, each contributing its 32-byte key followed
@@ -344,7 +368,13 @@ pub fn accounts_hash_preimage_with<F>(
 where
     F: FnMut(usize, &mut Vec<u8>) -> Result<(), ProgramError>,
 {
-    let mut preimage = Vec::with_capacity(compact_instructions.len() * 4 * 33);
+    // Sized exactly, once. The program's heap is a 32 KiB bump allocator that
+    // never frees, so a Vec that outgrows its capacity leaves every smaller
+    // buffer behind. The old guess of four accounts per instruction doubled
+    // from 132 bytes to 8448 for one 128-account instruction: 16764 bytes of
+    // heap for a 4257-byte preimage. See tests/heap_capacity_tests.rs.
+    let mut preimage =
+        Vec::with_capacity(accounts_hash_entries(compact_instructions) * ACCOUNTS_HASH_ENTRY_LEN);
 
     for ix in compact_instructions {
         let (program_idx, _) = decode_account_index(ix.program_id_index);
@@ -407,6 +437,10 @@ pub fn compute_accounts_hash(
 
 /// Maximum number of compact instructions per Execute call.
 /// Prevents compute-unit exhaustion DoS.
+///
+/// A v1 transaction (SIMD-0385, 4096 bytes) has room for a 17th real
+/// instruction, where 1232 bytes rarely did; it is refused here as before. The
+/// limit stays: clients check it before asking for a signature.
 pub const MAX_COMPACT_INSTRUCTIONS: usize = 16;
 
 /// Parse multiple CompactInstructions from bytes
@@ -565,6 +599,42 @@ mod tests {
         bytes.extend(&0u16.to_le_bytes());
         assert!(CompactInstruction::from_bytes(&bytes).is_err());
         assert!(CompactInstructionRef::from_bytes(&bytes).is_err());
+    }
+
+    /// The preimage is allocated once at its final size. On the program's bump
+    /// heap a Vec that grows leaves every smaller buffer behind, so a capacity
+    /// short of the length is heap spent twice; tests/heap_capacity_tests.rs has
+    /// what that cost on chain.
+    #[test]
+    fn accounts_hash_buffers_are_sized_exactly() {
+        let wide: Vec<u8> = (0..=MAX_ACCOUNT_INDEX).collect();
+        let narrow = [1u8, 2, 3 | ACCOUNT_INDEX_FORWARD_SIGNER];
+        fn ix(accounts: &[u8]) -> CompactInstructionRef<'_> {
+            CompactInstructionRef {
+                program_id_index: 0,
+                accounts,
+                data: &[],
+            }
+        }
+        // (instructions, accounts hashed, widest instruction)
+        let shapes: [(Vec<CompactInstructionRef<'_>>, usize, usize); 4] = [
+            (vec![], 0, 0),
+            (vec![ix(&narrow)], 4, 3),
+            (vec![ix(&wide)], 129, 128),
+            (vec![ix(&narrow), ix(&wide), ix(&[])], 4 + 129 + 1, 128),
+        ];
+        for (ixs, entries, widest) in shapes {
+            assert_eq!(accounts_hash_entries(&ixs), entries);
+            assert_eq!(max_inner_accounts(&ixs), widest);
+            let preimage = accounts_hash_preimage_with(&ixs, |_, out| {
+                out.extend_from_slice(&[0u8; 32]);
+                out.push(account_flags(false, false));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(preimage.len(), entries * ACCOUNTS_HASH_ENTRY_LEN);
+            assert_eq!(preimage.capacity(), preimage.len(), "{entries} entries");
+        }
     }
 
     #[test]

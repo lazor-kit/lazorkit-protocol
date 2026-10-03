@@ -89,9 +89,9 @@ changes the bytes:
   and its precompiled std embeds the paths it was built under
   (`/Users/runner/work/platform-tools/…` on macOS, `/home/runner/…` on Linux)
   in panic locations. A Linux build of the same commit with everything else
-  equal hashes otherwise (mainnet `f655b300…`, a 45848-byte sunset). The
-  record was made on an Apple-silicon Mac, and GitHub's `macos-15` runner
-  rebuilds it byte for byte.
+  equal hashes otherwise (before D13, pinocchio 0.9.3 and the heap-capacity
+  fix, mainnet `f655b300…` and a 45848-byte sunset). The record was made on an
+  Apple-silicon Mac, and GitHub's `macos-15` runner rebuilds it byte for byte.
 
 `./scripts/check-release-hashes.sh` rebuilds mainnet, mainnet-v1, devnet and
 devnet-v1 that way in a fresh target dir and compares each with
