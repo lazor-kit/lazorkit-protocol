@@ -6,6 +6,25 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Kora usage limits are off until the SDKs send a `user_id`
+
+**Relayer config** (`deploy/kora/`; no program or SDK change)
+
+- `[kora.usage_limit] enabled` is `false` in both `kora.devnet.toml` and
+  `kora.mainnet.toml`; it was the only value changed. On Kora v2.2.0-beta.8,
+  usage limits with free pricing refuse every signing request that carries no
+  `user_id`, and neither `@lazorkit/wallet` nor
+  `@lazorkit/wallet-mobile-adapter` sends one, so as written the relayer
+  would have refused every SDK transaction. With the devnet file as it now
+  stands, a local beta.8 sponsored the full guided flow on devnet (10/10).
+- The rules stay in place, so turning the limits back on is one line once the
+  SDK sends a `user_id` and Redis is attached. The comments, `deploy/kora/README.md`
+  and `docs/mainnet-deploy-checklist.md` now list what bounds the sponsor
+  without them, and note that `rate_limit` is per connection and that
+  reCAPTCHA, like the usage limits, needs a client change first.
+- `scripts/kora-check.cjs` reads beta.8's usage-limit shape and says that
+  `getConfig` on beta.8 does not report it.
+
 ### Changed — the SDKs are published from CI, with provenance
 
 **SDKs** (release process; no code change)

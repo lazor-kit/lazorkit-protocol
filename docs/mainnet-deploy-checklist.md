@@ -741,7 +741,8 @@ protocol fee through System CPIs with the payer as source, so
 `system.allow_transfer` and `system.allow_create_account` cannot simply be shut.
 What bounds a stranger is therefore authentication, `max_allowed_lamports` set
 to what a real flow costs rather than a round number, and `usage_limit`. All
-three are currently off or loose.
+three are currently off or loose. (`usage_limit` has since been left off on
+purpose in our configs — see the 2026-10-06 note below.)
 
 ### Upgrade the relayer before relying on any of these controls
 
@@ -757,7 +758,7 @@ The gap matters because beta.8 fixes the very controls we are about to lean on:
 | upstream fix | why it matters here |
 |---|---|
 | [#602](https://github.com/solana-foundation/kora/pull/602) — apply `--api-key`/`--hmac-secret`, previously parsed and **ignored** | on beta.7 an operator who sets the key on the command line gets an unauthenticated server and the key in the process table |
-| [#463](https://github.com/solana-foundation/kora/pull/463), [#571](https://github.com/solana-foundation/kora/pull/571) — atomic, all-or-nothing usage limits | the per-caller ceiling is the main bound on a public relayer; on beta.7 concurrent requests race past it |
+| [#463](https://github.com/solana-foundation/kora/pull/463), [#571](https://github.com/solana-foundation/kora/pull/571) — atomic, all-or-nothing usage limits | on beta.7 concurrent requests race past the per-caller ceiling. Usage limits are off in our configs since 2026-10-06 (note below), so this matters again when they are turned back on |
 | [#620](https://github.com/solana-foundation/kora/pull/620) — transaction-validation and fee-payer accounting hardening | inner-CPI reconstruction so fee-payer policy gates actually run, rent counted in outflow, owner allowlists on Assign/CreateAccount |
 | [#552](https://github.com/solana-foundation/kora/pull/552) — redact the URL path and query in client-facing errors | our RPC endpoint carries its credential in the query string; on beta.7 a transport error hands it to whoever made the request, and that endpoint asks for no credentials |
 | [#542](https://github.com/solana-foundation/kora/pull/542), [#541](https://github.com/solana-foundation/kora/pull/541) — loader/deploy-authority drain guards | same attack surface as the fee-payer policy above |
@@ -767,7 +768,11 @@ beta.8 also adds an auth mechanism that actually fits a public dApp:
 **`[kora.auth].recaptcha_secret`** with `recaptcha_score_threshold` (env
 `KORA_RECAPTCHA_SECRET`, header `x-recaptcha-token`). An API key shipped in a
 browser bundle is not a secret; a per-visitor reCAPTCHA token is the thing a
-bundle reader cannot mint in bulk.
+bundle reader cannot mint in bulk. It needs the client to send that header,
+though: Kora refuses a protected method that arrives without one, and neither
+`@lazorkit/wallet` nor `@lazorkit/wallet-mobile-adapter` sends it yet. Turned
+on for `signTransaction`/`signAndSendTransaction` today, it would refuse every
+SDK transaction, so it is an SDK change first.
 
 Two things worth having are only on `main`, not yet in a tag: configurable CORS
 origins ([#658](https://github.com/solana-foundation/kora/pull/658)) and
@@ -776,19 +781,37 @@ Upstream has also been fuzzing fee-payer drains specifically (#618, #640,
 #648–#651), which is a fair signal about where the risk is.
 
 - [ ] Upgrade the relayer to `ghcr.io/solana-foundation/kora:v2.2.0-beta.8`
-      (Railway image bump) **before** enabling auth and usage limits, so the
-      controls behave as documented.
+      (Railway image bump) **before** enabling auth, so the controls behave as
+      documented. The same holds for usage limits whenever they are turned
+      back on.
 - [ ] Re-run `kora-check.cjs` afterwards: `version` should read `2.2.0-beta.8`.
 - [ ] Note the one breaking change: `usage_limit.enabled = true` with no rules
-      now **fails startup** instead of silently doing nothing.
+      now **fails startup** instead of silently doing nothing. Our files keep
+      their rules while `enabled = false`, so flipping it back does not hit
+      this.
 
 The configuration itself is written out, for both clusters, in
 [`deploy/kora/`](../deploy/kora/) — `kora.mainnet.toml`, `kora.devnet.toml` and
 a README covering the env vars and the Railway steps. Every value carries its
-reasoning inline; the four things that actually bound a stranger are
+reasoning inline; the things that actually bound a stranger are
 `require_one_of_programs` (a transaction that never touches LazorKit is refused
 outright), authentication, `max_allowed_lamports` set from measured cost, and
-the usage limits.
+the fee payer's own balance. Not `rate_limit`: on beta.8 it is applied per
+connection, by delaying requests over it, so it is not a cap on the server's
+total rate or on how fast the sponsor can be spent.
+
+**2026-10-06: usage limits are off in both files.** On beta.8, usage limits
+with free pricing refuse any signing request that carries no `user_id` param,
+and neither `@lazorkit/wallet` nor `@lazorkit/wallet-mobile-adapter` sends
+one — so as written, the files would have refused every SDK transaction (a
+local beta.8 running the devnet file refused a wallet creation exactly this way
+on 2026-10-05). The `user_id` they would key
+on is a string the caller chooses, so even switched on they bound integrators
+who send a stable id, not a caller who varies it. Turning them back on starts
+with an SDK change; the steps are in
+[`deploy/kora/README.md`](../deploy/kora/README.md#usage-limits-are-off-decided-2026-10-06).
+Meanwhile how much SOL the sponsor holds carries more of the weight — see the
+funding item under "Config gates for v2".
 
 Check any relayer against all of this from the outside, with no key and no
 transaction:
@@ -799,7 +822,9 @@ node scripts/kora-check.cjs https://kora.devnet.lazorkit.com --cluster devnet
 
 It exits non-zero on a FAIL, so it can gate a deploy. Today that endpoint
 returns three: no authentication, no Secp256r1 precompile in `allowed_programs`,
-and the fee-payer policy above on an unauthenticated host.
+and the fee-payer policy above on an unauthenticated host. Its `usage limit`
+line is a WARN on any beta.8 relayer: `getConfig` there does not return the
+usage-limit table, so the script cannot tell on from off.
 
 ### The key that leaked
 
@@ -827,8 +852,10 @@ Worth being honest about what an API key can do here at all: this key ships
 inside a mobile bundle and, for the web SDK, inside a browser bundle. A
 credential handed to every user is not a secret. It raises the cost of casual
 abuse and lets you cut off one client, but the controls that actually bound the
-damage are `allowed_programs`, `max_allowed_lamports`, the rate limit, usage
-limits, and how much SOL the sponsor is allowed to hold.
+damage are `allowed_programs` and `require_one_of_programs`,
+`max_allowed_lamports`, and how much SOL the sponsor is allowed to hold. (Usage
+limits are off, see the 2026-10-06 note above; `rate_limit` is per connection
+on beta.8, so it does not bound the total.)
 
 ### Rotation runbook
 
@@ -910,11 +937,13 @@ It never reorders or inserts instructions.
       handler is mounted outside the auth layer.
 - [ ] Narrow CORS off `*` once the front ends have fixed origins.
 - [ ] Fund and monitor the sponsor, and keep the mainnet balance to what a bad
-      day may cost. Rent dominates: creating a wallet costs the payer about
-      0.00285 SOL (Wallet 8 bytes + Authority 145 bytes; the vault PDA is not
-      funded at creation), against a protocol fee measured in thousandths of
-      that. Ten thousand new wallets in a day is roughly 29 SOL, of which the
-      protocol fee is under 2 per cent.
+      day may cost — with usage limits off, that balance is the hard ceiling.
+      Alert on `signer_balance_lamports`, which `[metrics.fee_payer_balance]`
+      exports on the metrics port. Rent dominates: creating a wallet costs the
+      payer about 0.00285 SOL (Wallet 8 bytes + Authority 145 bytes; the vault
+      PDA is not funded at creation), against a protocol fee measured in
+      thousandths of that. Ten thousand new wallets in a day is roughly 29 SOL,
+      of which the protocol fee is under 2 per cent.
 - [ ] Point the client at a mainnet endpoint. There is none in the client repo,
       and the React package's default
       (`https://lazorkit-paymaster.onrender.com`, in

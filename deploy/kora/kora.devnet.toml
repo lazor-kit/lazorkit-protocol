@@ -9,12 +9,18 @@
 # notes where devnet deliberately differs. Keep the two in step — a devnet that
 # is looser in ways nobody wrote down stops being a rehearsal for mainnet.
 #
-# No secret belongs in this file. The API key, HMAC secret, reCAPTCHA secret,
-# signer key and Redis URL all come from the environment:
-#   KORA_API_KEY  KORA_HMAC_SECRET  KORA_RECAPTCHA_SECRET  KORA_PRIVATE_KEY  KORA_REDIS_URL
+# No secret belongs in this file. The API key, HMAC secret, reCAPTCHA secret
+# and signer key all come from the environment:
+#   KORA_API_KEY  KORA_HMAC_SECRET  KORA_RECAPTCHA_SECRET  KORA_PRIVATE_KEY
+# KORA_REDIS_URL is needed only once usage limits are back on (they are off —
+# see [kora.usage_limit]). With them and [kora.cache] both off, nothing reads it.
 
 [kora]
-# Requests per second, server-wide.
+# Requests per second, but per connection, not server-wide. beta.8 mounts it as
+# tower's RateLimitLayer in the HTTP middleware, which the server builds afresh
+# for each connection, so each connection has its own budget; a request over it
+# is delayed, not refused. It smooths load. It is not a cap on the server's
+# total rate, and not a bound on how fast the sponsor can be spent.
 rate_limit = 100
 
 [kora.auth]
@@ -27,9 +33,14 @@ rate_limit = 100
 # app bundle, so every user has it and so does anyone who reads the bundle. It
 # lets you cut off a client and raises the cost of casual abuse; it is not a
 # secret. reCAPTCHA is the control that a public dApp can actually hold, because
-# a token is minted per visitor and cannot be scraped in bulk. On devnet a key
-# alone is defensible — the sponsor holds faucet SOL — but set one, because an
-# endpoint with no auth at all is how the current one ended up open.
+# a token is minted per visitor and cannot be scraped in bulk — but only once
+# the client sends one. Kora refuses a protected method that arrives without an
+# `x-recaptcha-token` header, and neither SDK (@lazorkit/wallet,
+# @lazorkit/wallet-mobile-adapter) sends it yet, so setting
+# KORA_RECAPTCHA_SECRET with the methods below refuses every SDK transaction.
+# On devnet a key alone is defensible — the sponsor holds faucet SOL — but set
+# one, because an endpoint with no auth at all is how the current one ended up
+# open.
 # recaptcha_score_threshold = 0.5
 protected_methods = ["signTransaction", "signAndSendTransaction"]
 
@@ -46,9 +57,10 @@ enabled = false
 fail_if_transaction_size_overflow = true
 
 [kora.cache]
-# Account/price caching is an optimisation, and it wants its own `url`. Turn it
-# on once Redis is attached and you have watched a deploy come up with it; the
-# usage limits below resolve their store from KORA_REDIS_URL independently.
+# Account/price caching is an optimisation. Turn it on once Redis is attached
+# and you have watched a deploy come up with it. It reads KORA_REDIS_URL ahead
+# of `url`, as the usage limits below do for their store — and each only when
+# it is enabled, so with both off no Redis is needed.
 enabled = false
 # url = "redis://..."
 default_ttl = 300
@@ -130,8 +142,11 @@ allowed_tokens = [
 allowed_spl_paid_tokens = []
 disallowed_accounts = []
 
-# The sponsor pays; that is the product. What bounds it is authentication, the
-# lamport cap above, and the usage limits below — not the price policy.
+# The sponsor pays; that is the product. What bounds it is
+# `require_one_of_programs` and the lamport cap above, authentication, and the
+# fee payer's own balance — not the price policy, and not `rate_limit`, which
+# is per connection (see [kora]). The usage limits are off; [kora.usage_limit]
+# below says why.
 [validation.price]
 type = "free"
 
@@ -212,15 +227,31 @@ transfer_hook_policy = "deny_all"
 blocked_mint_extensions = []
 blocked_account_extensions = []
 
-# A per-caller ceiling, which is the only thing that makes "free" survivable on
-# a public endpoint. Needs Redis (KORA_REDIS_URL) to hold across instances and
-# restarts; in memory it resets on every deploy.
+# Usage limits are OFF, deliberately (decided 2026-10-06), in step with
+# kora.mainnet.toml, which has the full reasoning. In short: on beta.8, usage
+# limits with `price.type = "free"` refuse any signing request that carries no
+# `user_id` param, and neither @lazorkit/wallet nor
+# @lazorkit/wallet-mobile-adapter sends one — so with this on, the relayer
+# refuses every SDK transaction. A local beta.8 running this file
+# refused a wallet creation exactly this way on 2026-10-05. And the `user_id`
+# it would key on is a string the caller chooses: it bounds integrators who
+# send a stable id, not a caller who varies it.
 #
-# `enabled = true` with no rules FAILS STARTUP on beta.8 — it used to be a
-# silent no-op, which is why the rules below are not optional.
+# Meanwhile a stranger is bounded by `require_one_of_programs`, authentication,
+# `max_allowed_lamports`, and the fee payer's balance (`rate_limit` is per
+# connection, so it is not one of them). On devnet that balance is faucet SOL;
+# keep it modest anyway and watch [metrics.fee_payer_balance], because this is
+# the rehearsal.
+#
+# Turning it back on is the same here as on mainnet: SDK sends a `user_id`,
+# KORA_REDIS_URL set, `fallback_if_unavailable` stays false, flip `enabled`.
+# The rules stay below so that is one line; while off, Kora parses them but
+# neither builds nor applies them.
 [kora.usage_limit]
-enabled = true
-fallback_if_unavailable = false  # cache down = refuse, not sponsor blindly
+enabled = false
+# Required whenever this table is present. When on: cache down = refuse, not
+# sponsor blindly.
+fallback_if_unavailable = false
 
 [[kora.usage_limit.rules]]
 # Higher than mainnet: a test script legitimately loops.
