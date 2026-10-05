@@ -6,6 +6,33 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — the SDKs are published from CI, with provenance
+
+**SDKs** (release process; no code change)
+
+- `@lazorkit/sdk-legacy` and `@lazorkit/sdk` are no longer published by hand.
+  Pushing a release tag (`sdk-legacy-vX.Y.Z`, `sdk-kit-vX.Y.Z`) on a commit of
+  `develop` or `main` runs `.github/workflows/release-sdk.yml`: it builds,
+  tests and packs the package without credentials, then, once a maintainer
+  approves the `npm-publish` environment, publishes it with npm trusted
+  publishing (OIDC, no npm token) and a provenance attestation, and creates the
+  GitHub release.
+- The dist-tags follow the current practice: `next` for both, and for
+  `@lazorkit/sdk` also `latest` within its major (not from a stable version
+  to a pre-release). A new major, which a protocol major brings, leaves
+  `latest` to be moved by hand after the mainnet upgrade, as does
+  `@lazorkit/sdk-legacy`'s `latest`, which stays on 0.3.2, the protocol v1
+  line; the workflow refuses to move it. A version that would move `next`
+  back is refused when the tag is pushed and again just before publishing.
+- `RELEASING.md` has the flow, the one-time npm and GitHub setup (trusted
+  publisher, `npm-publish` environment, tag ruleset), what to check before
+  approving, and the manual fallback; `docs/upgrade-procedure.md` step 7 now
+  pushes tags. Rebuilt by the workflow's steps from `develop`, both packages
+  give tarballs byte-identical to the published `@lazorkit/sdk-legacy` 1.4.0
+  and `@lazorkit/sdk` 1.0.0-rc.6.
+- The release build and `lint`'s SDK jobs run on Node 22 instead of Node 20,
+  which reached end of life on 2026-04-30; the tarballs are unchanged.
+
 ### Fixed — Execute's heap: buffers sized exactly (program; needs a review before the mainnet deploy)
 
 **Program** (both v2 artifacts change: devnet `efea949f…` → `d95e5c2b…`,
