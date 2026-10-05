@@ -1,0 +1,223 @@
+name: Release SDK
+
+# Publishes an SDK to npm when its release tag is pushed (RELEASING.md):
+#
+#   sdk-legacy-vX.Y.Z  @lazorkit/sdk-legacy (sdk/sdk-legacy), dist-tag next. Its latest stays on
+#                      the protocol v1 line and is never moved here.
+#   sdk-kit-vX.Y.Z     @lazorkit/sdk (sdk/sdk-kit), dist-tag next, and latest within its major
+#                      (not from a stable version to a pre-release). A new major leaves latest
+#                      to be moved by hand after the mainnet upgrade.
+#
+#   build    without credentials: checks the tag (version = package.json, commit on
+#            origin/develop or origin/main, next not moved back), installs, builds, tests,
+#            runs prepublishOnly and packs the tarball.
+#   publish  waits for approval on the npm-publish environment, checks the tag still points at
+#            the built commit and that next would not move back, then publishes the tarball with
+#            npm trusted publishing (OIDC) and provenance, and points the dist-tags. A version
+#            already on npm is not published again; its dist-tags are still checked. One
+#            publish per package at a time.
+#   release  creates the GitHub release for the tag, unless it exists.
+#
+# A manual run (workflow_dispatch) only runs trusted-publishing-check, a dry run that proves
+# the npm trusted publisher settings work and publishes nothing; with dist_tag_check it also
+# adds and removes a scratch dist-tag.
+#
+# scripts/sdk-release.mjs does the work; this file wires the jobs and their permissions.
+
+on:
+  push:
+    tags:
+      - "sdk-legacy-v*"
+      - "sdk-kit-v*"
+  workflow_dispatch:
+    inputs:
+      dist_tag_check:
+        description: Also add and remove the scratch dist-tag oidc-check on each package (proves "Allow npm dist-tag")
+        type: boolean
+        default: false
+
+permissions: {}
+
+# One run per tag at a time; a second push of the same tag waits instead of cancelling a
+# publish in progress.
+concurrency:
+  group: release-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and pack
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # Full history: the tag check needs origin/develop and origin/main.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+
+      # Node 22 as lint.yml's sdk jobs; its npm 10.9 installs these lockfiles, which npm 11.21
+      # refuses (RELEASING.md). No dependency cache for the build that produces the published
+      # tarball.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Check the release tag
+        id: plan
+        run: node scripts/sdk-release.mjs plan "$GITHUB_REF_NAME"
+
+      # --ignore-scripts: no dependency of either SDK needs an install script on Linux
+      # (fsevents, macOS only, is the one that has one).
+      - name: Install dependencies
+        working-directory: ${{ steps.plan.outputs.dir }}
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        working-directory: ${{ steps.plan.outputs.dir }}
+        run: npm run build
+
+      - name: Test
+        if: steps.plan.outputs.test == 'true'
+        working-directory: ${{ steps.plan.outputs.dir }}
+        run: npm test
+
+      # prepublishOnly (clean, build), then npm pack, as npm publish does.
+      - name: Pack
+        env:
+          PACKAGE: ${{ steps.plan.outputs.package }}
+        run: node scripts/sdk-release.mjs pack "$PACKAGE" "$RUNNER_TEMP/npm-tarball"
+
+      # Kept as long as an environment approval can wait (30 days).
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-tarball
+          path: ${{ runner.temp }}/npm-tarball
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm-publish
+    # One publish per package at a time, so two approved runs of one package cannot both pass
+    # the check that next does not move back. GitHub keeps one run waiting behind the one that
+    # holds the group and cancels an older waiting run when a newer one queues; a re-run of a
+    # cancelled one is refused if next has passed it.
+    concurrency:
+      group: release-sdk-publish-${{ startsWith(github.ref_name, 'sdk-kit-v') && 'sdk-kit' || 'sdk-legacy' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read # checkout, and reading the tag through the API
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+          persist-credentials: false
+
+      # No registry-url: npm already defaults to registry.npmjs.org, and the .npmrc that
+      # registry-url writes would send an unset ${NODE_AUTH_TOKEN} as a literal token.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      # Trusted publishing needs npm >= 11.5.1 and `npm dist-tag` over OIDC needs 11.21.0+
+      # (or 12.2.0+); Node 24 bundles an older npm. scripts/sdk-release.mjs checks the version.
+      - name: Install npm 11.21.0
+        run: | # zizmor: ignore[adhoc-packages] an exact npm version, with no install scripts
+          npm install --global --ignore-scripts npm@11.21.0
+          npm --version
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarball
+          path: ${{ runner.temp }}/npm-tarball
+
+      # An approval can come days after the push: refuse if the tag was moved or deleted since.
+      - name: Check the tag still points at the built commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/sdk-release.mjs verify-tag "$RUNNER_TEMP/npm-tarball"
+
+      # npm publish and npm dist-tag authenticate with OIDC; there is no NPM_TOKEN.
+      - name: Publish and point the dist-tags
+        run: node scripts/sdk-release.mjs publish "$RUNNER_TEMP/npm-tarball"
+
+  release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarball
+          path: ${{ runner.temp }}/npm-tarball
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/sdk-release.mjs github-release "$RUNNER_TEMP/npm-tarball"
+
+  trusted-publishing-check:
+    name: Trusted publishing dry run
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # the OIDC token npm exchanges
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install npm 11.21.0
+        run: | # zizmor: ignore[adhoc-packages] an exact npm version, with no install scripts
+          npm install --global --ignore-scripts npm@11.21.0
+          npm --version
+
+      # `npm publish --dry-run` of each package's `next` version: npm exchanges the OIDC token
+      # (the trusted publisher must match this repository, release-sdk.yml and npm-publish),
+      # then refuses to publish over an existing version (a pre-release goes through to the end
+      # of the dry run instead). Nothing is published. With dist_tag_check, npm dist-tag adds
+      # and removes oidc-check on each package, the only change this job can make.
+      - name: Exchange an npm token for each package
+        env:
+          DIST_TAG_CHECK: ${{ inputs.dist_tag_check }}
+        run: |
+          if [ "$DIST_TAG_CHECK" = true ]; then
+            node scripts/sdk-release.mjs oidc-check --dist-tag
+          else
+            node scripts/sdk-release.mjs oidc-check
+          fi

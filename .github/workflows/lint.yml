@@ -37,6 +37,9 @@ jobs:
       - name: Deploy commands in the docs deploy a built artifact
         run: node scripts/deploy-docs-lint.cjs
 
+      - name: SDK release decisions (version order, dist-tags)
+        run: node --test scripts/sdk-release.test.mjs
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
@@ -147,7 +150,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: ${{ matrix.dir }}/package-lock.json
 
@@ -173,7 +176,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: |
             sdk/sdk-kit/package-lock.json
