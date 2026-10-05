@@ -272,13 +272,16 @@ A protocol major moves both SDKs to a new npm major. The trap is the dist-tag:
 lands gets a package that derives the wrong addresses.
 
 ```bash
-# before the upgrade: publish the new major off latest. Push each SDK's release tag
-# (sdk-legacy-v<new>, sdk-kit-v<new>); the Release SDK workflow publishes it under
-# `next` (RELEASING.md).
-git tag -a sdk-legacy-v<new> -m "@lazorkit/sdk-legacy <new>" <commit> && git push origin sdk-legacy-v<new>
-# after the upgrade is confirmed on mainnet, by hand: the workflow never moves
-# sdk-legacy's latest.
-npm dist-tag add @lazorkit/sdk-legacy@<new> latest
+# before the upgrade: publish the new majors off latest. Push each SDK's release tag; the
+# Release SDK workflow publishes it under `next` and leaves `latest` where it is: it never
+# moves sdk-legacy's latest, nor @lazorkit/sdk's latest to a new major (RELEASING.md).
+git tag -a sdk-legacy-v<legacy-new> -m "@lazorkit/sdk-legacy <legacy-new>" <commit>
+git push origin sdk-legacy-v<legacy-new>
+git tag -a sdk-kit-v<kit-new> -m "@lazorkit/sdk <kit-new>" <commit>
+git push origin sdk-kit-v<kit-new>
+# after the upgrade is confirmed on mainnet, by hand:
+npm dist-tag add @lazorkit/sdk-legacy@<legacy-new> latest
+npm dist-tag add @lazorkit/sdk@<kit-new> latest
 ```
 
 Check both package.json versions against the protocol they speak before
