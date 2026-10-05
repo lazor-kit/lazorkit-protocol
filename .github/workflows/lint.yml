@@ -37,6 +37,9 @@ jobs:
       - name: Deploy commands in the docs deploy a built artifact
         run: node scripts/deploy-docs-lint.cjs
 
+      - name: SDK release decisions (version order, dist-tags)
+        run: node --test scripts/sdk-release.test.mjs
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 

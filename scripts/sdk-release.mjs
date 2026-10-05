@@ -8,7 +8,7 @@
 //       its version equal to the package's package.json and package-lock.json, its commit on
 //       origin/develop or origin/main, and, for a version not on npm yet, a publish that does
 //       not move `next` back to a lower version. Writes package, name, dir, version, test and
-//       published to $GITHUB_OUTPUT.
+//       published to $GITHUB_OUTPUT, and the plan to $GITHUB_STEP_SUMMARY for the reviewer.
 //   pack <package> <dir>
 //       Runs the package's prepublishOnly (clean, then build) and `npm pack` into <dir>, as
 //       `npm publish` does before it uploads, checks the tarball and records it in
@@ -18,18 +18,33 @@
 //       tarball was built from ($GITHUB_SHA). Needs GH_TOKEN and GH_REPO.
 //   publish <dir> [--dry-run]
 //       Runs `npm publish <tarball> --provenance --access public --tag next --ignore-scripts`
-//       unless the version is on npm already, then points the package's dist-tags at it:
-//       `next`, and `latest` for @lazorkit/sdk. Authentication is npm trusted publishing
-//       (OIDC); no token is read. @lazorkit/sdk-legacy's `latest` is never moved.
+//       unless the version is on npm already, after checking again that this does not move
+//       `next` back, then points the package's dist-tags at it: `next`, and `latest` for
+//       @lazorkit/sdk within its major. Authentication is npm trusted publishing (OIDC); no
+//       token is read. @lazorkit/sdk-legacy's `latest` is never moved.
 //   github-release <dir> [--dry-run]
 //       Creates the GitHub release for the tag, unless it exists. Needs GH_TOKEN and GH_REPO.
-//   oidc-check
+//   oidc-check [--dist-tag]
 //       Proves that npm trusted publishing works in this job without publishing anything:
 //       packs each package's `next` version from npm and runs `npm publish --dry-run` on it.
+//       With --dist-tag, also adds and removes the scratch dist-tag `oidc-check` on each
+//       package, which proves the trusted publisher may change dist-tags.
+//
+// The decisions (version order, which dist-tag moves) are exported for
+// scripts/sdk-release.test.mjs; importing this file runs nothing.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,7 +52,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // The release tag of a package is `<key>-v<version>`.
-const PACKAGES = {
+export const PACKAGES = {
   "sdk-legacy": {
     name: "@lazorkit/sdk-legacy",
     dir: "sdk/sdk-legacy",
@@ -50,16 +65,23 @@ const PACKAGES = {
     name: "@lazorkit/sdk",
     dir: "sdk/sdk-kit",
     test: true,
-    // `latest` follows the release candidates while it is one itself (see distTagDecision).
+    // `latest` follows the releases of its own major, and its release candidates while it is
+    // one itself; a new major moves it by hand (see distTagDecision).
     distTags: ["next", "latest"],
   },
 };
 
 // Dist-tags this script refuses to move, whatever PACKAGES says.
-const NEVER_MOVE = new Map([["@lazorkit/sdk-legacy", new Set(["latest"])]]);
+export const NEVER_MOVE = new Map([["@lazorkit/sdk-legacy", new Set(["latest"])]]);
 
 // The dist-tag `npm publish` sets.
-const PUBLISH_TAG = "next";
+export const PUBLISH_TAG = "next";
+
+// The dist-tag `oidc-check --dist-tag` adds and removes again.
+const SCRATCH_TAG = "oidc-check";
+
+// The files that decide what a release run does; the plan says whether they match develop's.
+const RELEASE_FILES = [".github/workflows/release-sdk.yml", "scripts/sdk-release.mjs"];
 
 // A release tag must be on one of these branches of origin.
 const RELEASE_BRANCHES = ["develop", "main"];
@@ -132,16 +154,22 @@ function setOutput(key, value) {
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
 }
 
-function parseVersion(v) {
+function addSummary(markdown) {
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${markdown}\n`);
+}
+
+export function parseVersion(v) {
   const m = SEMVER_RE.exec(v);
   if (!m) throw new Error(`${v} is not a SemVer version`);
   return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split(".") : [] };
 }
 
-const isPrerelease = (v) => parseVersion(v).pre.length > 0;
+export const isPrerelease = (v) => parseVersion(v).pre.length > 0;
+
+const majorOf = (v) => parseVersion(v).nums[0];
 
 // SemVer precedence.
-function compareVersions(a, b) {
+export function compareVersions(a, b) {
   const pa = parseVersion(a);
   const pb = parseVersion(b);
   for (let i = 0; i < 3; i++) {
@@ -215,18 +243,45 @@ async function waitUntilPublished(pkg) {
 }
 
 // Whether to point dist-tag `tag` (now at `current`, or unset) at `version`. A tag is never
-// moved back to a lower version, and `latest` never moves from a stable version to a
+// moved back to a lower version. `latest` never moves to a new major: a protocol major moves
+// the SDKs to a new npm major, and `latest` must keep resolving to the line that speaks to
+// mainnet as it is now until the upgrade lands, which this workflow cannot know
+// (docs/upgrade-procedure.md, step 7). Nor does `latest` move from a stable version to a
 // pre-release: it follows @lazorkit/sdk's release candidates only while it is one itself.
-function distTagDecision(name, version, tag, current) {
+export function distTagDecision(name, version, tag, current) {
   if (NEVER_MOVE.get(name)?.has(tag)) throw new Error(`refusing to move ${name}'s ${tag} dist-tag`);
   if (current === version) return { move: false, why: `${tag} is already ${version}` };
   if (current && compareVersions(current, version) > 0) {
     return { move: false, why: `${tag} is ${current}, ahead of ${version}; leaving it` };
   }
-  if (tag === "latest" && current && isPrerelease(version) && !isPrerelease(current)) {
-    return { move: false, why: `${tag} is the stable ${current}; a pre-release does not take it` };
+  if (tag === "latest" && current) {
+    if (majorOf(version) > majorOf(current)) {
+      return {
+        move: false,
+        why:
+          `${tag} is ${current} and ${version} is a new major; leaving it: move ${tag} by hand once ` +
+          "the protocol upgrade it speaks is on mainnet (docs/upgrade-procedure.md, step 7)",
+      };
+    }
+    if (isPrerelease(version) && !isPrerelease(current)) {
+      return { move: false, why: `${tag} is the stable ${current}; a pre-release does not take it` };
+    }
   }
   return { move: true, why: `${tag}: ${current ?? "unset"} -> ${version}` };
+}
+
+// `npm publish --tag next` points `next` at the new version whatever `next` is now (npm only
+// guards `latest`), so a version lower than `next` is refused. plan() checks it at the push and
+// publish() again just before it publishes: an approval can come days later, after a higher
+// version was published by another run or by hand.
+export function assertPublishKeepsOrder(name, version, distTags) {
+  const current = distTags[PUBLISH_TAG];
+  if (current && compareVersions(current, version) > 0) {
+    throw new Error(
+      `${name}@${version} is lower than ${PUBLISH_TAG} (${current}): \`npm publish --tag ${PUBLISH_TAG}\` would move ` +
+        `${PUBLISH_TAG} back. This workflow does not publish it; publish it by hand under another dist-tag (RELEASING.md).`,
+    );
+  }
 }
 
 function tarballManifest(file) {
@@ -286,6 +341,16 @@ function checkReleaseBranch() {
     );
   }
   log(`${head} is on ${on.map((b) => `origin/${b}`).join(", ")}`);
+  return { head, on };
+}
+
+// Whether the workflow and this script at the tagged commit are develop's. A tag-push run uses
+// the copies at the tag, so this is what the reviewer of npm-publish checks (RELEASING.md).
+function releaseFilesMatchDevelop() {
+  const r = capture("git", ["diff", "--quiet", "HEAD", "refs/remotes/origin/develop", "--", ...RELEASE_FILES]);
+  if (r.status === 0) return true;
+  if (r.status === 1) return false;
+  throw new Error(`git diff HEAD origin/develop failed: ${r.stderr.trim()}`);
 }
 
 function plan(tag) {
@@ -309,7 +374,12 @@ function plan(tag) {
   if (lock.version !== version || lock.packages?.[""]?.version !== version) {
     throw new Error(`${pkg.dir}/package-lock.json is not at ${version}; run \`npm install --package-lock-only\` there`);
   }
-  checkReleaseBranch();
+  const { head, on } = checkReleaseBranch();
+  const sameAsDevelop = releaseFilesMatchDevelop();
+  if (!sameAsDevelop) {
+    // A workflow command, on stdout.
+    console.log(`::warning::${RELEASE_FILES.join(" and ")} at ${head} differ from origin/develop's; check the diff before approving`);
+  }
 
   const published = isPublished({ name: pkg.name, version });
   const distTags = distTagsOf(pkg.name);
@@ -317,22 +387,35 @@ function plan(tag) {
   if (published) {
     log(`${spec} is on npm already: the publish job will not publish it again, only point its dist-tags and create the GitHub release`);
   } else {
-    const current = distTags[PUBLISH_TAG];
-    if (current && compareVersions(current, version) > 0) {
-      throw new Error(
-        `${spec} is lower than ${PUBLISH_TAG} (${current}): \`npm publish --tag ${PUBLISH_TAG}\` would move ${PUBLISH_TAG} back. ` +
-          "This workflow does not publish it; publish it by hand under another dist-tag (RELEASING.md).",
-      );
-    }
+    assertPublishKeepsOrder(pkg.name, version, distTags);
     log(`${spec} is not on npm yet: the publish job publishes it with --tag ${PUBLISH_TAG}`);
   }
+  const steps = [];
   for (const t of pkg.distTags) {
-    if (t === PUBLISH_TAG && !published) {
-      log(`plan: ${t}: ${distTags[t] ?? "unset"} -> ${version} (npm publish --tag ${t})`);
-    } else {
-      log(`plan: ${distTagDecision(pkg.name, version, t, distTags[t]).why}`);
-    }
+    const step =
+      t === PUBLISH_TAG && !published
+        ? `${t}: ${distTags[t] ?? "unset"} -> ${version} (npm publish --tag ${t})`
+        : distTagDecision(pkg.name, version, t, distTags[t]).why;
+    log(`plan: ${step}`);
+    steps.push(step);
   }
+  for (const [t, v] of Object.entries(distTags)) {
+    if (!pkg.distTags.includes(t)) steps.push(`${t}: stays ${v}`);
+  }
+
+  addSummary(
+    [
+      `### ${spec} from \`${tag}\``,
+      "",
+      `- Commit \`${head}\`, on ${on.map((b) => `\`origin/${b}\``).join(" and ")}`,
+      `- ${RELEASE_FILES.map((f) => `\`${f}\``).join(" and ")}: ` +
+        (sameAsDevelop ? "same as `origin/develop`" : "**differ from `origin/develop`**: check the diff before approving"),
+      `- npm: ${published ? "already published; the publish job only checks its dist-tags" : "not published yet"}`,
+      ...steps.map((s) => `- dist-tag ${s}`),
+      "",
+      "Approve `npm-publish` only if this is the release you expect (RELEASING.md, Approving a release).",
+    ].join("\n"),
+  );
 
   setOutput("package", key);
   setOutput("name", pkg.name);
@@ -431,6 +514,8 @@ async function publish(dir, { dryRun }) {
   if (isPublished(entry)) {
     log(`${spec} is already on npm; not publishing it again`);
   } else {
+    const before = distTagsOf(entry.name);
+    assertPublishKeepsOrder(entry.name, entry.version, before);
     const args = ["publish", file, "--ignore-scripts", "--access", "public", "--provenance", "--tag", PUBLISH_TAG];
     if (dryRun) args.push("--dry-run");
     const { code, output } = await execTee("npm", args);
@@ -442,7 +527,10 @@ async function publish(dir, { dryRun }) {
       throw new Error(`npm publish ${spec} failed (exit ${code})`);
     }
     if (dryRun) {
-      log(`[dry-run] would wait for ${spec} on npm, then point ${pkg.distTags.join(", ")} at it`);
+      const then = pkg.distTags
+        .filter((t) => t !== PUBLISH_TAG)
+        .map((t) => distTagDecision(entry.name, entry.version, t, before[t]).why);
+      log(`[dry-run] ${PUBLISH_TAG} -> ${entry.version}; would wait for ${spec} on npm, then: ${then.join("; ") || "nothing else"}`);
       return;
     }
   }
@@ -520,7 +608,19 @@ function githubRelease(dir, { dryRun }) {
   exec("gh", args);
 }
 
-async function oidcCheck() {
+// Adds the scratch dist-tag and removes it again. `npm dist-tag add` returns before its request
+// when the tag already has that version, so pointing `next` at itself would prove nothing.
+function checkDistTagPermission(name, version) {
+  if (distTagsOf(name)[SCRATCH_TAG]) exec("npm", ["dist-tag", "rm", name, SCRATCH_TAG]);
+  exec("npm", ["dist-tag", "add", `${name}@${version}`, SCRATCH_TAG]);
+  try {
+    exec("npm", ["dist-tag", "rm", name, SCRATCH_TAG]);
+  } catch (err) {
+    throw new Error(`${err.message}; remove the scratch tag by hand: npm dist-tag rm ${name} ${SCRATCH_TAG}`);
+  }
+}
+
+async function oidcCheck({ distTag }) {
   assertNpmSupportsOidc();
   if (!process.env.ACTIONS_ID_TOKEN_REQUEST_URL) {
     throw new Error("no GitHub OIDC token available; run this in a job with `id-token: write`");
@@ -539,6 +639,7 @@ async function oidcCheck() {
     if (!/Successfully retrieved and set token/.test(output)) {
       log(`${spec}: the OIDC token exchange did not succeed; check the trusted publisher on npmjs.com`);
       failed.push(name);
+      continue;
     } else if (/cannot publish over the previously published versions/i.test(output)) {
       log(`${spec}: OIDC token exchange succeeded, then npm refused to publish over ${version}, as expected`);
     } else if (code === 0 && isPrerelease(version)) {
@@ -548,6 +649,15 @@ async function oidcCheck() {
     } else {
       log(`${spec}: OIDC token exchange succeeded, but the dry run ended unexpectedly (exit ${code})`);
       failed.push(name);
+      continue;
+    }
+    if (!distTag) continue;
+    try {
+      checkDistTagPermission(name, version);
+      log(`${name}: added and removed the dist-tag ${SCRATCH_TAG} over OIDC`);
+    } catch (err) {
+      log(`${name}: changing a dist-tag over OIDC failed; enable "Allow npm dist-tag" on its trusted publisher: ${err.message}`);
+      failed.push(name);
     }
   }
   if (failed.length > 0) {
@@ -556,11 +666,13 @@ async function oidcCheck() {
   }
 }
 
-const [command, ...rest] = process.argv.slice(2);
-const dryRun = rest.includes("--dry-run");
-const args = rest.filter((a) => a !== "--dry-run");
-
-try {
+async function main(argv) {
+  const [command, ...rest] = argv;
+  const flags = new Set(rest.filter((a) => a.startsWith("--")));
+  const args = rest.filter((a) => !a.startsWith("--"));
+  const known = { publish: ["--dry-run"], "github-release": ["--dry-run"], "oidc-check": ["--dist-tag"] }[command] ?? [];
+  for (const f of flags) if (!known.includes(f)) throw new Error(`${command}: unknown option ${f}`);
+  const dryRun = flags.has("--dry-run");
   switch (command) {
     case "plan":
       plan(args[0]);
@@ -578,15 +690,24 @@ try {
       githubRelease(args[0], { dryRun });
       break;
     case "oidc-check":
-      await oidcCheck();
+      await oidcCheck({ distTag: flags.has("--dist-tag") });
       break;
     default:
       throw new Error(
         "usage: sdk-release.mjs plan <git-tag> | pack <package> <dir> | verify-tag <dir> | " +
-          "publish <dir> [--dry-run] | github-release <dir> [--dry-run] | oidc-check",
+          "publish <dir> [--dry-run] | github-release <dir> [--dry-run] | oidc-check [--dist-tag]",
       );
   }
-} catch (err) {
-  log(err instanceof Error ? err.message : err);
-  process.exitCode = 1;
+}
+
+const invokedDirectly =
+  process.argv[1] !== undefined && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+
+if (invokedDirectly) {
+  try {
+    await main(process.argv.slice(2));
+  } catch (err) {
+    log(err instanceof Error ? err.message : err);
+    process.exitCode = 1;
+  }
 }

@@ -4,20 +4,23 @@ name: Release SDK
 #
 #   sdk-legacy-vX.Y.Z  @lazorkit/sdk-legacy (sdk/sdk-legacy), dist-tag next. Its latest stays on
 #                      the protocol v1 line and is never moved here.
-#   sdk-kit-vX.Y.Z     @lazorkit/sdk (sdk/sdk-kit), dist-tag next, and latest while latest is a
-#                      release candidate too.
+#   sdk-kit-vX.Y.Z     @lazorkit/sdk (sdk/sdk-kit), dist-tag next, and latest within its major
+#                      (not from a stable version to a pre-release). A new major leaves latest
+#                      to be moved by hand after the mainnet upgrade.
 #
 #   build    without credentials: checks the tag (version = package.json, commit on
 #            origin/develop or origin/main, next not moved back), installs, builds, tests,
 #            runs prepublishOnly and packs the tarball.
 #   publish  waits for approval on the npm-publish environment, checks the tag still points at
-#            the built commit, then publishes the tarball with npm trusted publishing (OIDC) and
-#            provenance, and points the dist-tags. A version already on npm is not published
-#            again; its dist-tags are still checked.
+#            the built commit and that next would not move back, then publishes the tarball with
+#            npm trusted publishing (OIDC) and provenance, and points the dist-tags. A version
+#            already on npm is not published again; its dist-tags are still checked. One
+#            publish per package at a time.
 #   release  creates the GitHub release for the tag, unless it exists.
 #
 # A manual run (workflow_dispatch) only runs trusted-publishing-check, a dry run that proves
-# the npm trusted publisher settings work and publishes nothing.
+# the npm trusted publisher settings work and publishes nothing; with dist_tag_check it also
+# adds and removes a scratch dist-tag.
 #
 # scripts/sdk-release.mjs does the work; this file wires the jobs and their permissions.
 
@@ -27,6 +30,11 @@ on:
       - "sdk-legacy-v*"
       - "sdk-kit-v*"
   workflow_dispatch:
+    inputs:
+      dist_tag_check:
+        description: Also add and remove the scratch dist-tag oidc-check on each package (proves "Allow npm dist-tag")
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -99,6 +107,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: npm-publish
+    # One publish per package at a time, so two approved runs of one package cannot both pass
+    # the check that next does not move back. GitHub keeps one run waiting behind the one that
+    # holds the group and cancels an older waiting run when a newer one queues; a re-run of a
+    # cancelled one is refused if next has passed it.
+    concurrency:
+      group: release-sdk-publish-${{ startsWith(github.ref_name, 'sdk-kit-v') && 'sdk-kit' || 'sdk-legacy' }}
+      cancel-in-progress: false
     permissions:
       contents: read # checkout, and reading the tag through the API
       id-token: write # npm trusted publishing and provenance
@@ -195,6 +210,14 @@ jobs:
       # `npm publish --dry-run` of each package's `next` version: npm exchanges the OIDC token
       # (the trusted publisher must match this repository, release-sdk.yml and npm-publish),
       # then refuses to publish over an existing version (a pre-release goes through to the end
-      # of the dry run instead). Nothing is published.
+      # of the dry run instead). Nothing is published. With dist_tag_check, npm dist-tag adds
+      # and removes oidc-check on each package, the only change this job can make.
       - name: Exchange an npm token for each package
-        run: node scripts/sdk-release.mjs oidc-check
+        env:
+          DIST_TAG_CHECK: ${{ inputs.dist_tag_check }}
+        run: |
+          if [ "$DIST_TAG_CHECK" = true ]; then
+            node scripts/sdk-release.mjs oidc-check --dist-tag
+          else
+            node scripts/sdk-release.mjs oidc-check
+          fi
