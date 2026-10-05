@@ -176,9 +176,12 @@ async function run(url, cluster, apiKey) {
 
   // 3. What the fee payer itself is allowed to be used for. Our own flows need
   //    the payer to fund PDAs and to pay the protocol fee, so `system.transfer`
-  //    and `system.create_account` have to stay open — which means the cap and
-  //    the usage limit are the only things bounding a stranger, and an
-  //    unauthenticated relayer with a permissive policy is a faucet.
+  //    and `system.create_account` have to stay open — which means a stranger
+  //    is bounded only by `require_one_of_programs`, authentication, the cap
+  //    and the payer's balance (usage limits are off in deploy/kora, and
+  //    beta.8 applies `rate_limit` per connection, so it caps neither the total
+  //    rate nor the spend; its README says more), and an unauthenticated
+  //    relayer with a permissive policy is a faucet.
   const policy = validation.fee_payer_policy ?? {};
   const permissive = [];
   for (const [section, flags] of Object.entries(policy)) {
@@ -199,15 +202,41 @@ async function run(url, cluster, apiKey) {
       : `${drains.join(', ')}` +
         (openRelayer
           ? ` — with no authentication, anyone can spend up to the cap per transaction, repeatedly`
-          : ' — bounded only by the cap and the usage limit'),
+          : ' — bounded by authentication, the cap and the payer balance'),
   );
 
-  const limit = validation.usage_limit ?? config.usage_limit ?? null;
-  line(
-    limit && limit.enabled ? true : 'warn',
-    'usage limit',
-    limit && limit.enabled ? `max ${limit.max_transactions} per user` : 'disabled — no per-caller ceiling',
-  );
+  // Usage limits. beta.8's getConfig returns only `fee_payers`,
+  // `validation_config` and `enabled_methods`; `[kora.usage_limit]` lives
+  // under `kora`, which it does not return. So on beta.8 this line cannot tell
+  // on from off, and says so. If a build does expose the table, read it in
+  // beta.8's shape: `enabled` plus `rules[]` of {type, max, window_seconds,
+  // program?, instruction?}. Either way off is a WARN, because it is true:
+  // there is no per-caller ceiling. deploy/kora/README.md says why ours is off.
+  const limit = config.usage_limit ?? config.kora?.usage_limit ?? validation.usage_limit ?? null;
+  const rules = Array.isArray(limit?.rules) ? limit.rules : [];
+  const rule = (r) =>
+    `${r.type === 'instruction' ? `${String(r.program).slice(0, 8)}…:${r.instruction}` : r.type} ` +
+    `max ${r.max}${r.window_seconds ? `/${r.window_seconds}s` : ' lifetime'}`;
+  if (!limit) {
+    line(
+      'warn',
+      'usage limit',
+      'not in getConfig (beta.8 does not expose it), so not checkable from here; ' +
+        'the deploy/kora configs keep it off — see deploy/kora/README.md',
+    );
+  } else if (!limit.enabled) {
+    line('warn', 'usage limit', 'disabled — no per-caller ceiling; see deploy/kora/README.md for why');
+  } else if (price === 'free') {
+    // beta.8 refuses any signing request without a `user_id` in this mode,
+    // and neither @lazorkit/wallet nor @lazorkit/wallet-mobile-adapter sends one.
+    line(
+      'warn',
+      'usage limit',
+      `on (${rules.map(rule).join('; ') || 'no rules'}) with free pricing — every signing request must carry a user_id; see deploy/kora/README.md`,
+    );
+  } else {
+    line(true, 'usage limit', `on — ${rules.map(rule).join('; ') || 'no rules'}`);
+  }
 
   const methods = config.enabled_methods ?? {};
   const signing = ['sign_transaction', 'sign_and_send_transaction', 'transfer_transaction'].filter((m) => methods[m]);
