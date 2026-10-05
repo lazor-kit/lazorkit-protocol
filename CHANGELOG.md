@@ -96,8 +96,8 @@ byte-identical)
   can pass a payload that runs out of memory, on this build and on
   `efea949f…`: it should compute the exact sum (`docs/Architecture.md`,
   Transaction v1).
-- Devnet's v2 runs the D13 build `efea949f…` (upgraded 2026-10-03) and needs
-  an upgrade to get the fix; this one is not breaking. The v2 hashes in
+- Devnet's v2 runs this build, `d95e5c2b…`, since 2026-10-04 (slot 507081509;
+  a non-breaking upgrade from the D13 build `efea949f…`). The v2 hashes in
   `scripts/release-hashes.txt` and in the deploy checklist's tables changed
   (`check-release-hashes.sh`: ok for all four). The two-id rehearsal passed
   18/18 on these artifacts on 2026-10-04, at the mainnet and the devnet ids,

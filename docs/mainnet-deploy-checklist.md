@@ -427,17 +427,12 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet is behind this branch.** Devnet's v2 (`57bTNW…`) runs `efea949f…`,
-the D13 build (#48), upgraded on 2026-10-03 in slot 507022596 after the SDK
-release that carries the `SpendingLimits` fix (lazor-kit #117; wallet 3.4.0,
-sdk-legacy 1.4.0). A smoke run on it passed the full lifecycle and every D13
-case (3037, 3038, 3032). It has the wallet binding and D13 but not the
-heap-capacity fix: it verifies the same signatures as the artifact above, since
-the fix changes no account, instruction or challenge layout, but it runs out of
-heap on payloads a v1 transaction carries easily and on some legacy ones (a
-passkey Execute of one inner instruction of 128 accounts, or of 70 + 70;
-`program/tests/heap_capacity_tests.rs`). Upgrading it to the devnet artifact
-above is not breaking: it only lets larger payloads fit.
+**Devnet runs this branch's devnet artifact.** Devnet's v2 (`57bTNW…`) runs
+`d95e5c2b…` (D13 and the heap-capacity fix), upgraded on 2026-10-04 in slot
+507081509; before that it ran the D13 build `efea949f…` from 2026-10-03 (slot
+507022596). A smoke run on each passed the full lifecycle and every D13 case
+(3037, 3038, 3032), and lazor-kit #108's devnet run (S2) passed against
+`d95e5c2b…`.
 
 Earlier runs, superseded by the one above, oldest first: on 2026-09-27 at the
 devnet ids (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain
