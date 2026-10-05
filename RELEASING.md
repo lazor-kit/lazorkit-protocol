@@ -158,6 +158,7 @@ dist-tags and the release.
   and the GitHub release to the workflow. A run of a lower version still waiting for approval
   is then refused at `publish`.
 
-`npm ci` on these lockfiles works with npm 10.8 (Node 20's, which `build` uses) and 11.6, but
-npm 11.21 refuses them (`Missing: bufferutil@4.1.0 from lock file`, optional peers of `ws`); only the
-`publish` job runs 11.21, and it installs nothing.
+`npm ci` on these lockfiles works with npm 10.9 (Node 22's, which `build` and the `lint` SDK jobs
+use) and 11.6, but npm 11.19 (Node 24's) and 11.21 refuse them (`Missing: bufferutil@4.1.0 from
+lock file`, optional peers of `ws`); only the `publish` job runs 11.21, and it installs nothing.
+Moving the builds to Node 24 needs the lockfiles regenerated with a current npm first.

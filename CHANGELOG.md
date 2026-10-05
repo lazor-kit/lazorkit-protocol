@@ -30,6 +30,8 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   pushes tags. Rebuilt by the workflow's steps from `develop`, both packages
   give tarballs byte-identical to the published `@lazorkit/sdk-legacy` 1.4.0
   and `@lazorkit/sdk` 1.0.0-rc.6.
+- The release build and `lint`'s SDK jobs run on Node 22 instead of Node 20,
+  which reached end of life on 2026-04-30; the tarballs are unchanged.
 
 ### Fixed — Execute's heap: buffers sized exactly (program; needs a review before the mainnet deploy)
 
