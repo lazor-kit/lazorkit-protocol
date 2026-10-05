@@ -154,6 +154,8 @@ npm run validator:stop
 
 The SDK is fully hand-written (no code generation). After modifying program instruction layouts, update `sdk/sdk-legacy/src/utils/instructions.ts` manually.
 
+Both SDKs are published from release tags by CI, not by hand: [RELEASING.md](RELEASING.md).
+
 ### F. IDL Generation (using Shank)
 
 ```bash
@@ -201,6 +203,10 @@ compile time; a second job runs `scripts/check-release-hashes.sh` on a
 `macos-15` (Apple silicon) runner: the four release artifacts, rebuilt in a
 fresh target dir, must match `scripts/release-hashes.txt`. The `program litesvm integration` job of
 `lint` uses the same pinned toolchain.
+
+The `Release SDK` workflow (`release-sdk.yml`) publishes `@lazorkit/sdk-legacy` and
+`@lazorkit/sdk` to npm when a `sdk-legacy-vX.Y.Z` or `sdk-kit-vX.Y.Z` tag is pushed, after a
+maintainer approves the `npm-publish` environment; see [RELEASING.md](RELEASING.md).
 
 Local-validator integration tests are still a manual release/audit check:
 
