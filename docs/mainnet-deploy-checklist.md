@@ -797,8 +797,9 @@ The configuration itself is written out, for both clusters, in
 a README covering the env vars and the Railway steps. Every value carries its
 reasoning inline; the things that actually bound a stranger are
 `require_one_of_programs` (a transaction that never touches LazorKit is refused
-outright), authentication, `max_allowed_lamports` set from measured cost, and
-the fee payer's own balance. Not `rate_limit`: on beta.8 it is applied per
+outright), authentication (mainnet only — the devnet relayer runs without an
+API key, by decision on 2026-10-06; see the README), `max_allowed_lamports` set
+from measured cost, and the fee payer's own balance. Not `rate_limit`: on beta.8 it is applied per
 connection, by delaying requests over it, so it is not a cap on the server's
 total rate or on how fast the sponsor can be spent.
 
@@ -823,7 +824,17 @@ FAILs with `no config readable (401)`. Give the key through the environment, not
 `--key`, which puts it in the process table:
 
 ```bash
-KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs <relayer-url> --cluster devnet
+KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs <relayer-url> --cluster mainnet
+```
+
+The devnet relayer on Railway runs without a key, by decision (2026-10-06,
+[`deploy/kora/README.md`](../deploy/kora/README.md#the-service)), so it is
+checked anonymously with `--allow-open`, which turns exactly its two
+open-relayer FAILs (`authentication`, `fee payer policy`) into WARNs and is
+refused with `--cluster mainnet`:
+
+```bash
+node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --cluster devnet --allow-open
 ```
 
 It exits non-zero on a FAIL, so it can gate a deploy. Against

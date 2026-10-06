@@ -36,7 +36,9 @@ carry:
    System program still sponsors a bare transfer.
 2. **Authentication** — and be honest about which kind. The API key ships inside
    a browser bundle and an app bundle, so every user has it and so does anyone
-   who reads the bundle: it lets you cut off a client, nothing more. reCAPTCHA
+   who reads the bundle: it lets you cut off a client, nothing more. The devnet
+   relayer runs without one, by decision (see [The service](#the-service)), so
+   there the other three carry it. reCAPTCHA
    (`KORA_RECAPTCHA_SECRET`, new in beta.8) is the control a public dApp can
    actually hold, because a token is minted per visitor — but not yet. Kora
    refuses a protected method that arrives without an `x-recaptcha-token`
@@ -108,7 +110,7 @@ None of them live in these files. The host's environment carries:
 
 | variable | what it is |
 |---|---|
-| `KORA_API_KEY` | the `x-api-key` value; with none set **the auth layer is not mounted at all** |
+| `KORA_API_KEY` | the `x-api-key` value; with none set **the auth layer is not mounted at all**. Mainnet sets it; the devnet service deliberately does not (see [The service](#the-service)) |
 | `KORA_HMAC_SECRET` | optional second factor; when both are set, both are required |
 | `KORA_RECAPTCHA_SECRET` | reCAPTCHA v3 secret, with `protected_methods` naming what it gates. Leave unset until the SDKs send `x-recaptcha-token` (see above) |
 | `KORA_PRIVATE_KEY` | the fee payer, per the signers file (`signers.devnet.toml` on devnet): the key itself, base58 or `[u8, ...]`, not a path |
@@ -160,8 +162,8 @@ The warnings that remain are answered, not ignored:
 | LazorKit and the Secp256r1 precompile have "no dedicated fee-payer instruction parser" | expected for any non-standard program. It matters less than it reads: our own CPIs go to the System program, which *is* parsed, so the fee-payer policy still gates the instructions that spend our lamports |
 | PermanentDelegate not blocked | the warning is about payment tokens being seized after payment, and this relayer takes no token payment. Blocking it would only refuse to sponsor a user moving their own token out of a v1 vault |
 | free pricing | that is the product |
-| `system.allow_transfer` / `allow_create_account` can drain the fee payer | true, and unavoidable — see above. `require_one_of_programs`, authentication, the lamport cap and the payer's balance are the bound |
-| no authentication configured | the secrets come from the environment, which the validator cannot see. **Confirm with `kora-check.cjs` after deploying**, not here |
+| `system.allow_transfer` / `allow_create_account` can drain the fee payer | true, and unavoidable — see above. `require_one_of_programs`, the lamport cap, the payer's balance and (on mainnet) authentication are the bound |
+| no authentication configured | the secrets come from the environment, which the validator cannot see. **Confirm with `kora-check.cjs` after deploying**, not here. On devnet the warning is literally true, by decision — see [The service](#the-service) |
 
 With usage limits off the validator says nothing about them — no warning that
 rules are present but unused. When they are turned back on, expect two more:
@@ -222,27 +224,42 @@ A mainnet relayer would sit beside it as `Dockerfile.mainnet` and
 |---|---|
 | `RAILWAY_DOCKERFILE_PATH` | `Dockerfile.devnet` — this directory holds no file named `Dockerfile`, so the build needs telling |
 | `KORA_PRIVATE_KEY` | the devnet fee payer, as the `[u8, ...]` content of its keypair file. Never the mainnet relayer key |
-| `KORA_API_KEY` | a random string; clients send it as `x-api-key` |
-| `RPC_URL` | `https://api.devnet.solana.com` today; a provider's devnet URL before it carries SDK traffic (see [Still open](#still-open)). A provider URL carries its key, so it goes in from stdin like the two secrets |
+| `KORA_API_KEY` | **not set**, by decision (2026-10-06) — see below |
+| `RPC_URL` | `https://api.devnet.solana.com` today; a provider's devnet URL before it carries SDK traffic (see [Still open](#still-open)). A provider URL carries its key, so it goes in from stdin like the signer key |
 | `PORT` | `8080`; optional, it is the default |
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `45`. On a redeploy Railway sends the old deployment SIGTERM and, by default, SIGKILL straight after (0 s). beta.8's shutdown waits up to 10 s for the RPC server to stop and up to 30 s for in-flight broadcasts, and `signAndSendTransaction` answers only once the transaction is confirmed — so with no draining time a request in flight during a redeploy is cut off while its transaction may still land |
+
+**The devnet relayer runs without `KORA_API_KEY`** (decided 2026-10-06), so
+Kora mounts no auth layer and answers every method without `x-api-key`. Both
+SDKs default to `https://kora.devnet.lazorkit.com` and send no key, so a key
+here would refuse every integrator on the defaults; and a key that ships in a
+public bundle is not a secret anyway. What bounds the sponsor instead is
+`require_one_of_programs` (LazorKit v2 devnet only), `max_allowed_lamports`
+(0.05 SOL per transaction), the fee-payer policy, and the fee payer's own
+balance — [What actually bounds the spend](#what-actually-bounds-the-spend) and
+the `[kora.auth]` comment in `kora.devnet.toml` say more. Mainnet is not changed
+by this: `kora.mainnet.toml` expects a key. The day an SDK release ships a
+devnet key, set `KORA_API_KEY` from stdin, redeploy, and drop `--allow-open`
+from the check below; a reCAPTCHA token instead means `KORA_RECAPTCHA_SECRET`,
+which gates only the signing methods, so the check keeps `--allow-open`.
 
 `KORA_REDIS_URL` is not set: with usage limits and `[kora.cache]` both off,
 nothing reads it. Set it before turning either on.
 
-Put the two secrets in from stdin, so they never sit on a command line or in
-shell history, and keep the output of anything that prints variable values off
-the screen (`railway variable list --json` and `--kv` print them raw):
+Put the secret in from stdin, so it never sits on a command line or in shell
+history, and keep the output of anything that prints variable values off the
+screen (`railway variable list --json` and `--kv` print them raw):
 
 ```bash
-# FEE_PAYER_KEYPAIR and API_KEY_FILE are paths to the two files, kept outside the repo
+# FEE_PAYER_KEYPAIR is the path to the devnet fee payer's keypair file, kept outside the repo
 tr -d ' \n' < "$FEE_PAYER_KEYPAIR" | railway variable set KORA_PRIVATE_KEY --stdin --service kora-devnet --skip-deploys > /dev/null
-railway variable set KORA_API_KEY --stdin --service kora-devnet --skip-deploys < "$API_KEY_FILE" > /dev/null
 railway variable set PORT=8080 RAILWAY_DOCKERFILE_PATH=Dockerfile.devnet RAILWAY_DEPLOYMENT_DRAINING_SECONDS=45 --service kora-devnet --skip-deploys
 # The public endpoint has no key in it, so it can go on the command line:
 railway variable set RPC_URL=https://api.devnet.solana.com --service kora-devnet --skip-deploys
 # A provider's URL carries its key: from a file (RPC_URL_FILE, kept outside the repo), never argv.
 tr -d '\n' < "$RPC_URL_FILE" | railway variable set RPC_URL --stdin --service kora-devnet --skip-deploys > /dev/null
+# Not today (see above). Once an SDK release ships a devnet key, it goes in the same way:
+# railway variable set KORA_API_KEY --stdin --service kora-devnet --skip-deploys < "$API_KEY_FILE" > /dev/null
 ```
 
 Only one of the two `RPC_URL` lines, of course. beta.8 redacts the URL's path
@@ -271,53 +288,57 @@ Railway builds `Dockerfile.devnet` and swaps the deployment in once
 ### Checking it
 
 Then check from the outside — no transaction, non-zero exit on a failure, so it
-can gate the deploy. With the key set, Kora refuses every method but `liveness`
-to an anonymous caller, `getVersion` included, so the script needs the key for
-everything after the authentication probe. Give it through the environment,
-not `--key`, which would put it in the process table:
+can gate the deploy. The devnet relayer has no key, so the check is anonymous,
+with `--allow-open`:
+
+```bash
+node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --cluster devnet --allow-open
+```
+
+`--allow-open` turns exactly the two lines an unauthenticated relayer FAILs —
+`authentication` and `fee payer policy` — into WARNs that say the flag allowed
+them; everything else is checked as before, and the flag is refused with
+`--cluster mainnet`. Without it the same run exits 1 on those two lines, which
+is the right default for any relayer that is meant to authenticate.
+
+What it should say once this config is live: `version 2.2.0-beta.8`,
+`authentication` WARN (none, allowed by `--allow-open`), every `program` line
+PASS including the Secp256r1 precompile, `lamport cap` 0.0500 SOL, `fee payer
+policy` WARN (`system.allow_transfer`, allowed by `--allow-open`), and
+`metrics` not on the RPC port. `usage limit` stays WARN whatever the file says:
+beta.8's `getConfig` does not return the usage-limit table, so the script
+cannot see it. An anonymous `getPayerSigner` should name the devnet fee payer,
+and the deploy logs should not contain the signer key.
+
+The day a key is set, run it with the key in the environment (not `--key`,
+which puts it in the process table) and without `--allow-open`; then
+`authentication` and `api key` should PASS:
 
 ```bash
 KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --cluster devnet
 ```
 
-What it should say once this config is live: `version 2.2.0-beta.8`,
-`authentication` PASS (anonymous `getConfig` refused with 401 — probe with
-`getConfig`, never `liveness`, which bypasses both auth layers by name),
-`api key` PASS, every `program` line PASS including the Secp256r1 precompile,
-and `metrics` not on the RPC port. `usage limit` stays WARN whatever the file
-says: beta.8's `getConfig` does not return the usage-limit table, so the script
-cannot see it. An authenticated `getPayerSigner` should name the devnet fee
-payer, and the deploy logs should contain neither secret.
-
 ## Still open
 
-Four things stand between this service and `kora.devnet.lazorkit.com`, and
-none of them is a change to this directory.
+Three things stand between this service and `kora.devnet.lazorkit.com`, and
+none of them is a change to this directory. Authentication and funding are
+settled; both follow the list.
 
 - **The name is still held on Railway by the old service.** Railway refuses to
   add it to this service as a custom domain — the API answers only "Failed to
   create custom domain, please try again", while another name under
-  `devnet.lazorkit.com` attaches without trouble (tried 2026-10-06). The old
-  service's account has to remove the custom domain first. Adding it here then
-  yields two records for the registrar: a CNAME to a `*.up.railway.app` target
-  and a `_railway-verify` TXT record. Railway routes nothing to the name until
-  both are in place, so set them together, at the cutover. A new name avoids
-  the old account altogether, but then the SDKs' default URL changes as well
-  as their key (next item).
-- **The SDK default sends no key** (blocks the DNS move). `PAYMASTER_URL`
-  defaults to `https://kora.devnet.lazorkit.com` in both SDKs, with no
-  `apiKey`, and the SDK sends `x-api-key` only when one is configured; the docs
-  show devnet usage with no key. That works today only because the old relayer
-  has no authentication. This one refuses every method but `liveness` without
-  its key, so the moment the name moves, every integrator on the defaults gets
-  401 on every paymaster call — and so does every app holding the old relayer's
-  key. Decide one of these before the record moves:
-  1. ship this relayer's key as the SDKs' default devnet `apiKey` (it is
-     public by design — it ships in every bundle and only identifies a
-     client), release the SDKs, update the docs examples and the apps and
-     examples that carry the old key, then move the name; or
-  2. unset `KORA_API_KEY` on this service until that release ships, accepting
-     a relayer with no authentication (like the old one) in the meantime.
+  `devnet.lazorkit.com` attaches without trouble (tried 2026-10-06). Pending:
+  the old service's owner removes the custom domain from that service. Then
+
+  ```bash
+  railway domain kora.devnet.lazorkit.com --port 8080 --service kora-devnet
+  ```
+
+  returns two records for the registrar: a CNAME for `kora.devnet` to a
+  `*.up.railway.app` target, and a `_railway-verify` TXT record. Railway routes
+  nothing to the name until both are in place, so set them together, at the
+  cutover. Because the SDK defaults send no key and this relayer asks for none,
+  integrators on the defaults need no change when the name moves.
 - **`RPC_URL` is the public devnet endpoint**, reached from Railway's shared
   egress addresses. The public endpoint rate-limits per IP, and every SDK
   user's relayer traffic (simulation, send, confirmation polling, the balance
@@ -336,9 +357,24 @@ none of them is a change to this directory.
   `signer_balance_lamports` from `kora-devnet.railway.internal:9090/metrics`
   (or `getBalance` on the fee payer) and `GET /liveness` on the public domain,
   and posts to a webhook when the balance falls below a floor (say 0.3 SOL) or
-  liveness fails; a Railway deployment webhook for crashed and failed deploys;
-  and a named source for top-ups — faucet airdrops were rate-limited on
-  2026-10-06, so the first funding came from another devnet key.
+  liveness fails; and a Railway deployment webhook for crashed and failed
+  deploys.
+
+Settled:
+
+- **Authentication: none on devnet, by decision (2026-10-06)** — see
+  [The service](#the-service). The alternative, for later: ship a devnet key
+  (or a reCAPTCHA token) as the SDKs' default, release them, then set
+  `KORA_API_KEY` here and check without `--allow-open`.
+- **Funding.** The fee payer (`4fKjmPaKh6y5yU3a1yWnPV7M5x3x4zWmuEVSVbVyPpFd`,
+  devnet only) was first funded with 1 SOL from another devnet key, then
+  topped up on 2026-10-06 with 10 devnet SOL from the devnet program's upgrade
+  authority, in transaction
+  `2mu2bjXK6NzTWGKepfjBAGcmgF7ZyXTnajJz6wiUkhmFfxH3pCPPmhSYqd3fXx21LoJY3UW4QDVF3K1jNhkrsnid`,
+  leaving it at about 10.99 SOL. Top-ups come from that key for now, with the
+  maintainer's approval; faucet airdrops were rate-limited on 2026-10-06. It
+  is devnet SOL, but the balance is still the last bound on the sponsor, so
+  the alert above is what keeps it honest.
 
 Beyond the cutover:
 

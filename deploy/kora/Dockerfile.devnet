@@ -6,7 +6,8 @@
 #
 # No secret is in the image. The environment carries them:
 #   KORA_PRIVATE_KEY  the devnet fee payer, read by signers.devnet.toml
-#   KORA_API_KEY      read by `rpc start` itself ([env: KORA_API_KEY])
+#   KORA_API_KEY      read by `rpc start` itself ([env: KORA_API_KEY]); not set
+#                     on the devnet service, by decision (README, "The service")
 #   RPC_URL           read by kora itself ([env: RPC_URL]); required here
 #   PORT              optional, 8080 when unset
 # The RPC URL stays out of argv on purpose: a provider URL can carry its key in

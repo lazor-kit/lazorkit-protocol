@@ -3,7 +3,8 @@
 # Written against kora v2.2.0-beta.8. Do not apply it to an older build: beta.7
 # parses `--api-key` and ignores it, races past usage limits under concurrency,
 # and leaks the RPC URL's query string in client-facing errors. Check what is
-# running with `getVersion`, or `scripts/kora-check.cjs <url> --cluster devnet`.
+# running with `getVersion`, or `scripts/kora-check.cjs <url> --cluster devnet
+# --allow-open` (the devnet relayer runs without an API key; see [kora.auth]).
 #
 # Same shape as kora.mainnet.toml, which carries the reasoning; this file only
 # notes where devnet deliberately differs. Keep the two in step — a devnet that
@@ -24,23 +25,37 @@
 rate_limit = 100
 
 [kora.auth]
-# Left empty on purpose — set KORA_API_KEY (and ideally KORA_HMAC_SECRET) in the
-# host's environment. An empty section here is not a safe default: with no key
-# configured anywhere, the auth layer is not mounted at all and every method
-# answers a stranger.
+# Where devnet deliberately differs (decided 2026-10-06): the devnet relayer
+# runs with NO KORA_API_KEY. With no key configured anywhere the auth layer is
+# not mounted, so every method answers a caller without `x-api-key` —
+# `getConfig` and the signing methods included. Two reasons:
+#   - Both SDKs (@lazorkit/wallet, @lazorkit/wallet-mobile-adapter) default to
+#     https://kora.devnet.lazorkit.com and send no `x-api-key`; a key here
+#     would refuse every integrator who uses the defaults.
+#   - A key that ships in a public browser or app bundle is not a secret.
+#     Everyone who reads the bundle has it, so it can cut off a client but
+#     bounds nobody.
 #
-# Be honest about what the API key buys. It ships inside a browser bundle and an
-# app bundle, so every user has it and so does anyone who reads the bundle. It
-# lets you cut off a client and raises the cost of casual abuse; it is not a
-# secret. reCAPTCHA is the control that a public dApp can actually hold, because
-# a token is minted per visitor and cannot be scraped in bulk — but only once
-# the client sends one. Kora refuses a protected method that arrives without an
-# `x-recaptcha-token` header, and neither SDK (@lazorkit/wallet,
-# @lazorkit/wallet-mobile-adapter) sends it yet, so setting
-# KORA_RECAPTCHA_SECRET with the methods below refuses every SDK transaction.
-# On devnet a key alone is defensible — the sponsor holds faucet SOL — but set
-# one, because an endpoint with no auth at all is how the current one ended up
-# open.
+# What bounds the sponsor here instead:
+#   - `require_one_of_programs`: only transactions that touch LazorKit v2
+#     (devnet) are sponsored at all;
+#   - `max_allowed_lamports`: 0.05 SOL per transaction;
+#   - `[validation.fee_payer_policy]`: everything shut except System transfer
+#     and create-account, which the protocol's own CPIs need;
+#   - the fee payer's own balance (devnet SOL, topped up as it is spent).
+# `rate_limit` is not one of them — it is per connection, see [kora].
+#
+# Mainnet is not changed by this: kora.mainnet.toml expects KORA_API_KEY.
+#
+# The day an SDK release ships a devnet key or a reCAPTCHA token, this changes.
+# A key: set KORA_API_KEY on the service, redeploy, and run
+# scripts/kora-check.cjs without --allow-open — `authentication` should then
+# PASS. A reCAPTCHA token: set KORA_RECAPTCHA_SECRET; it gates only the methods
+# below, so `getConfig` still answers anonymously and the check keeps
+# --allow-open. Either way, older SDK releases send neither and are refused from
+# that moment. Until then KORA_RECAPTCHA_SECRET stays unset: Kora refuses a
+# protected method that arrives without an `x-recaptcha-token` header, and
+# neither SDK sends one yet, so setting it refuses every SDK transaction.
 # recaptcha_score_threshold = 0.5
 protected_methods = ["signTransaction", "signAndSendTransaction"]
 
@@ -143,10 +158,11 @@ allowed_spl_paid_tokens = []
 disallowed_accounts = []
 
 # The sponsor pays; that is the product. What bounds it is
-# `require_one_of_programs` and the lamport cap above, authentication, and the
-# fee payer's own balance — not the price policy, and not `rate_limit`, which
-# is per connection (see [kora]). The usage limits are off; [kora.usage_limit]
-# below says why.
+# `require_one_of_programs` and the lamport cap above, the fee-payer policy
+# below and the fee payer's own balance (no authentication on devnet, see
+# [kora.auth]) — not the price policy, and not `rate_limit`, which is per
+# connection (see [kora]). The usage limits are off; [kora.usage_limit] below
+# says why.
 [validation.price]
 type = "free"
 
@@ -237,9 +253,10 @@ blocked_account_extensions = []
 # it would key on is a string the caller chooses: it bounds integrators who
 # send a stable id, not a caller who varies it.
 #
-# Meanwhile a stranger is bounded by `require_one_of_programs`, authentication,
-# `max_allowed_lamports`, and the fee payer's balance (`rate_limit` is per
-# connection, so it is not one of them). On devnet that balance is faucet SOL;
+# Meanwhile a stranger is bounded by `require_one_of_programs`,
+# `max_allowed_lamports`, the fee-payer policy and the fee payer's balance —
+# not by authentication, which devnet runs without (see [kora.auth]), and not by
+# `rate_limit`, which is per connection. On devnet that balance is devnet SOL;
 # keep it modest anyway and watch [metrics.fee_payer_balance], because this is
 # the rehearsal.
 #

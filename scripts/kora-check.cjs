@@ -13,8 +13,16 @@
 // through KORA_API_KEY in the environment; `--key` works too, but puts it in
 // the process table and the shell history.
 //
+// `--allow-open` is for a relayer that runs without authentication on purpose
+// — the devnet relayer, by decision on 2026-10-06 (deploy/kora/README.md). It
+// turns exactly the two open-relayer FAILs, `authentication` and the
+// `fee payer policy` line, into WARNs that say the flag allowed them; nothing
+// else changes. Devnet only: with `--cluster mainnet` it is refused, because a
+// mainnet relayer has to authenticate.
+//
 //   KORA_API_KEY=... node scripts/kora-check.cjs <url> [--cluster mainnet|devnet]
 //   node scripts/kora-check.cjs <url> [--cluster mainnet|devnet] [--key <api key>]
+//   node scripts/kora-check.cjs <url> --cluster devnet --allow-open
 //
 // Exit code is 1 if anything FAILs, so it can gate a deploy.
 'use strict';
@@ -84,11 +92,16 @@ function main() {
   const url = args.find((a) => !a.startsWith('--'));
   const cluster = args.includes('--cluster') ? args[args.indexOf('--cluster') + 1] : 'devnet';
   const apiKey = args.includes('--key') ? args[args.indexOf('--key') + 1] : process.env.KORA_API_KEY;
+  const allowOpen = args.includes('--allow-open');
   if (!url || !LAZORKIT[cluster]) {
-    console.error('usage: kora-check.cjs <url> [--cluster mainnet|devnet] [--key <api key>]');
+    console.error('usage: kora-check.cjs <url> [--cluster mainnet|devnet] [--key <api key>] [--allow-open]');
     process.exit(2);
   }
-  return run(url, cluster, apiKey);
+  if (allowOpen && cluster !== 'devnet') {
+    console.error('--allow-open is for --cluster devnet only; a mainnet relayer has to authenticate');
+    process.exit(2);
+  }
+  return run(url, cluster, apiKey, allowOpen);
 }
 
 let failures = 0;
@@ -102,8 +115,8 @@ const line = (state, label, detail) => {
 // depend on; newer ones we simply have not checked.
 const EXPECTED_VERSION = '2.2.0-beta.8';
 
-async function run(url, cluster, apiKey) {
-  console.log(`${url}  (${cluster})\n`);
+async function run(url, cluster, apiKey, allowOpen) {
+  console.log(`${url}  (${cluster}${allowOpen ? ', --allow-open' : ''})\n`);
 
   // 0. Which build is answering. Sent with the key when there is one: an
   //    authenticated beta.8 refuses `getVersion` to an anonymous caller (401),
@@ -124,7 +137,11 @@ async function run(url, cluster, apiKey) {
   const anonymous = await rpc(url, 'getConfig');
   const authed = apiKey ? await rpc(url, 'getConfig', apiKey) : null;
   if (anonymous.status === 200 && anonymous.json?.result) {
-    line(false, 'authentication', 'none — getConfig answers a stranger with no x-api-key');
+    line(
+      allowOpen ? 'warn' : false,
+      'authentication',
+      'none — getConfig answers a stranger with no x-api-key' + (allowOpen ? ' (allowed by --allow-open)' : ''),
+    );
   } else if (anonymous.status === 401) {
     line(true, 'authentication', 'anonymous getConfig is refused (401)');
     if (authed && authed.status !== 200) {
@@ -209,13 +226,15 @@ async function run(url, cluster, apiKey) {
   );
   const openRelayer = anonymous.status === 200 && !!anonymous.json?.result;
   line(
-    drains.length === 0 ? true : openRelayer ? false : 'warn',
+    drains.length === 0 ? true : openRelayer ? (allowOpen ? 'warn' : false) : 'warn',
     'fee payer policy',
     drains.length === 0
       ? 'the payer cannot be the source of a transfer'
       : `${drains.join(', ')}` +
         (openRelayer
-          ? ` — with no authentication, anyone can spend up to the cap per transaction, repeatedly`
+          ? allowOpen
+            ? ' — no authentication (allowed by --allow-open): bounded by require_one_of_programs, the cap and the payer balance'
+            : ' — with no authentication, anyone can spend up to the cap per transaction, repeatedly'
           : ' — bounded by authentication, the cap and the payer balance'),
   );
 
