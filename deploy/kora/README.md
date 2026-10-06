@@ -1,22 +1,25 @@
 # Kora paymaster config
 
 The relayer sponsors every user transaction, so it is on the critical path and
-none of it is visible from the program. These two files are the configuration
-that protocol v2 needs; the reasoning for each value is in the comments, and the
-findings behind them are in
+none of it is visible from the program. The two `kora.*.toml` files are the
+configuration that protocol v2 needs; the reasoning for each value is in the
+comments, and the findings behind them are in
 [`docs/mainnet-deploy-checklist.md`](../../docs/mainnet-deploy-checklist.md#paymaster-kora).
 
 | file | for |
 |---|---|
 | [`kora.mainnet.toml`](./kora.mainnet.toml) | mainnet, v2 program `LazorFroi…` (v1 `LazorjRF…` only once it runs the sunset binary) |
 | [`kora.devnet.toml`](./kora.devnet.toml) | devnet, v2 program `57bTNW…` (v1 `4h3XoNRe…` only once it runs the sunset binary) |
+| [`Dockerfile.devnet`](./Dockerfile.devnet) | the devnet relayer's image: the pinned beta.8 image with `kora.devnet.toml` and `signers.devnet.toml` baked in — see [Applying it on Railway](#applying-it-on-railway) |
+| [`signers.devnet.toml`](./signers.devnet.toml) | the devnet relayer's signer: one memory signer read from `KORA_PRIVATE_KEY` |
 
-Written against **kora v2.2.0-beta.8**. The devnet relayer answered
+Written against **kora v2.2.0-beta.8**. The old devnet relayer answered
 `2.2.0-beta.7` on 2026-09-24, which is a release behind and missing fixes these
 files rely on: the `--api-key` flag being applied at all, URL redaction in
 client-facing errors, and atomic usage limits (which matter again once usage
-limits are turned back on — they are off for now, see below). Upgrade first:
-`ghcr.io/solana-foundation/kora:v2.2.0-beta.8`.
+limits are turned back on — they are off for now, see below). Its replacement
+runs `ghcr.io/solana-foundation/kora:v2.2.0-beta.8`, pinned by digest in
+`Dockerfile.devnet`.
 
 ## What actually bounds the spend
 
@@ -108,7 +111,7 @@ None of them live in these files. The host's environment carries:
 | `KORA_API_KEY` | the `x-api-key` value; with none set **the auth layer is not mounted at all** |
 | `KORA_HMAC_SECRET` | optional second factor; when both are set, both are required |
 | `KORA_RECAPTCHA_SECRET` | reCAPTCHA v3 secret, with `protected_methods` naming what it gates. Leave unset until the SDKs send `x-recaptcha-token` (see above) |
-| `KORA_PRIVATE_KEY` | the fee payer, per `signers.toml` |
+| `KORA_PRIVATE_KEY` | the fee payer, per the signers file (`signers.devnet.toml` on devnet): the key itself, base58 or `[u8, ...]`, not a path |
 | `KORA_REDIS_URL` | only once usage limits are back on (or `[kora.cache]` is): their shared store. With both off, as now, nothing reads it |
 
 Never pass the key as `--api-key` on a command line: on beta.7 the flag is
@@ -170,8 +173,12 @@ rules are present but unused. When they are turned back on, expect two more:
 
 ## Applying it on Railway
 
-The relayer runs as a Railway service (`kora.devnet.lazorkit.com` →
-`58btamsd.up.railway.app`).
+Devnet runs as the Railway service `kora-devnet` in the project
+`lazorkit-kora-devnet`, built from [`Dockerfile.devnet`](./Dockerfile.devnet)
+with this directory as the build context, and signing with a fee payer that
+exists only on devnet. History: until 2026-10-06 devnet was served by an older
+service on another Railway account (`kora.devnet.lazorkit.com` →
+`58btamsd.up.railway.app`), which ran beta.7 and allowed only the v1 program.
 
 There is no way to hand Kora a config through the environment: the path comes
 only from the global `--config <PATH>` flag (default `kora.toml`, resolved
@@ -186,22 +193,90 @@ top-level flag and must come **before** the subcommand
 (`kora --config /cfg/kora.mainnet.toml rpc start`), and a config that fails to
 load exits 1 immediately with no partial start and no fallback.
 
-Set the environment variables above in the Railway service, ship the file in the
-image, and redeploy.
+### The image
 
-Then check from the outside — no key, no transaction, non-zero exit on a
-failure, so it can gate the deploy:
+`Dockerfile.devnet` starts from the beta.8 image pinned by its multi-arch index
+digest, copies `kora.devnet.toml` (unchanged) and `signers.devnet.toml` into
+`/app`, drops to `nobody`, and runs
+
+```sh
+kora --config /app/kora.devnet.toml rpc start --port "${PORT:-8080}" --signers-config /app/signers.devnet.toml
+```
+
+through `sh -c` with `exec`, so Kora is PID 1 and gets the platform's SIGTERM.
+`rpc start` has no environment variable for the port, hence the shell. The RPC
+URL is not on that line: Kora reads `RPC_URL` from the environment itself,
+which keeps a provider URL (and any key in its query string) out of the process
+table. Without `RPC_URL` Kora would quietly fall back to
+`http://127.0.0.1:8899`, so the command refuses to start instead. Kora binds
+`0.0.0.0`, so the platform's proxy reaches it.
+
+A mainnet relayer would sit beside it as `Dockerfile.mainnet` and
+`signers.mainnet.toml`, from the same build context.
+
+### The service
+
+| variable | value |
+|---|---|
+| `RAILWAY_DOCKERFILE_PATH` | `Dockerfile.devnet` — this directory holds no file named `Dockerfile`, so the build needs telling |
+| `KORA_PRIVATE_KEY` | the devnet fee payer, as the `[u8, ...]` content of its keypair file. Never the mainnet relayer key |
+| `KORA_API_KEY` | a random string; clients send it as `x-api-key` |
+| `RPC_URL` | `https://api.devnet.solana.com`, or a provider's devnet URL |
+| `PORT` | `8080`; optional, it is the default |
+
+`KORA_REDIS_URL` is not set: with usage limits and `[kora.cache]` both off,
+nothing reads it. Set it before turning either on.
+
+Put the two secrets in from stdin, so they never sit on a command line or in
+shell history, and keep the output of anything that prints variable values off
+the screen (`railway variable list --json` and `--kv` print them raw):
 
 ```bash
-node scripts/kora-check.cjs https://kora.devnet.lazorkit.com --cluster devnet
+# FEE_PAYER_KEYPAIR and API_KEY_FILE are paths to the two files, kept outside the repo
+tr -d ' \n' < "$FEE_PAYER_KEYPAIR" | railway variable set KORA_PRIVATE_KEY --stdin --service kora-devnet --skip-deploys > /dev/null
+railway variable set KORA_API_KEY --stdin --service kora-devnet --skip-deploys < "$API_KEY_FILE" > /dev/null
+railway variable set RPC_URL=https://api.devnet.solana.com PORT=8080 RAILWAY_DOCKERFILE_PATH=Dockerfile.devnet --service kora-devnet --skip-deploys
+```
+
+Settings that are not variables: the **healthcheck path is `/liveness`**, which
+answers 200 with or without a key (it bypasses both auth layers by name, so it
+says the process is up and nothing about authentication), and the public domain
+is a generated `*.up.railway.app` one targeting port **8080**. The metrics port
+(9090) gets no domain or TCP proxy, so `signer_balance_lamports` is not
+reachable from the internet.
+
+### Deploying
+
+Deploy this directory as the archive root, from the repository root:
+
+```bash
+railway up deploy/kora --path-as-root --service kora-devnet --detach
+```
+
+Railway builds `Dockerfile.devnet` and swaps the deployment in once
+`/liveness` answers. A config change is the same command after editing
+`kora.devnet.toml`; a secret change is a variable edit and a redeploy.
+
+### Checking it
+
+Then check from the outside — no transaction, non-zero exit on a failure, so it
+can gate the deploy. With the key set, Kora refuses every method but `liveness`
+to an anonymous caller, `getVersion` included, so the script needs the key for
+everything after the authentication probe. Give it through the environment,
+not `--key`, which would put it in the process table:
+
+```bash
+KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs https://<service>.up.railway.app --cluster devnet
 ```
 
 What it should say once this config is live: `version 2.2.0-beta.8`,
 `authentication` PASS (anonymous `getConfig` refused with 401 — probe with
-`getConfig`, never `liveness`, which bypasses both auth layers by name), every
-`program` line PASS including the Secp256r1 precompile, and `metrics` not on the
-RPC port. `usage limit` stays WARN whatever the file says: beta.8's `getConfig`
-does not return the usage-limit table, so the script cannot see it.
+`getConfig`, never `liveness`, which bypasses both auth layers by name),
+`api key` PASS, every `program` line PASS including the Secp256r1 precompile,
+and `metrics` not on the RPC port. `usage limit` stays WARN whatever the file
+says: beta.8's `getConfig` does not return the usage-limit table, so the script
+cannot see it. An authenticated `getPayerSigner` should name the devnet fee
+payer, and the deploy logs should contain neither secret.
 
 ## Still open
 
