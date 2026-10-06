@@ -278,11 +278,13 @@ end — see [Two-id rehearsal](#two-id-rehearsal).
 - [ ] Relayer: **a new service at a new URL**, running
       `deploy/kora/kora.mainnet.toml` (v2 id only), with its own thin-funded
       signer. Pass `scripts/kora-check.cjs <new-url> --cluster mainnet` with no
-      FAIL. **Do not edit the relayer v1 apps use today.** Its config is not in
-      any repo and Seedless sponsors through it; narrowing its allowlist to the
-      v2 id refuses every v1 transaction from that moment — the flag day phase A
-      exists to avoid. Before anything else, record its current `getConfig` and
-      which apps call it, in the deploy log.
+      FAIL, with the relayer's key in `KORA_API_KEY` (an authenticated relayer
+      refuses the script's later probes without it). **Do not edit the relayer
+      v1 apps use today.** Its config is not in any repo and Seedless sponsors
+      through it; narrowing its allowlist to the v2 id refuses every v1
+      transaction from that moment — the flag day phase A exists to avoid.
+      Before anything else, record its current `getConfig` and which apps call
+      it, in the deploy log.
 - [ ] Publish the SDKs whose `PROGRAM_ID_MAINNET` is the v2 id, then move
       `latest` to them. Pinned `^0.3` users — Seedless — are not moved by that.
       Any wrapper that switches to sdk-legacy 1.x (`@lazorkit/wallet`) ships it
@@ -813,18 +815,24 @@ with an SDK change; the steps are in
 Meanwhile how much SOL the sponsor holds carries more of the weight — see the
 funding item under "Config gates for v2".
 
-Check any relayer against all of this from the outside, with no key and no
-transaction:
+Check any relayer against all of this from the outside, with no transaction.
+The first probe is always anonymous; after it, a relayer with authentication on
+needs the key — on beta.8 it refuses every method but `liveness` to a stranger,
+`getVersion` included, so a keyless run against a correctly configured relayer
+FAILs with `no config readable (401)`. Give the key through the environment, not
+`--key`, which puts it in the process table:
 
 ```bash
-node scripts/kora-check.cjs https://kora.devnet.lazorkit.com --cluster devnet
+KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs <relayer-url> --cluster devnet
 ```
 
-It exits non-zero on a FAIL, so it can gate a deploy. Today that endpoint
-returns three: no authentication, no Secp256r1 precompile in `allowed_programs`,
-and the fee-payer policy above on an unauthenticated host. Its `usage limit`
-line is a WARN on any beta.8 relayer: `getConfig` there does not return the
-usage-limit table, so the script cannot tell on from off.
+It exits non-zero on a FAIL, so it can gate a deploy. Against
+`https://kora.devnet.lazorkit.com`, while that name still points at the old
+relayer (beta.7, no authentication, so no key is needed there), it returns
+three: no authentication, no Secp256r1 precompile in `allowed_programs`, and
+the fee-payer policy above on an unauthenticated host. Its `usage limit` line is a
+WARN on any beta.8 relayer: `getConfig` there does not return the usage-limit
+table, so the script cannot tell on from off.
 
 ### The key that leaked
 

@@ -223,8 +223,9 @@ A mainnet relayer would sit beside it as `Dockerfile.mainnet` and
 | `RAILWAY_DOCKERFILE_PATH` | `Dockerfile.devnet` — this directory holds no file named `Dockerfile`, so the build needs telling |
 | `KORA_PRIVATE_KEY` | the devnet fee payer, as the `[u8, ...]` content of its keypair file. Never the mainnet relayer key |
 | `KORA_API_KEY` | a random string; clients send it as `x-api-key` |
-| `RPC_URL` | `https://api.devnet.solana.com`, or a provider's devnet URL |
+| `RPC_URL` | `https://api.devnet.solana.com` today; a provider's devnet URL before it carries SDK traffic (see [Still open](#still-open)). A provider URL carries its key, so it goes in from stdin like the two secrets |
 | `PORT` | `8080`; optional, it is the default |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `45`. On a redeploy Railway sends the old deployment SIGTERM and, by default, SIGKILL straight after (0 s). beta.8's shutdown waits up to 10 s for the RPC server to stop and up to 30 s for in-flight broadcasts, and `signAndSendTransaction` answers only once the transaction is confirmed — so with no draining time a request in flight during a redeploy is cut off while its transaction may still land |
 
 `KORA_REDIS_URL` is not set: with usage limits and `[kora.cache]` both off,
 nothing reads it. Set it before turning either on.
@@ -237,8 +238,16 @@ the screen (`railway variable list --json` and `--kv` print them raw):
 # FEE_PAYER_KEYPAIR and API_KEY_FILE are paths to the two files, kept outside the repo
 tr -d ' \n' < "$FEE_PAYER_KEYPAIR" | railway variable set KORA_PRIVATE_KEY --stdin --service kora-devnet --skip-deploys > /dev/null
 railway variable set KORA_API_KEY --stdin --service kora-devnet --skip-deploys < "$API_KEY_FILE" > /dev/null
-railway variable set RPC_URL=https://api.devnet.solana.com PORT=8080 RAILWAY_DOCKERFILE_PATH=Dockerfile.devnet --service kora-devnet --skip-deploys
+railway variable set PORT=8080 RAILWAY_DOCKERFILE_PATH=Dockerfile.devnet RAILWAY_DEPLOYMENT_DRAINING_SECONDS=45 --service kora-devnet --skip-deploys
+# The public endpoint has no key in it, so it can go on the command line:
+railway variable set RPC_URL=https://api.devnet.solana.com --service kora-devnet --skip-deploys
+# A provider's URL carries its key: from a file (RPC_URL_FILE, kept outside the repo), never argv.
+tr -d '\n' < "$RPC_URL_FILE" | railway variable set RPC_URL --stdin --service kora-devnet --skip-deploys > /dev/null
 ```
+
+Only one of the two `RPC_URL` lines, of course. beta.8 redacts the URL's path
+and query in client-facing errors, and the Dockerfile keeps it off the command
+line, so a keyed URL stays out of responses and the process table.
 
 Settings that are not variables: the **healthcheck path is `/liveness`**, which
 answers 200 with or without a key (it bypasses both auth layers by name, so it
@@ -281,6 +290,57 @@ cannot see it. An authenticated `getPayerSigner` should name the devnet fee
 payer, and the deploy logs should contain neither secret.
 
 ## Still open
+
+Four things stand between this service and `kora.devnet.lazorkit.com`, and
+none of them is a change to this directory.
+
+- **The name is still held on Railway by the old service.** Railway refuses to
+  add it to this service as a custom domain — the API answers only "Failed to
+  create custom domain, please try again", while another name under
+  `devnet.lazorkit.com` attaches without trouble (tried 2026-10-06). The old
+  service's account has to remove the custom domain first. Adding it here then
+  yields two records for the registrar: a CNAME to a `*.up.railway.app` target
+  and a `_railway-verify` TXT record. Railway routes nothing to the name until
+  both are in place, so set them together, at the cutover. A new name avoids
+  the old account altogether, but then the SDKs' default URL changes as well
+  as their key (next item).
+- **The SDK default sends no key** (blocks the DNS move). `PAYMASTER_URL`
+  defaults to `https://kora.devnet.lazorkit.com` in both SDKs, with no
+  `apiKey`, and the SDK sends `x-api-key` only when one is configured; the docs
+  show devnet usage with no key. That works today only because the old relayer
+  has no authentication. This one refuses every method but `liveness` without
+  its key, so the moment the name moves, every integrator on the defaults gets
+  401 on every paymaster call — and so does every app holding the old relayer's
+  key. Decide one of these before the record moves:
+  1. ship this relayer's key as the SDKs' default devnet `apiKey` (it is
+     public by design — it ships in every bundle and only identifies a
+     client), release the SDKs, update the docs examples and the apps and
+     examples that carry the old key, then move the name; or
+  2. unset `KORA_API_KEY` on this service until that release ships, accepting
+     a relayer with no authentication (like the old one) in the meantime.
+- **`RPC_URL` is the public devnet endpoint**, reached from Railway's shared
+  egress addresses. The public endpoint rate-limits per IP, and every SDK
+  user's relayer traffic (simulation, send, confirmation polling, the balance
+  poll) would come from those addresses. It has already served a stale read:
+  on 2026-10-06 Kora's balance poll reported the freshly funded fee payer as
+  not found, minutes after its funding finalized. On the signing path the same
+  stale read refuses a valid transaction. Move to a provider's devnet URL (from
+  stdin, [above](#the-service)) before the name moves; the old relayer used a
+  keyed provider.
+- **Nothing watches it.** `[metrics.fee_payer_balance]` is on, but nothing
+  scrapes port 9090; Railway's healthcheck runs only at deploy time, and there
+  is one replica. When the fee payer runs dry, or a crash loop uses up the
+  restart policy, sponsorship fails for every devnet SDK user and nobody is
+  told. Before the name moves, add a small scheduled check (a Railway cron
+  service in this project, or a scheduled GitHub Action) that reads
+  `signer_balance_lamports` from `kora-devnet.railway.internal:9090/metrics`
+  (or `getBalance` on the fee payer) and `GET /liveness` on the public domain,
+  and posts to a webhook when the balance falls below a floor (say 0.3 SOL) or
+  liveness fails; a Railway deployment webhook for crashed and failed deploys;
+  and a named source for top-ups — faucet airdrops were rate-limited on
+  2026-10-06, so the first funding came from another devnet key.
+
+Beyond the cutover:
 
 - **Lighthouse** (`[kora.lighthouse]`) appends balance assertions that abort a
   transaction if the fee payer loses more than expected — the most direct
