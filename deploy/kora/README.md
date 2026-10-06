@@ -297,9 +297,12 @@ node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --clus
 
 `--allow-open` turns exactly the two lines an unauthenticated relayer FAILs —
 `authentication` and `fee payer policy` — into WARNs that say the flag allowed
-them; everything else is checked as before, and the flag is refused with
-`--cluster mainnet`. Without it the same run exits 1 on those two lines, which
-is the right default for any relayer that is meant to authenticate.
+them, and only while `getConfig` shows `require_one_of_programs` naming nothing
+but the LazorKit program (the bound the decision rests on; otherwise both stay
+FAIL and say why). Everything else is checked as before, and the flag is
+refused with `--cluster mainnet`. Without it the same run exits 1 on those two
+lines, which is the right default for any relayer that is meant to
+authenticate.
 
 What it should say once this config is live: `version 2.2.0-beta.8`,
 `authentication` WARN (none, allowed by `--allow-open`), every `program` line

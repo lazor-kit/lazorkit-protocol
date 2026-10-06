@@ -830,7 +830,8 @@ KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs <relayer-url> 
 The devnet relayer on Railway runs without a key, by decision (2026-10-06,
 [`deploy/kora/README.md`](../deploy/kora/README.md#the-service)), so it is
 checked anonymously with `--allow-open`, which turns exactly its two
-open-relayer FAILs (`authentication`, `fee payer policy`) into WARNs and is
+open-relayer FAILs (`authentication`, `fee payer policy`) into WARNs — only
+while `require_one_of_programs` names nothing but the LazorKit program — and is
 refused with `--cluster mainnet`:
 
 ```bash

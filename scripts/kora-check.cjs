@@ -17,8 +17,11 @@
 // — the devnet relayer, by decision on 2026-10-06 (deploy/kora/README.md). It
 // turns exactly the two open-relayer FAILs, `authentication` and the
 // `fee payer policy` line, into WARNs that say the flag allowed them; nothing
-// else changes. Devnet only: with `--cluster mainnet` it is refused, because a
-// mainnet relayer has to authenticate.
+// else changes. It does so only while `getConfig` shows
+// `require_one_of_programs` naming nothing but the LazorKit program, the bound
+// that decision rests on; otherwise the two lines stay FAIL and say why.
+// Devnet only: with `--cluster mainnet` it is refused, because a mainnet
+// relayer has to authenticate.
 //
 //   KORA_API_KEY=... node scripts/kora-check.cjs <url> [--cluster mainnet|devnet]
 //   node scripts/kora-check.cjs <url> [--cluster mainnet|devnet] [--key <api key>]
@@ -136,12 +139,20 @@ async function run(url, cluster, apiKey, allowOpen) {
   //    it proves nothing; `getConfig` is the honest probe.
   const anonymous = await rpc(url, 'getConfig');
   const authed = apiKey ? await rpc(url, 'getConfig', apiKey) : null;
+  // What --allow-open rests on: every sponsored transaction has to touch
+  // LazorKit. A gate that also names another program (System, say) lets a
+  // transaction through on that one alone.
+  const gate = (anonymous.json?.result?.validation_config ?? anonymous.json?.result?.validation ?? {}).require_one_of_programs;
+  const gated =
+    Array.isArray(gate) && gate.length > 0 && gate.every((p) => p === LAZORKIT[cluster] || p === LAZORKIT_V1[cluster]);
+  const allowed = allowOpen && gated;
+  const allowNote = allowOpen
+    ? gated
+      ? ' (allowed by --allow-open)'
+      : ' (--allow-open not applied: require_one_of_programs does not name only the LazorKit program)'
+    : '';
   if (anonymous.status === 200 && anonymous.json?.result) {
-    line(
-      allowOpen ? 'warn' : false,
-      'authentication',
-      'none — getConfig answers a stranger with no x-api-key' + (allowOpen ? ' (allowed by --allow-open)' : ''),
-    );
+    line(allowed ? 'warn' : false, 'authentication', 'none — getConfig answers a stranger with no x-api-key' + allowNote);
   } else if (anonymous.status === 401) {
     line(true, 'authentication', 'anonymous getConfig is refused (401)');
     if (authed && authed.status !== 200) {
@@ -226,15 +237,15 @@ async function run(url, cluster, apiKey, allowOpen) {
   );
   const openRelayer = anonymous.status === 200 && !!anonymous.json?.result;
   line(
-    drains.length === 0 ? true : openRelayer ? (allowOpen ? 'warn' : false) : 'warn',
+    drains.length === 0 ? true : openRelayer ? (allowed ? 'warn' : false) : 'warn',
     'fee payer policy',
     drains.length === 0
       ? 'the payer cannot be the source of a transfer'
       : `${drains.join(', ')}` +
         (openRelayer
-          ? allowOpen
+          ? allowed
             ? ' — no authentication (allowed by --allow-open): bounded by require_one_of_programs, the cap and the payer balance'
-            : ' — with no authentication, anyone can spend up to the cap per transaction, repeatedly'
+            : ' — with no authentication, anyone can spend up to the cap per transaction, repeatedly' + allowNote
           : ' — bounded by authentication, the cap and the payer balance'),
   );
 
