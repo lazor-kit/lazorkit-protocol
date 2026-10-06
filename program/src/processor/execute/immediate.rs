@@ -29,7 +29,7 @@ use pinocchio::{
 ///
 /// # Logic:
 /// 1. **Authentication**: Verifies that the signer is a valid `Authority` or `Session` for this wallet.
-/// 2. **Session Checks**: If authenticated via Session, enforces slot expiry and action permissions.
+/// 2. **Session Checks**: If authenticated via Session, enforces expiry (Unix time) and action permissions.
 /// 3. **Decompression**: Expands `CompactInstructions` (index-based references) into full Solana instructions.
 /// 4. **Execution**: Invokes the Instructions via CPI, signing with the Vault PDA.
 /// 5. **Vault invariants**: unless the signer is an Owner, the vault and its
@@ -135,9 +135,10 @@ pub fn process(
     // knows — is held to the vault invariants below.
     let mut signer_is_owner = false;
 
-    // One clock read for both branches — policy evaluation needs the slot
-    // whether the caller is a session or a policy-bearing authority.
-    let current_slot = Clock::get()?.slot;
+    // One clock read for both branches — session expiry and policy evaluation
+    // both need the time, whether the caller is a session or a policy-bearing
+    // authority. Unix seconds, not slots: see `utils::unix_now`.
+    let now = crate::utils::unix_now(&Clock::get()?)?;
 
     // Bound to the enum rather than to numeric literals. The v1 code matched on
     // bare `2` and `3`, which silently stopped matching anything the moment the
@@ -217,8 +218,9 @@ pub fn process(
                 return Err(ProgramError::InvalidAccountData);
             }
 
-            // Verify Expiry
-            if current_slot > session.expires_at {
+            // Verify Expiry. A session written before time-based expiry holds
+            // a slot here, which as a time is long past: refused.
+            if !crate::state::session::is_live(session.expires_at, now) {
                 return Err(AuthError::SessionExpired.into());
             }
 
@@ -244,13 +246,7 @@ pub fn process(
     // Pre-CPI policy checks (program whitelist/blacklist), for a session with
     // actions or an authority with a policy alike.
     if let Some(loc) = policy {
-        evaluate_pre_actions(
-            authority_data,
-            loc,
-            &compact_instructions,
-            accounts,
-            current_slot,
-        )?;
+        evaluate_pre_actions(authority_data, loc, &compact_instructions, accounts, now)?;
     }
 
     // Get vault bump for signing
@@ -408,7 +404,7 @@ pub fn process(
             vault_pda.lamports(),
             vault_lamports_gross_out,
             &flows,
-            current_slot,
+            now,
         )?;
     }
 

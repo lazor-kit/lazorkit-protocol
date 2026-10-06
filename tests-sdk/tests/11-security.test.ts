@@ -25,6 +25,7 @@ import {
   getSlot,
   PROGRAM_ID_DEVNET,
   type TestContext,
+  getUnixTime,
 } from './common';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
@@ -113,7 +114,7 @@ describe('Security', () => {
       const counterBefore = await client.readCounter(ownerAuthPda);
 
       const sessionKp = Keypair.generate();
-      const currentSlot = await getSlot(ctx);
+      const now = await getUnixTime(ctx);
 
       const prepared = await client.prepareCreateSession({
         payer: ctx.payer.publicKey,
@@ -124,7 +125,7 @@ describe('Security', () => {
           authorityPda: ownerAuthPda,
         },
         sessionKey: sessionKp.publicKey,
-        expiresAt: currentSlot + 9000n,
+        expiresAt: now + 3_600n,
         // Deliberately unrestricted: this test exercises the actionless session.
         unrestricted: true,
       });

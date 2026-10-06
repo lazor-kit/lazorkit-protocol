@@ -27,6 +27,7 @@ import {
   PublicKey,
   SolanaJSONRPCError,
   SystemProgram,
+  SYSVAR_CLOCK_PUBKEY,
   TransactionInstruction,
   type AccountInfo,
 } from '@solana/web3.js';
@@ -65,8 +66,8 @@ import {
   type WalletFacts,
 } from '../../sdk/sdk-legacy/src';
 import CHALLENGE_DOMAINS from '../../test-vectors/challenge-domains.json';
-import { setupTest, sendTx, sendTxExpectError, getSlot, type TestContext } from './common';
-import { contextual } from './contextReads';
+import { setupTest, sendTx, sendTxExpectError, type TestContext, getUnixTime } from './common';
+import { clockAccount, contextual, STUB_UNIX_TIME } from './contextReads';
 import {
   generateMockSecp256r1Key,
   createMockRawSigner,
@@ -495,6 +496,7 @@ function facts(p: Partial<WalletFacts> & { walletPda?: PublicKey }): WalletFacts
     publicKey: new Uint8Array(33),
     lamports: 0,
     slot: 100n,
+    unixTimestamp: 1_791_072_000n,
     otherAuthorities: [],
     liveSessions: [],
     pendingDeferred: [],
@@ -778,6 +780,10 @@ function chainStub(
         : 'deferred';
   const connection = {
     getSlot: async () => now,
+    getAccountInfo: async (key: PublicKey) => {
+      if (!key.equals(SYSVAR_CLOCK_PUBKEY)) throw new Error(`stub: no getAccountInfo for ${key.toBase58()}`);
+      return clockAccount(now);
+    },
     getMultipleAccountsInfoAndContext: async (keys: PublicKey[], config?: { minContextSlot?: number }) => {
       const { state, context } = serve('accounts', config?.minContextSlot);
       return { context, value: keys.map((k) => state.accounts?.[k.toBase58()] ?? null) };
@@ -906,6 +912,7 @@ describe('findPasskeyWalletCandidates (stubbed RPC)', () => {
 
 describe('describeWalletCandidates (stubbed RPC)', () => {
   const SLOT = 1_000n;
+  const UNIX = STUB_UNIX_TIME;
   const wallet = randomKey();
   const ownAuthority = randomKey();
   const ownKey = new Uint8Array(33).fill(7);
@@ -960,6 +967,7 @@ describe('describeWalletCandidates (stubbed RPC)', () => {
     const liveSession = randomKey();
     const lastSlotSession = randomKey();
     const shortSession = randomKey();
+    const slotValuedSession = randomKey();
     const byOwn = randomKey();
     const byStranger = randomKey();
     const lastSlotDeferred = randomKey();
@@ -972,13 +980,19 @@ describe('describeWalletCandidates (stubbed RPC)', () => {
         account(otherRpPasskey, passkeyAuthorityData(ACCOUNT_DISCRIMINATOR.AUTHORITY, wallet, { rpId: 'other.example' })),
         account(shortAuthority, ed25519AuthorityData(ACCOUNT_DISCRIMINATOR.AUTHORITY, wallet, backendKey).subarray(0, 60)),
       ],
+      // A v2 session expires by Unix time (UNIX), a deferred execution by slot.
       [ACCOUNT_DISCRIMINATOR.SESSION]: [
+        account(randomKey(), sessionData(wallet, randomKey(), UNIX - 1n)), // expired
+        // The program refuses only once the clock is past expires_at: this
+        // one can still sign in this second.
+        account(lastSlotSession, sessionData(wallet, randomKey(), UNIX)),
+        account(liveSession, sessionData(wallet, sessionKey, UNIX + 1n)),
+        account(shortSession, sessionData(wallet, sessionKey, UNIX + 1n).subarray(0, 79)),
+        // Written before time-based expiry, its expiry is a slot. A cluster
+        // still on a slot-based build accepts it until that slot passes, so it
+        // counts until then; one whose slot has passed does not.
+        account(slotValuedSession, sessionData(wallet, randomKey(), SLOT + 50_000n)),
         account(randomKey(), sessionData(wallet, randomKey(), SLOT - 1n)), // expired
-        // The program refuses only once current_slot > expires_at: this one
-        // can still sign in this slot.
-        account(lastSlotSession, sessionData(wallet, randomKey(), SLOT)),
-        account(liveSession, sessionData(wallet, sessionKey, SLOT + 1n)),
-        account(shortSession, sessionData(wallet, sessionKey, SLOT + 1n).subarray(0, 79)),
       ],
       [ACCOUNT_DISCRIMINATOR.DEFERRED_EXEC]: [
         account(byOwn, deferredData(wallet, ownAuthority, SLOT + 10n)),
@@ -994,13 +1008,14 @@ describe('describeWalletCandidates (stubbed RPC)', () => {
     expect(f.walletPda.equals(wallet)).toBe(true);
     expect(f.lamports).toBe(42);
     expect(f.slot).toBe(SLOT);
+    expect(f.unixTimestamp).toBe(UNIX);
     expect(f.vaultIsSystemAccount).toBe(true);
     // Read off this passkey's own authority.
     expect(f.signatureCount).toBe(3);
     // The same fields, in the same order, as @lazorkit/sdk's WalletFacts.
     expect(Object.keys(f)).toEqual([
       'version', 'programId', 'walletPda', 'vaultPda', 'authorityPda', 'publicKey',
-      'lamports', 'slot', 'otherAuthorities', 'liveSessions', 'pendingDeferred',
+      'lamports', 'slot', 'unixTimestamp', 'otherAuthorities', 'liveSessions', 'pendingDeferred',
       'vaultIsSystemAccount', 'tokenGrants', 'controlledAlone', 'signatureCount',
     ]);
 
@@ -1018,15 +1033,16 @@ describe('describeWalletCandidates (stubbed RPC)', () => {
     expect(others.get(shortAuthority.toBase58())).toMatchObject({ type: 'ed25519', trusted: false, publicKey: undefined });
 
     expect(f.liveSessions.map((s) => s.sessionPda.toBase58()).sort()).toEqual(
-      [liveSession, lastSlotSession, shortSession].map((k) => k.toBase58()).sort(),
+      [liveSession, lastSlotSession, shortSession, slotValuedSession].map((k) => k.toBase58()).sort(),
     );
+    expect(f.liveSessions.find((s) => s.sessionPda.equals(slotValuedSession))!.expiresAt).toBe(SLOT + 50_000n);
     const short = f.liveSessions.find((s) => s.sessionPda.equals(shortSession))!;
     expect(short.trusted).toBe(false);
-    expect(short.expiresAtSlot > SLOT).toBe(true);
+    expect(short.expiresAt > UNIX).toBe(true);
     expect(f.liveSessions.find((s) => s.sessionPda.equals(liveSession))).toMatchObject({
-      expiresAtSlot: SLOT + 1n, trusted: false,
+      expiresAt: UNIX + 1n, trusted: false,
     });
-    expect(f.liveSessions.find((s) => s.sessionPda.equals(lastSlotSession))!.expiresAtSlot).toBe(SLOT);
+    expect(f.liveSessions.find((s) => s.sessionPda.equals(lastSlotSession))!.expiresAt).toBe(UNIX);
 
     const deferred = new Map(f.pendingDeferred.map((d) => [d.deferredPda.toBase58(), d]));
     expect(deferred.size).toBe(4);
@@ -1438,7 +1454,7 @@ describe('describeWalletCandidates (stubbed RPC)', () => {
       const f = await straddled(
         { programs: at([ownRow(), attackerRow()]), accounts: walletAccounts },
         {
-          programs: at([ownRow(), { pubkey: randomKey(), data: sessionData(wallet, sessionKey, SLOT + 50_000n) }]),
+          programs: at([ownRow(), { pubkey: randomKey(), data: sessionData(wallet, sessionKey, UNIX + 3_600n) }]),
           accounts: walletAccounts,
         },
       );
@@ -1576,9 +1592,20 @@ describe('vetMigrationDestination (stubbed RPC)', () => {
 
   it('sees a session a co-owner opened as it removed itself in the same transaction', async () => {
     const { connection } = chainStub({
-      programs: at([ownRow(), { pubkey: randomKey(), data: sessionData(wallet, randomKey(), 50_000n) }]),
+      programs: at([ownRow(), { pubkey: randomKey(), data: sessionData(wallet, randomKey(), STUB_UNIX_TIME + 3_600n) }]),
       accounts: walletAccounts,
       before: { programs: at([ownRow(), attackerRow()]), accounts: walletAccounts },
+    });
+    expect(await new LazorKitClient(connection, PROGRAM_ID_DEVNET).vetMigrationDestination(wallet, owner)).toContain(
+      'has a live session',
+    );
+  });
+
+  it('counts a v2 session whose expiry is a slot that has not passed', async () => {
+    // Written by a slot-based build: a cluster still running one accepts it.
+    const { connection } = chainStub({
+      programs: at([ownRow(), { pubkey: randomKey(), data: sessionData(wallet, randomKey(), 1_000n + 50_000n) }]),
+      accounts: walletAccounts,
     });
     expect(await new LazorKitClient(connection, PROGRAM_ID_DEVNET).vetMigrationDestination(wallet, owner)).toContain(
       'has a live session',
@@ -1810,7 +1837,7 @@ describe('passkey wallet ownership (validator)', () => {
       walletPda,
       adminSigner: secp256r1(createMockRawSigner(key)),
       sessionKey: Keypair.generate().publicKey,
-      expiresAt: (await getSlot(ctx)) + 9_000n,
+      expiresAt: (await getUnixTime(ctx)) + 3_600n,
       unrestricted: true,
     });
     await sendTx(ctx, instructions);
@@ -1905,7 +1932,7 @@ describe('passkey wallet ownership (validator)', () => {
     });
 
     it('a live session makes it shared — unless its key is trusted too', async () => {
-      const expiresAt = (await getSlot(ctx)) + 9_000n;
+      const expiresAt = (await getUnixTime(ctx)) + 3_600n;
       const { instructions, sessionPda } = await client.createSession({
         payer: ctx.payer.publicKey,
         walletPda,
@@ -1921,7 +1948,7 @@ describe('passkey wallet ownership (validator)', () => {
       expect(withSession.liveSessions).toHaveLength(1);
       expect(withSession.liveSessions[0].sessionPda.equals(sessionPda)).toBe(true);
       expect(withSession.liveSessions[0].sessionKey.equals(sessionKp.publicKey)).toBe(true);
-      expect(withSession.liveSessions[0].expiresAtSlot).toBe(expiresAt);
+      expect(withSession.liveSessions[0].expiresAt).toBe(expiresAt);
       expect(withSession.liveSessions[0].trusted).toBe(false);
       expect(withSession.controlledAlone).toBe(false);
 
@@ -2372,7 +2399,7 @@ describe('passkey wallet ownership (validator)', () => {
       walletPda: w.walletPda,
       adminSigner: secp256r1(createMockRawSigner(victim)),
       sessionKey: Keypair.generate().publicKey,
-      expiresAt: (await getSlot(ctx)) + 9_000n,
+      expiresAt: (await getUnixTime(ctx)) + 3_600n,
       actions: [Actions.solLimit(1_000_000n)],
     });
     await sendTx(ctx, session.instructions);
@@ -2498,7 +2525,7 @@ describe('passkey wallet ownership (validator)', () => {
       walletPda: real.walletPda,
       adminSigner: secp256r1(createMockRawSigner(victim)),
       sessionKey: appSessionKey,
-      expiresAt: (await getSlot(ctx)) + 9_000n,
+      expiresAt: (await getUnixTime(ctx)) + 3_600n,
       actions: [Actions.solLimit(1_000_000n)],
     });
     await sendTx(ctx, session.instructions);

@@ -55,6 +55,7 @@ pub fn init_authority() -> Keypair {
 pub fn setup_uninitialized() -> TestContext {
     let payer = Keypair::new();
     let mut svm = LiteSVM::new();
+    start_the_clock(&mut svm);
     svm.airdrop(&payer.pubkey(), 10_000_000_000)
         .expect("Failed to airdrop");
     let program_id = load_program(&mut svm);
@@ -221,6 +222,37 @@ pub fn fee_suffix_for(program_id: Pubkey, fee_payer: Pubkey) -> Vec<AccountMeta>
         AccountMeta::new(shard_pda, false),
         AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
     ]
+}
+
+// ─── Time ────────────────────────────────────────────────────────────────
+//
+// Session expiries, action expiries and recurring windows are Unix seconds
+// (`Clock::unix_timestamp`). litesvm starts its clock at zero, where a slot
+// passed in place of a time would look just as plausible as a time; every
+// suite starts at a real date instead, from which any slot is decades past.
+
+/// The Unix time every suite starts at: 2026-10-04 00:00 UTC, the day devnet
+/// reached slot 507,081,509.
+pub const TEST_UNIX_TIME: i64 = 1_791_072_000;
+
+fn start_the_clock(svm: &mut LiteSVM) {
+    let mut clock = svm.get_sysvar::<solana_sdk::clock::Clock>();
+    clock.unix_timestamp = TEST_UNIX_TIME;
+    svm.set_sysvar(&clock);
+}
+
+/// The cluster's Unix time, as the program reads it.
+pub fn unix_now(svm: &LiteSVM) -> u64 {
+    svm.get_sysvar::<solana_sdk::clock::Clock>().unix_timestamp as u64
+}
+
+/// Move the clock's Unix time to `unix` (the slot stays), and the blockhash
+/// on, so the same transaction can be sent again at the new time.
+pub fn set_unix_time(svm: &mut LiteSVM, unix: u64) {
+    let mut clock = svm.get_sysvar::<solana_sdk::clock::Clock>();
+    clock.unix_timestamp = unix as i64;
+    svm.set_sysvar(&clock);
+    advance(svm);
 }
 
 /// Advance the blockhash so a byte-identical transaction can be sent again.
@@ -463,8 +495,8 @@ pub fn create_session_with_actions(
     let session = Keypair::new();
     let session_pda = session_pda_for(context.program_id, wallet, &session);
 
-    let clock: solana_sdk::clock::Clock = context.svm.get_sysvar();
-    let expires_at = clock.slot + 100_000;
+    // A little over a day, in seconds.
+    let expires_at = unix_now(&context.svm) + 100_000;
 
     let mut data = vec![5u8]; // CreateSession
     data.extend_from_slice(session.pubkey().as_ref());
@@ -519,7 +551,7 @@ pub fn session_actions(svm: &LiteSVM, session_pda: Pubkey) -> Vec<u8> {
 // ─── Action buffer encoding (see state/action.rs) ────────────────────────
 //
 // Each action is `[type u8][data_len u16 LE][expires_at u64 LE][data...]`.
-// `expires_at = 0` means "never expires".
+// `expires_at` is Unix seconds; 0 means "never expires".
 
 fn action(action_type: u8, data: &[u8]) -> Vec<u8> {
     let mut out = vec![action_type];
@@ -547,7 +579,7 @@ pub fn action_token_limit(mint: Pubkey, remaining: u64) -> Vec<u8> {
     action(4, &data)
 }
 
-/// `SolRecurringLimit` — lamport cap per window of `window` slots.
+/// `SolRecurringLimit` — lamport cap per window of `window` seconds.
 /// Data: `[limit u64][spent u64][window u64][last_reset u64]`.
 pub fn action_sol_recurring_limit(limit: u64, window: u64) -> Vec<u8> {
     let mut data = Vec::with_capacity(32);
@@ -563,7 +595,7 @@ pub fn action_sol_max_per_tx(max: u64) -> Vec<u8> {
     action(3, &max.to_le_bytes())
 }
 
-/// `TokenRecurringLimit` — cap per window for one mint.
+/// `TokenRecurringLimit` — cap per window of `window` seconds for one mint.
 /// Data: `[mint 32][limit u64][spent u64][window u64][last_reset u64]`.
 pub fn action_token_recurring_limit(mint: Pubkey, limit: u64, window: u64) -> Vec<u8> {
     let mut data = Vec::with_capacity(64);
@@ -1047,6 +1079,7 @@ pub fn load_fixture_program(svm: &mut LiteSVM, crate_name: &str) -> Pubkey {
 pub fn setup_test() -> TestContext {
     let payer = Keypair::new();
     let mut svm = LiteSVM::new();
+    start_the_clock(&mut svm);
 
     // Airdrop to payer
     svm.airdrop(&payer.pubkey(), 10_000_000_000)

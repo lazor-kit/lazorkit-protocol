@@ -106,8 +106,7 @@ fn setup_wallet_with_session(
 
     // Create session
     let session_keypair = Keypair::new();
-    let current_slot = context.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
-    let expires_at = current_slot + 1000;
+    let expires_at = unix_now(&context.svm) + 1000;
 
     let (session_pda, _) = Pubkey::find_program_address(
         &[

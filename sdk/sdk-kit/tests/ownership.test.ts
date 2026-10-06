@@ -203,9 +203,30 @@ function ed25519AuthorityData(wallet: Address, key: Address, role = 1): Uint8Arr
   return data;
 }
 
-function sessionData(wallet: Address, sessionKey: Address, expiresAt: bigint): Uint8Array {
+/**
+ * The cluster's Unix time in every stubbed clock read: 2026-10-04. v2 session
+ * expiries compare against it; deferred expiries (and v1 sessions') against
+ * the slot.
+ */
+const UNIX = 1_791_072_000n;
+
+/** The Clock sysvar's data: slot at 0, Unix time at 32. */
+function clockData(slot: bigint, unixTimestamp: bigint): Uint8Array {
+  const data = new Uint8Array(40);
+  const view = new DataView(data.buffer);
+  view.setBigUint64(0, slot, true);
+  view.setBigInt64(32, unixTimestamp, true);
+  return data;
+}
+
+function sessionData(
+  wallet: Address,
+  sessionKey: Address,
+  expiresAt: bigint,
+  disc: number = ACCOUNT_DISCRIMINATOR.SESSION,
+): Uint8Array {
   const data = new Uint8Array(80);
-  data[0] = ACCOUNT_DISCRIMINATOR.SESSION;
+  data[0] = disc;
   data.set(bytesOf(wallet), 8);
   data.set(bytesOf(sessionKey), 40);
   new DataView(data.buffer).setBigUint64(72, expiresAt, true);
@@ -301,6 +322,8 @@ interface ChainState {
 function stubRpc(
   opts: ChainState & {
     slot?: bigint;
+    /** The clock's Unix time; default {@link UNIX}. */
+    unixTimestamp?: bigint;
     /**
      * The chain one slot earlier, before one transaction produced the state
      * above. A lagging node serves it to every read that does not demand
@@ -317,7 +340,8 @@ function stubRpc(
   const now = opts.slot ?? 1_000n;
   const newest = opts.newest ?? ['authorities'];
   const calls = {
-    getSlot: 0,
+    /** Reads of the Clock sysvar. */
+    clock: 0,
     getMultipleAccounts: [] as Address[][],
     getProgramAccounts: [] as { programId: Address; filters: Memcmp[] }[],
     getTokenAccountsByOwner: [] as { owner: Address; programId: Address; encoding: string }[],
@@ -349,10 +373,21 @@ function stubRpc(
     return result();
   };
   const rpc = {
-    getSlot: () => ({
+    getAccountInfo: (address: Address) => ({
       send: async () => {
-        calls.getSlot++;
-        return now;
+        if (address !== 'SysvarC1ock11111111111111111111111111111111') {
+          throw new Error(`stub: no getAccountInfo for ${address}`);
+        }
+        calls.clock++;
+        return {
+          context: { slot: now },
+          value: {
+            owner: 'Sysvar1111111111111111111111111111111111111',
+            lamports: 1n,
+            data: [b64(clockData(now, opts.unixTimestamp ?? UNIX)), 'base64'],
+            executable: false,
+          },
+        };
       },
     }),
     getMultipleAccounts: (addresses: Address[], config: { minContextSlot?: bigint }) => ({
@@ -1122,6 +1157,7 @@ describe('describeWalletCandidates', () => {
       ...c,
       lamports: 7n,
       slot: SLOT,
+      unixTimestamp: UNIX,
       otherAuthorities: [],
       liveSessions: [],
       pendingDeferred: [],
@@ -1134,10 +1170,10 @@ describe('describeWalletCandidates', () => {
     // The same fields, in the same order, as @lazorkit/sdk-legacy's WalletFacts.
     expect(Object.keys(f!)).toEqual([
       'version', 'programId', 'walletPda', 'vaultPda', 'authorityPda', 'publicKey',
-      'lamports', 'slot', 'otherAuthorities', 'liveSessions', 'pendingDeferred',
+      'lamports', 'slot', 'unixTimestamp', 'otherAuthorities', 'liveSessions', 'pendingDeferred',
       'vaultIsSystemAccount', 'tokenGrants', 'controlledAlone', 'signatureCount',
     ]);
-    expect(calls.getSlot).toBe(1);
+    expect(calls.clock).toBe(1);
     // The wallet accounts first, to drop dead candidates; then, after the
     // scans, the wallet account again, the vault, and the vault's SPL Token
     // account for each watched mint, in one call.
@@ -1220,13 +1256,13 @@ describe('describeWalletCandidates', () => {
     const deadKey = freshAddress();
     const livePda = freshAddress();
     const { c, lk } = setup((c) => [
-      { pubkey: livePda, data: sessionData(c.walletPda, liveKey, SLOT + 1n) },
-      { pubkey: freshAddress(), data: sessionData(c.walletPda, deadKey, SLOT - 1n) },
+      { pubkey: livePda, data: sessionData(c.walletPda, liveKey, UNIX + 1n) },
+      { pubkey: freshAddress(), data: sessionData(c.walletPda, deadKey, UNIX - 1n) },
     ]);
 
     const [plain] = await lk.describeWalletCandidates([c]);
     expect(plain!.liveSessions).toEqual([
-      { sessionPda: livePda, sessionKey: liveKey, expiresAtSlot: SLOT + 1n, trusted: false },
+      { sessionPda: livePda, sessionKey: liveKey, expiresAt: UNIX + 1n, trusted: false },
     ]);
     expect(plain!.controlledAlone).toBe(false);
 
@@ -1235,22 +1271,47 @@ describe('describeWalletCandidates', () => {
     expect(trusted!.controlledAlone).toBe(true);
   });
 
-  it('a session or deferred execution expiring at the read slot is still live, as the program sees it', async () => {
-    // The program refuses only `current_slot > expires_at`: at `expires_at`
+  it('a session or deferred execution expiring at the read clock is still live, as the program sees it', async () => {
+    // The program refuses only once the clock is past `expires_at` — the Unix
+    // time for a session, the slot for a deferred execution: at `expires_at`
     // itself the key still signs and the deferred still executes.
     const sessionKey = freshAddress();
     const sessionPda = freshAddress();
     const deferredPda = freshAddress();
     const { c, lk } = setup((c) => [
-      { pubkey: sessionPda, data: sessionData(c.walletPda, sessionKey, SLOT) },
+      { pubkey: sessionPda, data: sessionData(c.walletPda, sessionKey, UNIX) },
       { pubkey: deferredPda, data: deferredData(c.walletPda, c.authorityPda, SLOT) },
     ]);
     const [f] = await lk.describeWalletCandidates([c]);
-    expect(f!.liveSessions).toEqual([{ sessionPda, sessionKey, expiresAtSlot: SLOT, trusted: false }]);
+    expect(f!.liveSessions).toEqual([{ sessionPda, sessionKey, expiresAt: UNIX, trusted: false }]);
     expect(f!.pendingDeferred).toEqual([
       { deferredPda, authorizedBy: c.authorityPda, expiresAtSlot: SLOT, trusted: false },
     ]);
     expect(f!.controlledAlone).toBe(false);
+  });
+
+  it('a v2 session whose expiry is a slot, written before time-based expiry, counts until that slot passes', async () => {
+    // A cluster still on a slot-based build accepts it until its slot passes;
+    // a time-based build never does. Counting it until then keeps the check
+    // from missing a session the running program accepts.
+    const liveKey = freshAddress();
+    const livePda = freshAddress();
+    const { c, lk } = setup((c) => [
+      { pubkey: livePda, data: sessionData(c.walletPda, liveKey, SLOT + 50_000n) },
+      { pubkey: freshAddress(), data: sessionData(c.walletPda, freshAddress(), SLOT - 1n) },
+    ]);
+    const [f] = await lk.describeWalletCandidates([c]);
+    expect(f!.liveSessions).toEqual([
+      { sessionPda: livePda, sessionKey: liveKey, expiresAt: SLOT + 50_000n, trusted: false },
+    ]);
+    expect(f!.controlledAlone).toBe(false);
+
+    const { c: past, lk: lkPast } = setup((c) => [
+      { pubkey: freshAddress(), data: sessionData(c.walletPda, freshAddress(), SLOT - 1n) },
+    ]);
+    const [g] = await lkPast.describeWalletCandidates([past]);
+    expect(g!.liveSessions).toEqual([]);
+    expect(g!.controlledAlone).toBe(true);
   });
 
   it('no pending deferred is trusted — not one naming this passkey’s authority, nor a trusted Ed25519 one', async () => {
@@ -1432,7 +1493,7 @@ describe('describeWalletCandidates', () => {
       // An Ed25519 authority cut off before its key: it cannot be matched to a trusted key.
       { pubkey: shortAuth, data: ed25519AuthorityData(c.walletPda, trustedKey, 1).slice(0, 60) },
       // A session with no expiry to read: live.
-      { pubkey: shortSession, data: sessionData(c.walletPda, trustedKey, SLOT - 100n).slice(0, 72) },
+      { pubkey: shortSession, data: sessionData(c.walletPda, trustedKey, UNIX - 100n).slice(0, 72) },
       // A deferred cut off inside its authorizer, this passkey's own: no expiry, no trust.
       { pubkey: shortDeferred, data: deferredData(c.walletPda, c.authorityPda, SLOT - 100n).slice(0, 120) },
     ]);
@@ -1442,7 +1503,7 @@ describe('describeWalletCandidates', () => {
     ]);
     const NONE = '11111111111111111111111111111111';
     expect(f!.liveSessions).toEqual([
-      { sessionPda: shortSession, sessionKey: NONE, expiresAtSlot: 0xffff_ffff_ffff_ffffn, trusted: false },
+      { sessionPda: shortSession, sessionKey: NONE, expiresAt: 0xffff_ffff_ffff_ffffn, trusted: false },
     ]);
     expect(f!.pendingDeferred).toEqual([
       { deferredPda: shortDeferred, authorizedBy: NONE, expiresAtSlot: 0xffff_ffff_ffff_ffffn, trusted: false },
@@ -1503,14 +1564,28 @@ describe('describeWalletCandidates', () => {
       publicKey: c.publicKey,
       counter: 5,
     });
+    // v1 sessions store the slot v1 wrote, and are still read as one: this
+    // one is live at SLOT, though as a Unix time it would be long past, and
+    // the one a slot older is not.
+    const liveV1 = freshAddress();
+    const liveKey = freshAddress();
     const { rpc, calls } = stubRpc({
-      programs: { [PROGRAM_ID_DEVNET_V1]: [{ pubkey: c.authorityPda, data: own }] },
+      programs: {
+        [PROGRAM_ID_DEVNET_V1]: [
+          { pubkey: c.authorityPda, data: own },
+          { pubkey: liveV1, data: sessionData(c.walletPda, liveKey, SLOT, V1_DISC_SESSION) },
+          { pubkey: freshAddress(), data: sessionData(c.walletPda, freshAddress(), SLOT - 1n, V1_DISC_SESSION) },
+        ],
+      },
       slot: SLOT,
       accounts: walletAccounts(c),
     });
     const [f] = await new LazorKit(rpc, PROGRAM_ID_DEVNET).describeWalletCandidates([c]);
     expect(f!.lamports).toBe(0n); // no vault account at all
-    expect(f!.controlledAlone).toBe(true);
+    expect(f!.liveSessions).toEqual([
+      { sessionPda: liveV1, sessionKey: liveKey, expiresAt: SLOT, trusted: false },
+    ]);
+    expect(f!.controlledAlone).toBe(false);
     expect(f!.signatureCount).toBe(5);
     expect(calls.getProgramAccounts.map((x) => [x.programId, x.filters[0]!.memcmp.bytes])).toEqual([
       [PROGRAM_ID_DEVNET_V1, bs58(new Uint8Array([V1_DISC_AUTHORITY]))],
@@ -1532,7 +1607,7 @@ describe('describeWalletCandidates', () => {
 
     expect(out.map((f) => f.walletPda)).toEqual(many.map((c) => c.walletPda));
     expect(out.map((f) => f.lamports)).toEqual(many.map((_, i) => BigInt(i)));
-    expect(calls.getSlot).toBe(1);
+    expect(calls.clock).toBe(1);
     // Every wallet account in pages of 100; then six accounts per candidate:
     // wallet, vault, four watched token accounts.
     const pages = calls.getMultipleAccounts.map((page) => page.length);
@@ -1597,7 +1672,7 @@ describe('describeWalletCandidates', () => {
         }),
         (c, own) => ({
           programs: {
-            [PROGRAM_ID_DEVNET]: [own, { pubkey: drain, data: sessionData(c.walletPda, sessionKey, SLOT + 50_000n) }],
+            [PROGRAM_ID_DEVNET]: [own, { pubkey: drain, data: sessionData(c.walletPda, sessionKey, UNIX + 3_600n) }],
           },
         }),
       );
@@ -1741,7 +1816,7 @@ describe('describeWalletCandidates', () => {
   it('makes no calls for no candidates', async () => {
     const { rpc, calls } = stubRpc({ programs: {} });
     expect(await new LazorKit(rpc, PROGRAM_ID_DEVNET).describeWalletCandidates([])).toEqual([]);
-    expect(calls.getSlot).toBe(0);
+    expect(calls.clock).toBe(0);
   });
 
   it('refuses a malformed trusted key or watched mint even with no candidates, and reads nothing', async () => {
@@ -1752,7 +1827,7 @@ describe('describeWalletCandidates', () => {
     expect(
       await lk.describeWalletCandidates([], { trustedKeys: [freshAddress()], watchMints: [freshAddress()] }),
     ).toEqual([]);
-    expect(calls.getSlot).toBe(0);
+    expect(calls.clock).toBe(0);
     expect(calls.getMultipleAccounts).toEqual([]);
   });
 });
@@ -1871,6 +1946,6 @@ describe('findOwnPasskeyWallet', () => {
     });
     expect(result).toEqual({ adopt: null, needsConfirmation: [], unproven: 1 });
     // Nothing unproven is described.
-    expect(calls.getSlot).toBe(0);
+    expect(calls.clock).toBe(0);
   });
 });

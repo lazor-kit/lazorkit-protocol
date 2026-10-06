@@ -181,6 +181,8 @@ pub enum ProgramIx {
     )]
     CreateSession {
         session_key: [u8; 32],
+        /// Unix time in seconds after which the session is refused; at most
+        /// 30 days ahead of the cluster clock.
         expires_at: i64,
     },
 

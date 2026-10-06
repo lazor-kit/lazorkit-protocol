@@ -74,12 +74,12 @@ describe('serializeActions byte-parity with sdk-legacy', () => {
 
   it('SolRecurringLimit', () => {
     const kit = serializeActions([
-      Actions.solRecurringLimit({ limit: 1_000_000_000n, window: 216_000n }),
+      Actions.solRecurringLimit({ limit: 1_000_000_000n, windowSeconds: 86_400n }),
     ]);
     const legacy = legacySerializeActions([
       LegacyActions.solRecurringLimit({
         limit: 1_000_000_000n,
-        window: 216_000n,
+        windowSeconds: 86_400n,
       }),
     ]);
     expect(bytesEqual(kit, legacy)).toBe(true);
@@ -113,14 +113,14 @@ describe('serializeActions byte-parity with sdk-legacy', () => {
       Actions.tokenRecurringLimit({
         mint: MINT_KIT,
         limit: 1_000_000n,
-        window: 100n,
+        windowSeconds: 100n,
       }),
     ]);
     const legacy = legacySerializeActions([
       LegacyActions.tokenRecurringLimit({
         mint: MINT_PK,
         limit: 1_000_000n,
-        window: 100n,
+        windowSeconds: 100n,
       }),
     ]);
     expect(bytesEqual(kit, legacy)).toBe(true);
@@ -163,7 +163,7 @@ describe('serializeActions byte-parity with sdk-legacy', () => {
     const kit = serializeActions([
       Actions.solRecurringLimit({
         limit: 1_000_000_000n,
-        window: 216_000n,
+        windowSeconds: 86_400n,
         expiresAt: expires,
       }),
       Actions.programWhitelist(PROGRAM_KIT, expires),
@@ -172,7 +172,7 @@ describe('serializeActions byte-parity with sdk-legacy', () => {
     const legacy = legacySerializeActions([
       LegacyActions.solRecurringLimit({
         limit: 1_000_000_000n,
-        window: 216_000n,
+        windowSeconds: 86_400n,
         expiresAt: expires,
       }),
       LegacyActions.programWhitelist(PROGRAM_PK, expires),
@@ -191,5 +191,49 @@ describe('serializeActions byte-parity with sdk-legacy', () => {
     expect(kit[2]).toBe(0); // data_len hi
     // bytes 3..11 = expires_at (all zero)
     for (let i = 3; i < 11; i++) expect(kit[i]).toBe(0);
+  });
+});
+
+// Every policy is built here: a session's, and a Delegate's passed to
+// AddAuthority as bytes. An action expiry that is a slot would be stored as a
+// time long past, which lifts a blacklist entry at once.
+describe('serializeActions refuses times that are not seconds, in both SDKs', () => {
+  /** Devnet's slot on 2026-10-04: what an expiry held before time-based expiry. */
+  const SLOT = 507_081_509n;
+
+  it("refuses an action's expiresAt that is a slot", () => {
+    expect(() => serializeActions([Actions.programBlacklist(PROGRAM_KIT, SLOT + 216_000n)])).toThrow(
+      /action's expiresAt .* not a Unix time/,
+    );
+    expect(() =>
+      legacySerializeActions([LegacyActions.programBlacklist(PROGRAM_PK, SLOT + 216_000n)]),
+    ).toThrow(/action's expiresAt .* not a Unix time/);
+    expect(() =>
+      serializeActions([Actions.tokenLimit({ mint: MINT_KIT, remaining: 1n, expiresAt: SLOT })]),
+    ).toThrow(/not a Unix time/);
+    expect(() =>
+      legacySerializeActions([LegacyActions.tokenLimit({ mint: MINT_PK, remaining: 1n, expiresAt: SLOT })]),
+    ).toThrow(/not a Unix time/);
+  });
+
+  it('refuses a recurring window of zero', () => {
+    expect(() =>
+      serializeActions([Actions.tokenRecurringLimit({ mint: MINT_KIT, limit: 1n, windowSeconds: 0n })]),
+    ).toThrow(/windowSeconds > 0/);
+    expect(() =>
+      legacySerializeActions([
+        LegacyActions.tokenRecurringLimit({ mint: MINT_PK, limit: 1n, windowSeconds: 0n }),
+      ]),
+    ).toThrow(/windowSeconds > 0/);
+  });
+
+  it('takes 0 as no expiry of its own, and a time in seconds', () => {
+    const at = 1_791_072_000n + 86_400n;
+    expect(
+      bytesEqual(
+        serializeActions([Actions.programBlacklist(PROGRAM_KIT, at), Actions.solLimit(1n, 0n)]),
+        legacySerializeActions([LegacyActions.programBlacklist(PROGRAM_PK, at), LegacyActions.solLimit(1n, 0n)]),
+      ),
+    ).toBe(true);
   });
 });

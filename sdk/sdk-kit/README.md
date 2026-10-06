@@ -61,6 +61,13 @@ This SDK targets protocol v2, which is **not wire-compatible with v1**:
   (`System::Assign`/`Allocate`, `SetAuthority`, `Approve`, `Revoke`,
   `CloseAccount` of an existing account): every other signer — any session, an
   Admin, a Delegate — is refused with 3030–3032, policy or not.
+- Time is Unix seconds, by the cluster clock (`getClusterTime()`): a session's
+  `expiresAt` (at most `MAX_SESSION_SECONDS`, 30 days, ahead), an action's
+  `expiresAt`, and a recurring limit's `windowSeconds`. `createSession` throws
+  on a value that looks like a slot (the program refuses such a session, 3008),
+  and `serializeActions` throws on an action expiry that looks like one, so a
+  Delegate policy is checked too.
+  A deferred execution's `expiryOffset` is still a slot count.
 - `AddAuthority`/`RemoveAuthority` need the wallet account **writable**.
 - Serialized `DeferredPayload`s carry a version and are rejected across the
   boundary — re-authorize rather than replaying one.

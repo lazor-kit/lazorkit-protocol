@@ -9,9 +9,9 @@ import * as crypto from 'crypto';
 import {
   setupTest,
   sendTx,
-  getSlot,
   delegatePolicy,
   type TestContext,
+  getUnixTime,
 } from './common';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
 import {
@@ -205,8 +205,8 @@ describe('E2E Company Workflow', () => {
 
   it('Step 7: Admin creates Session', async () => {
     const sessionKp = Keypair.generate();
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 9000n;
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 3_600n;
 
     const { instructions } = await client.createSession({
       payer: ctx.payer.publicKey,

@@ -3,7 +3,7 @@
 //!
 //! Before expiry a session ends one way: `RevokeSession`, signed by the
 //! wallet's own Owner or Admin. That stays. After expiry the account is inert —
-//! `execute::immediate` refuses any session where `current_slot >
+//! `execute::immediate` refuses any session where `unix_timestamp >
 //! expires_at`, so what remains is rent locked in an account that will never
 //! authorise anything again, and the only key that could free it belongs to a
 //! user with no reason to come back.
@@ -15,6 +15,13 @@
 //! byte-identical apart from the discriminator — `wallet` at 8, `session_key`
 //! at 40, `expires_at` at 72 in both — and the v1 sessions stranded by the
 //! upgrade have no other way home.
+//!
+//! The two read `expires_at` in different units. A v2 session's is Unix time
+//! (seconds), compared with `Clock::unix_timestamp`; a v2 session written
+//! before time-based expiry holds a slot there, which as a time is long past,
+//! so it is closable. A v1 session's is a slot, as v1 wrote it, compared with
+//! `Clock::slot`, so a v1 session becomes closable exactly when it did
+//! before.
 //!
 //! Accounts:
 //!
@@ -84,9 +91,15 @@ pub fn process(
             .try_into()
             .map_err(|_| ProgramError::InvalidAccountData)?,
     );
-    // The same comparison `execute` uses. One slot looser here and a caller
-    // could close a session that is still authorised in its final slot.
-    if Clock::get()?.slot <= expires_at {
+    // As `execute` compares (any looser and a caller could close a session in
+    // its final second). The sunset binary owns v1 sessions only: by slot.
+    let clock = Clock::get()?;
+    let now = if assertions::SUNSET || discriminator == V1_DISC_SESSION {
+        clock.slot
+    } else {
+        crate::utils::unix_now(&clock)?
+    };
+    if crate::state::session::is_live(expires_at, now) {
         return Err(AuthError::SessionNotExpired.into());
     }
 

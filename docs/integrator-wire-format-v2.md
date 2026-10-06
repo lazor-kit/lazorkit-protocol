@@ -158,6 +158,12 @@ the fixed vector they and the program's `wallet_binding_tests` pin, write
 | 9 RevokeSession | `session_pubkey(32) ‖ refund_dest(32)` |
 | 17 MigrateWallet | `destination(32) ‖ v1_wallet(32) ‖ num_tokens(1) ‖ refund_dest(32) ‖ source_ata[0..num_tokens]` |
 
+CreateSession's `expires_at` is Unix time in seconds (u64 LE), at most 30 days
+after the cluster's `Clock::unix_timestamp`; an action's `expires_at` and a
+recurring limit's `window` and `last_reset` are seconds too. Authorize's
+`expiry_offset` is a slot count (10–9,000), and the auth payload's `slot` is a
+slot.
+
 **`accounts_hash`** (used by Execute and Authorize) binds the inner CPI accounts
 *with their privileges*:
 

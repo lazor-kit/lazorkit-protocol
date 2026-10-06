@@ -173,7 +173,7 @@ describe('challenge reads — options reach every read', () => {
         walletPda,
         adminSigner: signer,
         sessionKey: other,
-        expiresAt: 10_000n,
+        expiresAt: 1_791_075_600n, // Unix seconds
         unrestricted: true,
       })],
     ['revokeSession', (lk, walletPda, signer) =>

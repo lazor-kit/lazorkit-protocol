@@ -473,14 +473,14 @@ async function main() {
   let ed25519SessionPda: any;
   {
     ed25519SessionKp = Keypair.generate();
-    const currentSlot = BigInt(await connection.getSlot());
+    const { unixTimestamp: now } = await client.getClusterTime();
     const balBefore = await connection.getBalance(payer.publicKey);
     const { instructions, sessionPda } = await client.createSession({
       payer: payer.publicKey,
       walletPda: ed25519WalletPda,
       adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
       sessionKey: ed25519SessionKp.publicKey,
-      expiresAt: currentSlot + 9000n,
+      expiresAt: now + 3_600n,
       // Deliberately unrestricted: this test exercises the actionless session.
       unrestricted: true,
     });
@@ -497,14 +497,14 @@ async function main() {
   let secpSessionPda: any;
   {
     secpSessionKp = Keypair.generate();
-    const currentSlot = BigInt(await connection.getSlot());
+    const { unixTimestamp: now } = await client.getClusterTime();
     const balBefore = await connection.getBalance(payer.publicKey);
     const prepared = await client.prepareCreateSession({
       payer: payer.publicKey,
       walletPda: secpWalletPda,
       secp256r1: { credentialIdHash: secpOwnerKey.credentialIdHash, publicKeyBytes: secpOwnerKey.publicKeyBytes, authorityPda: secpOwnerAuthPda },
       sessionKey: secpSessionKp.publicKey,
-      expiresAt: currentSlot + 9000n,
+      expiresAt: now + 3_600n,
       // Deliberately unrestricted: this test exercises the actionless session.
       unrestricted: true,
     });
@@ -604,7 +604,7 @@ async function main() {
 
     // Create session with SolMaxPerTx action
     const guardedSessionKp = Keypair.generate();
-    const currentSlot = BigInt(await connection.getSlot());
+    const { unixTimestamp: now } = await client.getClusterTime();
     const balBefore = await connection.getBalance(payer.publicKey);
     const { instructions: createIxs, sessionPda: guardedSessionPda } =
       await client.createSession({
@@ -612,7 +612,7 @@ async function main() {
         walletPda: ed25519WalletPda,
         adminSigner: ed25519(ed25519OwnerKp.publicKey, ed25519OwnerAuthPda),
         sessionKey: guardedSessionKp.publicKey,
-        expiresAt: currentSlot + 9000n,
+        expiresAt: now + 3_600n,
         actions: [Actions.solMaxPerTx(cap)],
       });
     const rc = await sendAndMeasure(connection, payer, createIxs, [

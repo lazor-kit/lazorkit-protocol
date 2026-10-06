@@ -233,5 +233,5 @@ cd tests-sdk && npm run benchmark
 - **429 Too Many Requests**: Check RPC credits or use local validator.
 - **Already Initialized**: Use fresh userSeed or reset validator with `--reset`.
 - **InvalidSeeds**: Verify PDA derivation matches on-chain seeds.
-- **0xbc0 (InvalidSessionDuration)**: expires_at must be a future slot, not Unix timestamp.
+- **0xbc0 (InvalidSessionDuration)**: expires_at must be a Unix time in seconds after the cluster clock and at most 30 days ahead (`getClusterTime()`), not a slot.
 - **Validator won't start**: Check if port 8899 is in use (`lsof -i :8899`). Run `npm run validator:stop` first.

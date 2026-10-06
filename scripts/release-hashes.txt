@@ -16,7 +16,7 @@
 # machine: stop and find out why before deploying.
 #
 # feature      bytes   sha256
-mainnet        153624  96f4adc1a55ca193aa57e299e18067e6c76fea5b70d5bc21852afe73fc29f346
+mainnet        153752  142aad9e0011cbcf3c6a24be513d7c6444b0fe0bcf946ea3856c78801c87e7cb
 mainnet-v1     45936   7a86c87c46d098b247ee2de734de8aea863b15c4ba6b87c6341e7f8e6c313a2d
-devnet         153624  30ac9bef64b4e7459f0f8e91a350b267ff6ee01df0e79ce43f9bd59c31dd5493
+devnet         153752  f2779b66271eee62d0020f6ea1d84c571dcef0699440ea6f878274ed7b4d7f8c
 devnet-v1      45936   a84a234e924a4774eff031afb9c7edde0bc6f002479934414bf0b2bda8d32d56

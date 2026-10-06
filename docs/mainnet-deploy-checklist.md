@@ -381,9 +381,10 @@ the sunset binary that ran both migrations is the one with 0.9.3's entrypoint
 
 The table records the artifacts this rehearsal ran on. **The v2 rows are no
 longer this branch's build:** applying the vault invariants to every signer but
-an Owner moved both v2 artifacts (`scripts/release-hashes.txt` has the current
-ones; the sunset artifacts did not change). Rehearse §3 again on the current
-four before deploying them.
+an Owner, and then time-based session expiry, moved both v2 artifacts
+(`scripts/release-hashes.txt` has the current ones; the sunset artifacts did
+not change, since the sunset binary still reads every session expiry as a
+slot). Rehearse §3 again on the current four before deploying them.
 
 | artifact | id | size | SHA-256 |
 |---|---|---|---|
@@ -437,8 +438,11 @@ ok    the v1 session is closed
 
 **Devnet runs the previous devnet artifact.** Devnet's v2 (`57bTNW…`) runs
 `d95e5c2b…` (D13 and the heap-capacity fix), not this branch's build, which
-also applies the vault invariants to every non-Owner signer. Upgraded on 2026-10-04 in slot
-507081509; before that it ran the D13 build `efea949f…` from 2026-10-03 (slot
+also applies the vault invariants to every non-Owner signer and measures
+session and policy time in Unix seconds. Upgrading devnet to it expires every
+existing v2 session there (their expiries are slots, which read as long past),
+and needs SDKs that send Unix time. Devnet moved to `d95e5c2b…` on
+2026-10-04 in slot 507081509; before that it ran the D13 build `efea949f…` from 2026-10-03 (slot
 507022596). A smoke run on each passed the full lifecycle and every D13 case
 (3037, 3038, 3032), and lazor-kit #108's devnet run (S2) passed against
 `d95e5c2b…`.
@@ -606,11 +610,12 @@ authority may end a live session — and let **anyone** close it once it has
 expired, claiming the rent. Three things checked against the code, because they
 decide the shape:
 
-- **It is safe.** `immediate.rs:210` already refuses a session with
-  `current_slot > session.expires_at`, so an expired session authorises nothing
+- **It is safe.** `Execute` refuses a session once the clock is past
+  `session.expires_at` (`state::session::is_live`: Unix seconds for a v2
+  session, the slot for a v1 one), so an expired session authorises nothing
   and closing it removes no capability. The boundary has to match that
   comparison exactly — `>`, not `>=` — or a keeper can kill a session that is
-  still valid in its final slot.
+  still valid in its final second (v2) or slot (v1).
 - **No replay window opens.** Closing and re-creating the same session PDA does
   not reset anything an attacker can use: the session key signs the transaction
   itself, so an old signature dies with its blockhash. There is no session
@@ -660,11 +665,12 @@ KEEPER=<keypair.json> node scripts/rehearse/close-expired-sessions.cjs
 Run it after the upgrade, and do not count on being first: the rent goes to
 whoever gets there, which is the point of making it permissionless.
 
-Six litesvm tests cover the instruction itself: a stranger closes an expired session and keeps the
-rent; a live one is refused; the session's **final slot still belongs to it**
-(the close uses the same `>` as `execute`, so a keeper cannot end it a slot
-early); a v1-shaped session closes; a live v1 one does not; and an Authority
-account owned by the same program is not closable as a session.
+Seven litesvm tests cover the instruction itself: a stranger closes an expired session and keeps the
+rent; a live one is refused; the session's **final second still belongs to it**
+(the close uses the same comparison as `execute`, so a keeper cannot end it
+early); a v1-shaped session closes by its slot; a live v1 one does not; a v2
+session holding a slot, written before time-based expiry, closes; and an
+Authority account owned by the same program is not closable as a session.
 
 - [ ] Before the upgrade window: reclaim the sponsor's 68 expired DeferredExec
       accounts (0.141 SOL) and drain the sixteen treasury shards (0.0056 SOL).

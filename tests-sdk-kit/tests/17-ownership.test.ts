@@ -64,13 +64,13 @@ import {
   PROGRAM_ID,
   airdrop,
   getBalance,
-  getSlot,
   makeClient,
   sendTx,
   sendTxExpectError,
   setupTest,
   systemTransferFromPda,
   type TestContext,
+  getUnixTime,
 } from './common.js';
 import {
   createMockSigner,
@@ -376,7 +376,7 @@ describe('passkey wallet ownership (validator)', () => {
       walletPda,
       adminSigner: secp256r1(createMockSigner(key)),
       sessionKey: (await generateKeyPairSigner()).address,
-      expiresAt: (await getSlot(ctx)) + 9_000n,
+      expiresAt: (await getUnixTime(ctx)) + 3_600n,
       unrestricted: true,
     });
     await sendTx(ctx, instructions);
@@ -490,7 +490,7 @@ describe('passkey wallet ownership (validator)', () => {
     });
 
     it('a live session makes it shared — unless its key is trusted too', async () => {
-      const expiresAt = (await getSlot(ctx)) + 9_000n;
+      const expiresAt = (await getUnixTime(ctx)) + 3_600n;
       const { instructions, sessionPda } = await client.createSession({
         payer: ctx.payer.address,
         walletPda,
@@ -509,7 +509,7 @@ describe('passkey wallet ownership (validator)', () => {
         trustedKeys: [admin.address],
       });
       expect(withSession!.liveSessions).toEqual([
-        { sessionPda, sessionKey: sessionKey.address, expiresAtSlot: expiresAt, trusted: false },
+        { sessionPda, sessionKey: sessionKey.address, expiresAt, trusted: false },
       ]);
       expect(withSession!.controlledAlone).toBe(false);
 
@@ -851,7 +851,7 @@ describe('passkey wallet ownership (validator)', () => {
       walletPda: real.walletPda,
       adminSigner: secp256r1(createMockSigner(victim)),
       sessionKey: appSessionKey,
-      expiresAt: (await getSlot(ctx)) + 9_000n,
+      expiresAt: (await getUnixTime(ctx)) + 3_600n,
       actions: [Actions.solLimit(1_000_000n)],
     });
     await sendTx(ctx, session.instructions);

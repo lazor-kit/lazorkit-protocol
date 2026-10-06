@@ -69,7 +69,7 @@ erDiagram
     SESSION {
         pubkey wallet PK
         pubkey session_key PK
-        u64 expires_at "absolute slot"
+        u64 expires_at "Unix seconds"
         bytes actions "optional spending limits"
     }
     DEFERRED_EXEC {
@@ -78,7 +78,7 @@ erDiagram
         u32 counter PK
         bytes32 instructions_hash
         bytes32 accounts_hash
-        u64 expires_at
+        u64 expires_at "absolute slot"
         pubkey payer "rent refund target"
     }
 ```
@@ -101,7 +101,7 @@ Three things worth committing to memory before reading further:
 - **Anti-CPI check** — `get_stack_height() > 1` rejects authentication via CPI.
 - **Signature binding** — challenge hash includes discriminator, payer, the authority's wallet, counter, and program_id. The wallet stops an assertion made for one wallet verifying on another where the same passkey sits at the same counter. The accounts_hash binds the set of inner accounts, preventing recipient-reordering attacks.
 - **Ed25519** — standard Solana runtime signer check. No counter (Ed25519 signatures can't replay because they sign over the tx recent blockhash).
-- **Sessions** — absolute slot-based expiry, max ~30 days.
+- **Sessions** — absolute expiry in Unix seconds (`Clock::unix_timestamp`), at most 30 days ahead; a v1 session, like a deferred execution, expires by slot.
 
 ### Challenge hash (Secp256r1)
 
@@ -281,24 +281,51 @@ pub struct SessionAccount {
     pub _padding: [u8; 5],
     pub wallet: Pubkey,
     pub session_key: Pubkey,
-    pub expires_at: u64,     // Absolute slot
+    pub expires_at: u64,     // Unix time, seconds
 }
 ```
 
-Optional **actions** buffer appended after the header (variable length, max 2048 bytes). Each action: 11-byte header `[type(1)][data_len(2 LE)][expires_at(8 LE)]` + type-specific data. Max 16 actions per session or policy, whitelist and blacklist entries included; naming a mint takes one.
+`expires_at` is Unix time in seconds, read against `Clock::unix_timestamp`:
+the session is live through that second and refused from the next (3009).
+`CreateSession` takes an `expires_at` after the cluster's time and at most 30
+days (2,592,000 s) ahead of it (3008 otherwise). Builds before time-based
+expiry stored a slot here; read as a time, any slot a cluster has reached is
+decades past, so such a session is expired: refused by `Execute`, closable by
+anyone through `CloseExpiredSession`. A v1 session, which `CloseExpiredSession`
+also accepts, stores a slot and is still read as one.
+
+Optional **actions** buffer appended after the header (variable length, max 2048 bytes). Each action: 11-byte header `[type(1)][data_len(2 LE)][expires_at(8 LE)]` + type-specific data; an action's `expires_at` is Unix seconds, 0 for none of its own. Max 16 actions per session or policy, whitelist and blacklist entries included; naming a mint takes one.
 
 | Type | ID | Data | Description |
 |---|---|---|---|
 | SolLimit | 1 | remaining(8) | Lifetime SOL cap |
-| SolRecurringLimit | 2 | limit∥spent∥window∥last_reset(32) | Per-window SOL cap |
+| SolRecurringLimit | 2 | limit∥spent∥window∥last_reset(32) | Per-window SOL cap; `window` in seconds, `last_reset` the Unix time of the spend that opened the window |
 | SolMaxPerTx | 3 | max(8) | Max SOL gross outflow per execute |
 | TokenLimit | 4 | mint(32)∥remaining(8) | Lifetime token cap per mint |
-| TokenRecurringLimit | 5 | mint∥limit∥spent∥window∥last_reset(64) | Per-window token cap |
+| TokenRecurringLimit | 5 | mint∥limit∥spent∥window∥last_reset(64) | Per-window token cap; `window` and `last_reset` as above |
 | TokenMaxPerTx | 6 | mint(32)∥max(8) | Max tokens per execute per mint |
 | ProgramWhitelist | 10 | program_id(32) | Allow-list a CPI target (repeatable) |
 | ProgramBlacklist | 11 | program_id(32) | Block-list a CPI target (repeatable) |
 
 **Expired-action policy**: expired spending limits are treated as **fully exhausted** (any spend denied); expired whitelists are **hard deny**; expired blacklist entries are silently dropped.
+
+**Time is Unix seconds; transaction landing stays in slots.** Session expiry,
+action expiry and recurring windows are durations a person reads ("until 6:50
+PM", "1 SOL a day"), so they are measured with `Clock::unix_timestamp`, the
+stake-weighted median of the validators' clocks, held within a bounded drift
+of the PoH estimate. Slots run at whatever pace a cluster manages (about 400
+ms on mainnet, faster on devnet), so a duration in slots is only ever "about"
+one in time. Two things stay in slots because they bound how a transaction
+lands, not how long a grant lasts: the Secp256r1 signature's age (150 slots,
+the same horizon as a recent blockhash, and the slot is part of the signed
+challenge) and the deferred-execution window (`Authorize`'s `expiry_offset`, a
+signed slot count, 10–9,000). A policy written by a slot-based build reads
+fail-closed or near it: an action `expires_at` that was a slot is long past
+(the limit is exhausted, a whitelist denies all — but an expiring blacklist
+entry lifts, so a blacklist entry with an expiry should be re-issued); a
+recurring `window` that was slots is read as that many seconds, a longer
+window on any cluster; and a `last_reset` that was a slot reads as long ago,
+so the first spend after the upgrade opens a fresh window, once.
 
 **Vault invariants**: during any Execute or ExecuteDeferred whose signer is not
 an Owner — a session of any kind, with actions or without, an Admin, a

@@ -48,6 +48,7 @@ import {
   createExecuteDeferredIx,
 } from '../../sdk/sdk-legacy/src/utils/instructions';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils';
+import { readClusterClock } from '../../sdk/sdk-legacy/src/utils/ownership';
 import {
   prepareSecp256r1,
   finalizeSecp256r1,
@@ -381,8 +382,8 @@ async function benchCreateSession(connection: Connection, payer: Keypair): Promi
   const sessionKeyBytes = sessionKp.publicKey.toBytes();
   const [sessionPda] = findSessionPda(walletPda, sessionKeyBytes, PROGRAM_ID_DEVNET);
 
-  const currentSlot = await getSlot(connection);
-  const expiresAt = currentSlot + 9000n;
+  // Unix seconds, by the cluster clock: an hour.
+  const expiresAt = (await readClusterClock(connection)).unixTimestamp + 3_600n;
 
   const ix = createCreateSessionIx({
     payer: payer.publicKey,
@@ -435,8 +436,8 @@ async function benchExecuteSession(connection: Connection, payer: Keypair): Prom
   const sessionKeyBytes = sessionKp.publicKey.toBytes();
   const [sessionPda] = findSessionPda(walletPda, sessionKeyBytes, PROGRAM_ID_DEVNET);
 
-  const currentSlot = await getSlot(connection);
-  const expiresAt = currentSlot + 9000n;
+  // Unix seconds, by the cluster clock: an hour.
+  const expiresAt = (await readClusterClock(connection)).unixTimestamp + 3_600n;
 
   await sendAndMeasure(connection, payer, [createCreateSessionIx({
     payer: payer.publicKey,

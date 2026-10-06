@@ -101,8 +101,7 @@ fn test_session_lifecycle() {
 
     // 2. Create Session
     let session_keypair = Keypair::new();
-    let current_slot = context.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
-    let expires_at = current_slot + 100; // Expires in 100 slots
+    let expires_at = unix_now(&context.svm) + 100; // Expires in 100 seconds
 
     let (session_pda, _) = Pubkey::find_program_address(
         &[
@@ -216,9 +215,7 @@ fn test_session_lifecycle() {
     // 4. Execute with Expired Session (Fail)
     {
         // Warp time
-        let mut clock = context.svm.get_sysvar::<solana_sdk::clock::Clock>();
-        clock.slot = expires_at + 1;
-        context.svm.set_sysvar(&clock);
+        set_unix_time(&mut context.svm, expires_at + 1);
 
         let transfer_amount = 1000u64;
         let mut transfer_data = Vec::new();
@@ -266,9 +263,7 @@ fn test_session_lifecycle() {
         )
         .unwrap();
 
-        let res = context.svm.send_transaction(tx);
-        assert!(res.is_err());
-        // Could verify specific error but SessionExpired is expected
+        assert_custom_error(context.svm.send_transaction(tx), 3009, "SessionExpired");
     }
     println!("✅ Expired session rejected");
 }

@@ -18,9 +18,9 @@ import {
   setupTest,
   sendTx,
   sendTxExpectError,
-  getSlot,
-  waitForSlot,
   type TestContext,
+  getUnixTime,
+  waitForUnixTime,
 } from './common';
 import { LazorKitClient, ed25519, session } from '../../sdk/sdk-legacy/src';
 
@@ -61,8 +61,8 @@ describe('Session Execute', () => {
 
   it('executes SOL transfer via session key', async () => {
     const sessionKp = Keypair.generate();
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 9000n; // ~1 hour
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 3_600n; // an hour
 
     // Create session
     const { instructions: createIxs, sessionPda } = await client.createSession({
@@ -100,14 +100,14 @@ describe('Session Execute', () => {
 
   it('transferSol works via session key', async () => {
     const sessionKp = Keypair.generate();
-    const currentSlot = await getSlot(ctx);
+    const now = await getUnixTime(ctx);
 
     const { instructions: createIxs, sessionPda } = await client.createSession({
       payer: ctx.payer.publicKey,
       walletPda,
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
-      expiresAt: currentSlot + 9000n,
+      expiresAt: now + 3_600n,
       // Deliberately unrestricted: this test exercises the actionless session.
       unrestricted: true,
     });
@@ -132,14 +132,14 @@ describe('Session Execute', () => {
   it('rejects execution with wrong session key', async () => {
     const sessionKp = Keypair.generate();
     const wrongKp = Keypair.generate();
-    const currentSlot = await getSlot(ctx);
+    const now = await getUnixTime(ctx);
 
     const { instructions: createIxs, sessionPda } = await client.createSession({
       payer: ctx.payer.publicKey,
       walletPda,
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
-      expiresAt: currentSlot + 9000n,
+      expiresAt: now + 3_600n,
       // Deliberately unrestricted: this test exercises the actionless session.
       unrestricted: true,
     });
@@ -166,10 +166,10 @@ describe('Session Execute', () => {
 
   it('rejects execution with expired session', async () => {
     const sessionKp = Keypair.generate();
-    const currentSlot = await getSlot(ctx);
+    const now = await getUnixTime(ctx);
 
-    // Create a session that expires in ~10 slots (very short)
-    const expiresAt = currentSlot + 10n;
+    // Create a session that expires in 10 seconds (very short)
+    const expiresAt = now + 10n;
 
     const { instructions: createIxs, sessionPda } = await client.createSession({
       payer: ctx.payer.publicKey,
@@ -182,9 +182,9 @@ describe('Session Execute', () => {
     });
     await sendTx(ctx, createIxs, [ownerKp]);
 
-    // Wait on the chain's own clock, not the wall clock — slot rate on a local
-    // validator varies with load, so a fixed sleep is a coin flip.
-    await waitForSlot(ctx, expiresAt);
+    // Wait on the cluster's own clock, not the wall clock: the program reads
+    // `Clock::unix_timestamp`, which can run apart from this machine's.
+    await waitForUnixTime(ctx, expiresAt);
 
     const recipient = Keypair.generate().publicKey;
     const { instructions } = await client.execute({

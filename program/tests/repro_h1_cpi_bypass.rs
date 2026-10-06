@@ -30,7 +30,6 @@ mod common;
 
 use common::*;
 use solana_sdk::{
-    clock::Clock,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signature::Keypair,
@@ -70,8 +69,7 @@ fn create_session(context: &mut TestContext, wallet: &WalletFixture) -> Keypair 
         &context.program_id,
     );
 
-    let clock: Clock = context.svm.get_sysvar();
-    let expires_at = clock.slot + 100_000;
+    let expires_at = unix_now(&context.svm) + 100_000;
 
     let mut data = vec![5u8]; // CreateSession
     data.extend_from_slice(session.pubkey().as_ref());
@@ -342,8 +340,7 @@ fn h1_d_ed25519_management_via_cpi_is_rejected() {
         ],
         &context.program_id,
     );
-    let clock: Clock = context.svm.get_sysvar();
-    let expires_at = clock.slot + 100_000;
+    let expires_at = unix_now(&context.svm) + 100_000;
 
     let mut data = vec![5u8]; // CreateSession
     data.extend_from_slice(attacker_session.pubkey().as_ref());

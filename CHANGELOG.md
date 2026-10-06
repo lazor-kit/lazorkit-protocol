@@ -6,6 +6,107 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — session expiry and policy time are Unix seconds (program and SDKs; breaking; needs a review before the mainnet deploy)
+
+**Program** (both v2 artifacts change: devnet `30ac9bef…` → `f2779b66…`,
+mainnet `96f4adc1…` → `142aad9e…`, 153752 bytes each; both sunset artifacts are
+byte-identical)
+
+- A session's `expires_at`, an action's `expires_at`, and a recurring limit's
+  `window` and `last_reset` are read against `Clock::unix_timestamp`
+  (seconds), not `Clock::slot`. These are durations a person reads ("until
+  6:50 PM", "1 SOL a day"); a slot count is only ever "about" one in time,
+  and how far it is depends on the cluster (about 400 ms per slot on mainnet,
+  faster on devnet). New `utils::unix_now` (a negative timestamp is refused
+  rather than read as 0) and `state::session::is_live`, which `Execute` and
+  `CloseExpiredSession` share.
+- `CreateSession` takes an `expires_at` after the cluster's time and at most
+  `MAX_SESSION_SECONDS` (30 days, 2,592,000 s) ahead of it; 3008 otherwise.
+  The old cap was 6,480,000 slots, "about 30 days" at 2.5 slots per second.
+  The instruction layout is unchanged (u64 LE, signed in the passkey payload
+  as before).
+- What stays in slots, because it bounds how a transaction lands rather than
+  how long a grant lasts: the Secp256r1 signature's age (150 slots, the same
+  horizon as a recent blockhash; the slot is part of the signed challenge),
+  and the deferred-execution window (`Authorize`'s `expiry_offset`, a signed
+  u16 slot count, 10–9,000, compared with `Clock::slot` by ExecuteDeferred and
+  ReclaimDeferred). `IntegratorRecord.registered_at` stays a slot too (a
+  record, not a deadline).
+- `CloseExpiredSession` reads a v2 session's expiry as Unix time and a v1
+  session's, which v1 wrote as a slot, as a slot, so a v1 session becomes
+  closable exactly when it did before. The sunset binary owns v1 sessions
+  only and reads every expiry as a slot (`assertions::SUNSET`), so both
+  sunset artifacts are unchanged.
+- Accounts written by a slot-based build fail closed: a slot read as Unix time
+  is decades past (devnet's slot on 2026-10-04, 507,081,509, is 1986). So
+  every v2 session on devnet expires at the upgrade — `Execute` refuses it
+  with 3009, and anyone may close it — and an action `expires_at` that was a
+  slot is expired (a limit is exhausted, a whitelist denies all). Two edges: an
+  expiring *blacklist* entry lifts when it expires, so one written with a slot
+  expiry no longer blocks its program; and a recurring limit's `last_reset`
+  that was a slot reads as long ago, so its first spend after the upgrade opens
+  a fresh window (once), while its `window`, written in slots, is read as that
+  many seconds (a longer window). Read on devnet on 2026-10-07: 58 v2
+  sessions, every `expires_at` a slot (505,575,001–508,163,396) and none live
+  even by slot; no v2 authority carried a policy, and no session action had
+  an expiry of its own or a recurring window, so neither edge has an instance
+  there. Mainnet has no v2 accounts yet.
+- Tests: `program/tests/time_expiry_tests.rs` (litesvm, 9 tests): the 30-day
+  cap and a slot refused at creation; a session live through its expiry second
+  whatever the slot; action expiry and a recurring window measured in seconds;
+  a slot-valued session, action expiry and `last_reset` as a slot-based build
+  left them; and the deferred window still in slots. Against `develop` 8 of the
+  9 fail (the deferred one passes on both). Every suite now starts its clock
+  at 2026-10-04 (`common::TEST_UNIX_TIME`), where a slot passed as a time is
+  decades past, and the session, close-expired, revoke and repro suites set
+  expiries in seconds; `close_expired_session_tests` adds a slot-valued v2
+  session (closable) and keeps v1 sessions on slots. Unit tests pin
+  `unix_now`, `is_live`, and the creation bounds.
+- The two v2 hashes in `scripts/release-hashes.txt` changed
+  (`check-release-hashes.sh` on the pinned toolchain, macOS arm64); both
+  sunset artifacts are byte-identical to the ones the 2026-10-04 rehearsal
+  ran. The two-id rehearsal has not been re-run on the v2 artifacts; the
+  deploy checklist says so.
+
+**SDKs** — breaking for both. `@lazorkit/sdk-legacy` is a stable line
+(1.4.0), so this is a new major (2.0.0); `@lazorkit/sdk` is a pre-release line
+(1.0.0-rc.6), so the next rc. Versions are set when this lands.
+
+- `createSession` / `prepareCreateSession`: `expiresAt` is Unix time in
+  seconds. Both throw before any read or passkey prompt on an `expiresAt`
+  below 2020-01-01 (a slot passed by mistake). `serializeActions` throws on an
+  action's `expiresAt` below 2020-01-01 (0 still means none of its own) and on
+  a recurring window of 0, so a Delegate policy built for `addAuthority` is
+  checked as well as a session's. New `getClusterTime()` reads the Clock sysvar
+  (`{ slot, unixTimestamp }`), the time the program will compare against; new
+  export `MAX_SESSION_SECONDS` (30 days).
+- `Actions.solRecurringLimit` / `tokenRecurringLimit`: `window` is renamed
+  `windowSeconds` (`86_400n` is a day), so code written for slots fails to
+  compile instead of silently meaning something else. sdk-legacy's
+  `ParsedAction.window` is `windowSeconds`, and `lastReset` is a Unix time.
+- Ownership reads (`describeWalletCandidates`, the migration destination vet)
+  read the Clock sysvar instead of `getSlot` before scanning, and compare a v2
+  session's expiry with its Unix time, a deferred execution's (and a v1
+  session's) with its slot. A v2 session written before time-based expiry
+  holds a slot (a value below 2020-01-01) and counts as live until that slot
+  passes: a cluster still running a slot-based build accepts it until then,
+  so the ownership check never misses a session the running program accepts,
+  whichever ships first, the SDK or the program upgrade. `WalletFacts` gains `unixTimestamp`, and
+  `liveSessions[].expiresAtSlot` is renamed `expiresAt` (Unix seconds for a v2
+  wallet, the slot for a v1 one). sdk-legacy exports `type ClusterClock`.
+- Docs, READMEs and the e2e suites (`tests-sdk`, `tests-sdk-kit`, the devnet
+  scripts) set expiries in seconds from the cluster clock and wait on it.
+- Tests: sdk-kit `tests/session-time.test.ts` (the guards, `getClusterTime`,
+  the cap); the ownership and migration stubs serve the Clock sysvar, with
+  cases for a slot-valued v2 session (live until its slot passes) and a v1
+  session (live by slot); `tests/actions.test.ts` covers `serializeActions`'
+  guards in both SDKs. 346 sdk-kit tests pass; the stubbed `tests-sdk` units
+  (15, 16, 18 and the stubbed half of 17) pass.
+- An app on an older SDK cannot create a session on this program (its slot
+  `expiresAt` is refused, 3008), and lazor-kit's wallet packages compute
+  `expiresAt` from slots today: they need the new SDKs before devnet or
+  mainnet runs this build.
+
 ### Changed — the vault invariants bind every signer but an Owner (program; needs a review before the mainnet deploy)
 
 **Program** (both v2 artifacts change: devnet `d95e5c2b…` → `30ac9bef…`,

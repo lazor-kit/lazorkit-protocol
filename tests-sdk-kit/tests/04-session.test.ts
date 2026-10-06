@@ -15,9 +15,9 @@ import {
   setupTest,
   sendTx,
   sendTxExpectError,
-  getSlot,
   type TestContext,
   makeClient,
+  getUnixTime,
 } from './common.js';
 
 describe('CreateSession', () => {
@@ -45,8 +45,8 @@ describe('CreateSession', () => {
 
   it('creates a session with Ed25519 admin', async () => {
     const sessionKey = await generateKeyPairSigner();
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 9000n;
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 3_600n;
 
     const { instructions, sessionPda } = await client.createSession({
       payer: ctx.payer.address,
