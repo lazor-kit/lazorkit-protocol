@@ -174,11 +174,13 @@ rules are present but unused. When they are turned back on, expect two more:
 ## Applying it on Railway
 
 Devnet runs as the Railway service `kora-devnet` in the project
-`lazorkit-kora-devnet`, built from [`Dockerfile.devnet`](./Dockerfile.devnet)
-with this directory as the build context, and signing with a fee payer that
-exists only on devnet. History: until 2026-10-06 devnet was served by an older
-service on another Railway account (`kora.devnet.lazorkit.com` →
-`58btamsd.up.railway.app`), which ran beta.7 and allowed only the v1 program.
+`lazorkit-kora-devnet`, at `https://kora-devnet-production.up.railway.app`,
+built from [`Dockerfile.devnet`](./Dockerfile.devnet) with this directory as
+the build context, and signing with a fee payer that exists only on devnet.
+History: until 2026-10-06 devnet was served by an older service on another
+Railway account (`kora.devnet.lazorkit.com` → `58btamsd.up.railway.app`), which
+ran beta.7 and allowed only the v1 program. That name still points at the old
+service until its DNS record is moved.
 
 There is no way to hand Kora a config through the environment: the path comes
 only from the global `--config <PATH>` flag (default `kora.toml`, resolved
@@ -266,7 +268,7 @@ everything after the authentication probe. Give it through the environment,
 not `--key`, which would put it in the process table:
 
 ```bash
-KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs https://<service>.up.railway.app --cluster devnet
+KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --cluster devnet
 ```
 
 What it should say once this config is live: `version 2.2.0-beta.8`,
