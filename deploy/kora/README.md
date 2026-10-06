@@ -1,22 +1,25 @@
 # Kora paymaster config
 
 The relayer sponsors every user transaction, so it is on the critical path and
-none of it is visible from the program. These two files are the configuration
-that protocol v2 needs; the reasoning for each value is in the comments, and the
-findings behind them are in
+none of it is visible from the program. The two `kora.*.toml` files are the
+configuration that protocol v2 needs; the reasoning for each value is in the
+comments, and the findings behind them are in
 [`docs/mainnet-deploy-checklist.md`](../../docs/mainnet-deploy-checklist.md#paymaster-kora).
 
 | file | for |
 |---|---|
 | [`kora.mainnet.toml`](./kora.mainnet.toml) | mainnet, v2 program `LazorFroi…` (v1 `LazorjRF…` only once it runs the sunset binary) |
 | [`kora.devnet.toml`](./kora.devnet.toml) | devnet, v2 program `57bTNW…` (v1 `4h3XoNRe…` only once it runs the sunset binary) |
+| [`Dockerfile.devnet`](./Dockerfile.devnet) | the devnet relayer's image: the pinned beta.8 image with `kora.devnet.toml` and `signers.devnet.toml` baked in — see [Applying it on Railway](#applying-it-on-railway) |
+| [`signers.devnet.toml`](./signers.devnet.toml) | the devnet relayer's signer: one memory signer read from `KORA_PRIVATE_KEY` |
 
-Written against **kora v2.2.0-beta.8**. The devnet relayer answered
+Written against **kora v2.2.0-beta.8**. The old devnet relayer answered
 `2.2.0-beta.7` on 2026-09-24, which is a release behind and missing fixes these
 files rely on: the `--api-key` flag being applied at all, URL redaction in
 client-facing errors, and atomic usage limits (which matter again once usage
-limits are turned back on — they are off for now, see below). Upgrade first:
-`ghcr.io/solana-foundation/kora:v2.2.0-beta.8`.
+limits are turned back on — they are off for now, see below). Its replacement
+runs `ghcr.io/solana-foundation/kora:v2.2.0-beta.8`, pinned by digest in
+`Dockerfile.devnet`.
 
 ## What actually bounds the spend
 
@@ -33,7 +36,9 @@ carry:
    System program still sponsors a bare transfer.
 2. **Authentication** — and be honest about which kind. The API key ships inside
    a browser bundle and an app bundle, so every user has it and so does anyone
-   who reads the bundle: it lets you cut off a client, nothing more. reCAPTCHA
+   who reads the bundle: it lets you cut off a client, nothing more. The devnet
+   relayer runs without one, by decision (see [The service](#the-service)), so
+   there the other three carry it. reCAPTCHA
    (`KORA_RECAPTCHA_SECRET`, new in beta.8) is the control a public dApp can
    actually hold, because a token is minted per visitor — but not yet. Kora
    refuses a protected method that arrives without an `x-recaptcha-token`
@@ -46,9 +51,11 @@ carry:
    rounded. 0.015 SOL on mainnet against the 0.1 the relayer runs today.
 4. **The fee payer's own balance** — the hard ceiling under all of the above.
    Keep the sponsor thinly funded (what a bad day may cost, topped up as it is
-   spent, not a reserve) and alert on it: `[metrics.fee_payer_balance]` exports
+   spent, not a reserve) and alert on it. `[metrics.fee_payer_balance]` exports
    `signer_balance_lamports` per signer on the metrics port (9090), refreshed
-   every `expiry_seconds`.
+   every `expiry_seconds`, but that number comes from Kora's own balance poll
+   through `RPC_URL`, so it is only as good as that endpoint; the devnet alert
+   reads the balance itself (see [Still open](#still-open)).
 
 `rate_limit` is not on that list. On beta.8 it is tower's `RateLimitLayer` in
 the HTTP middleware, which the server builds afresh for each connection: each
@@ -105,10 +112,10 @@ None of them live in these files. The host's environment carries:
 
 | variable | what it is |
 |---|---|
-| `KORA_API_KEY` | the `x-api-key` value; with none set **the auth layer is not mounted at all** |
+| `KORA_API_KEY` | the `x-api-key` value; with none set **the auth layer is not mounted at all**. Mainnet sets it; the devnet service deliberately does not (see [The service](#the-service)) |
 | `KORA_HMAC_SECRET` | optional second factor; when both are set, both are required |
 | `KORA_RECAPTCHA_SECRET` | reCAPTCHA v3 secret, with `protected_methods` naming what it gates. Leave unset until the SDKs send `x-recaptcha-token` (see above) |
-| `KORA_PRIVATE_KEY` | the fee payer, per `signers.toml` |
+| `KORA_PRIVATE_KEY` | the fee payer, per the signers file (`signers.devnet.toml` on devnet): the key itself, base58 or `[u8, ...]`, not a path |
 | `KORA_REDIS_URL` | only once usage limits are back on (or `[kora.cache]` is): their shared store. With both off, as now, nothing reads it |
 
 Never pass the key as `--api-key` on a command line: on beta.7 the flag is
@@ -157,8 +164,8 @@ The warnings that remain are answered, not ignored:
 | LazorKit and the Secp256r1 precompile have "no dedicated fee-payer instruction parser" | expected for any non-standard program. It matters less than it reads: our own CPIs go to the System program, which *is* parsed, so the fee-payer policy still gates the instructions that spend our lamports |
 | PermanentDelegate not blocked | the warning is about payment tokens being seized after payment, and this relayer takes no token payment. Blocking it would only refuse to sponsor a user moving their own token out of a v1 vault |
 | free pricing | that is the product |
-| `system.allow_transfer` / `allow_create_account` can drain the fee payer | true, and unavoidable — see above. `require_one_of_programs`, authentication, the lamport cap and the payer's balance are the bound |
-| no authentication configured | the secrets come from the environment, which the validator cannot see. **Confirm with `kora-check.cjs` after deploying**, not here |
+| `system.allow_transfer` / `allow_create_account` can drain the fee payer | true, and unavoidable — see above. `require_one_of_programs`, the lamport cap, the payer's balance and (on mainnet) authentication are the bound |
+| no authentication configured | the secrets come from the environment, which the validator cannot see. **Confirm with `kora-check.cjs` after deploying**, not here. On devnet the warning is literally true, by decision — see [The service](#the-service) |
 
 With usage limits off the validator says nothing about them — no warning that
 rules are present but unused. When they are turned back on, expect two more:
@@ -170,8 +177,14 @@ rules are present but unused. When they are turned back on, expect two more:
 
 ## Applying it on Railway
 
-The relayer runs as a Railway service (`kora.devnet.lazorkit.com` →
-`58btamsd.up.railway.app`).
+Devnet runs as the Railway service `kora-devnet` in the project
+`lazorkit-kora-devnet`, at `https://kora-devnet-production.up.railway.app`,
+built from [`Dockerfile.devnet`](./Dockerfile.devnet) with this directory as
+the build context, and signing with a fee payer that exists only on devnet.
+History: until 2026-10-06 devnet was served by an older service on another
+Railway account (`kora.devnet.lazorkit.com` → `58btamsd.up.railway.app`), which
+ran beta.7 and allowed only the v1 program. That name still points at the old
+service until its DNS record is moved.
 
 There is no way to hand Kora a config through the environment: the path comes
 only from the global `--config <PATH>` flag (default `kora.toml`, resolved
@@ -186,24 +199,208 @@ top-level flag and must come **before** the subcommand
 (`kora --config /cfg/kora.mainnet.toml rpc start`), and a config that fails to
 load exits 1 immediately with no partial start and no fallback.
 
-Set the environment variables above in the Railway service, ship the file in the
-image, and redeploy.
+### The image
 
-Then check from the outside — no key, no transaction, non-zero exit on a
-failure, so it can gate the deploy:
+`Dockerfile.devnet` starts from the beta.8 image pinned by its multi-arch index
+digest, copies `kora.devnet.toml` (unchanged) and `signers.devnet.toml` into
+`/app`, drops to `nobody`, and runs
 
-```bash
-node scripts/kora-check.cjs https://kora.devnet.lazorkit.com --cluster devnet
+```sh
+kora --config /app/kora.devnet.toml rpc start --port "${PORT:-8080}" --signers-config /app/signers.devnet.toml
 ```
 
+through `sh -c` with `exec`, so Kora is PID 1 and gets the platform's SIGTERM.
+`rpc start` has no environment variable for the port, hence the shell. The RPC
+URL is not on that line: Kora reads `RPC_URL` from the environment itself,
+which keeps a provider URL (and any key in its query string) out of the process
+table. Without `RPC_URL` Kora would quietly fall back to
+`http://127.0.0.1:8899`, so the command refuses to start instead. Kora binds
+`0.0.0.0`, so the platform's proxy reaches it.
+
+A mainnet relayer would sit beside it as `Dockerfile.mainnet` and
+`signers.mainnet.toml`, from the same build context.
+
+### The service
+
+| variable | value |
+|---|---|
+| `RAILWAY_DOCKERFILE_PATH` | `Dockerfile.devnet` — this directory holds no file named `Dockerfile`, so the build needs telling |
+| `KORA_PRIVATE_KEY` | the devnet fee payer, as the `[u8, ...]` content of its keypair file. Never the mainnet relayer key |
+| `KORA_API_KEY` | **not set**, by decision (2026-10-06) — see below |
+| `RPC_URL` | `https://api.devnet.solana.com` today; a provider's devnet URL before it carries SDK traffic (see [Still open](#still-open)). A provider URL carries its key, so it goes in from stdin like the signer key |
+| `PORT` | `8080`; optional, it is the default |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `45`. On a redeploy Railway sends the old deployment SIGTERM and, by default, SIGKILL straight after (0 s). beta.8's shutdown waits up to 10 s for the RPC server to stop and up to 30 s for in-flight broadcasts, and `signAndSendTransaction` answers only once the transaction is confirmed — so with no draining time a request in flight during a redeploy is cut off while its transaction may still land |
+
+**The devnet relayer runs without `KORA_API_KEY`** (decided 2026-10-06), so
+Kora mounts no auth layer and answers every method without `x-api-key`. Both
+SDKs default to `https://kora.devnet.lazorkit.com` and send no key, so a key
+here would refuse every integrator on the defaults; and a key that ships in a
+public bundle is not a secret anyway. What bounds the sponsor instead is
+`require_one_of_programs` (LazorKit v2 devnet only), `max_allowed_lamports`
+(0.05 SOL per transaction), the fee-payer policy, and the fee payer's own
+balance — [What actually bounds the spend](#what-actually-bounds-the-spend) and
+the `[kora.auth]` comment in `kora.devnet.toml` say more. Mainnet is not changed
+by this: `kora.mainnet.toml` expects a key. The day an SDK release ships a
+devnet key, set `KORA_API_KEY` from stdin, redeploy, and drop `--allow-open`
+from the check below; a reCAPTCHA token instead means `KORA_RECAPTCHA_SECRET`,
+which gates only the signing methods, so the check keeps `--allow-open`.
+
+`KORA_REDIS_URL` is not set: with usage limits and `[kora.cache]` both off,
+nothing reads it. Set it before turning either on.
+
+Put the secret in from stdin, so it never sits on a command line or in shell
+history, and keep the output of anything that prints variable values off the
+screen (`railway variable list --json` and `--kv` print them raw):
+
+```bash
+# FEE_PAYER_KEYPAIR is the path to the devnet fee payer's keypair file, kept outside the repo
+tr -d ' \n' < "$FEE_PAYER_KEYPAIR" | railway variable set KORA_PRIVATE_KEY --stdin --service kora-devnet --skip-deploys > /dev/null
+railway variable set PORT=8080 RAILWAY_DOCKERFILE_PATH=Dockerfile.devnet RAILWAY_DEPLOYMENT_DRAINING_SECONDS=45 --service kora-devnet --skip-deploys
+# The public endpoint has no key in it, so it can go on the command line:
+railway variable set RPC_URL=https://api.devnet.solana.com --service kora-devnet --skip-deploys
+# A provider's URL carries its key: from a file (RPC_URL_FILE, kept outside the repo), never argv.
+tr -d '\n' < "$RPC_URL_FILE" | railway variable set RPC_URL --stdin --service kora-devnet --skip-deploys > /dev/null
+# Not today (see above). Once an SDK release ships a devnet key, it goes in the same way:
+# railway variable set KORA_API_KEY --stdin --service kora-devnet --skip-deploys < "$API_KEY_FILE" > /dev/null
+```
+
+Only one of the two `RPC_URL` lines, of course. beta.8 redacts the URL's path
+and query in client-facing errors, and the Dockerfile keeps it off the command
+line, so a keyed URL stays out of responses and the process table.
+
+Settings that are not variables: the **healthcheck path is `/liveness`**, which
+answers 200 with or without a key (it bypasses both auth layers by name, so it
+says the process is up and nothing about authentication), and the public domain
+is a generated `*.up.railway.app` one targeting port **8080**. The metrics port
+(9090) gets no domain or TCP proxy, so `signer_balance_lamports` is not
+reachable from the internet.
+
+### Deploying
+
+Deploy this directory as the archive root, from the repository root:
+
+```bash
+railway up deploy/kora --path-as-root --service kora-devnet --detach
+```
+
+Railway builds `Dockerfile.devnet` and swaps the deployment in once
+`/liveness` answers. A config change is the same command after editing
+`kora.devnet.toml`; a secret change is a variable edit and a redeploy.
+
+**Do not roll back past deployment `b3647717`** (2026-10-06 10:33Z, the first
+without a key), and do not use Redeploy on one older than it. Railway's
+rollback restores the old deployment's image *and its variables*, and Redeploy
+rebuilds it with them; every deployment before `b3647717` carries
+`KORA_API_KEY`, so either brings authentication back and every caller on the
+SDK defaults gets 401. Fix forward with `railway up` instead. After any
+rollback, run the check below with `--allow-open`: if `authentication` PASSes,
+delete the key (`railway variable delete KORA_API_KEY --service kora-devnet`)
+and redeploy.
+
+### Checking it
+
+Then check from the outside — no transaction, non-zero exit on a failure, so it
+can gate the deploy. The devnet relayer has no key, so the check is anonymous,
+with `--allow-open`:
+
+```bash
+node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --cluster devnet --allow-open
+```
+
+`--allow-open` turns exactly the two lines an unauthenticated relayer FAILs —
+`authentication` and `fee payer policy` — into WARNs that say the flag allowed
+them, and only while `getConfig` shows `require_one_of_programs` naming nothing
+but the LazorKit v2 program (the bound the decision rests on; otherwise both
+stay FAIL and say why). The v1 id does not count: from the outside, full v1 and
+the sunset binary look the same. Everything else is checked as before, and the
+flag is refused with `--cluster mainnet`. Without it the same run exits 1 on
+those two lines, which is the right default for any relayer that is meant to
+authenticate.
+
 What it should say once this config is live: `version 2.2.0-beta.8`,
-`authentication` PASS (anonymous `getConfig` refused with 401 — probe with
-`getConfig`, never `liveness`, which bypasses both auth layers by name), every
-`program` line PASS including the Secp256r1 precompile, and `metrics` not on the
-RPC port. `usage limit` stays WARN whatever the file says: beta.8's `getConfig`
-does not return the usage-limit table, so the script cannot see it.
+`authentication` WARN (none, allowed by `--allow-open`), every `program` line
+PASS including the Secp256r1 precompile, `lamport cap` 0.0500 SOL, `fee payer
+policy` WARN (`system.allow_transfer`, allowed by `--allow-open`), and
+`metrics` not on the RPC port. `usage limit` stays WARN whatever the file says:
+beta.8's `getConfig` does not return the usage-limit table, so the script
+cannot see it. An anonymous `getPayerSigner` should name the devnet fee payer,
+and the deploy logs should not contain the signer key.
+
+The day a key is set, run it with the key in the environment (not `--key`,
+which puts it in the process table) and without `--allow-open`; then
+`authentication` and `api key` should PASS:
+
+```bash
+KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --cluster devnet
+```
 
 ## Still open
+
+Four things stand between this service and `kora.devnet.lazorkit.com`, and
+none of them is a change to this directory. The last two do not wait for the
+name: this service's own URL is already in this public repository, and it
+sponsors anyone. Authentication is settled; it follows the list.
+
+- **The name is still held on Railway by the old service.** Railway refuses to
+  add it to this service as a custom domain — the API answers only "Failed to
+  create custom domain, please try again", while another name under
+  `devnet.lazorkit.com` attaches without trouble (tried 2026-10-06). Pending:
+  the old service's owner removes the custom domain from that service. Then
+
+  ```bash
+  railway domain kora.devnet.lazorkit.com --port 8080 --service kora-devnet
+  ```
+
+  returns two records for the registrar: a CNAME for `kora.devnet` to a
+  `*.up.railway.app` target, and a `_railway-verify` TXT record. Railway routes
+  nothing to the name until both are in place, so set them together, at the
+  cutover. Because the SDK defaults send no key and this relayer asks for none,
+  integrators on the defaults need no change when the name moves.
+- **`RPC_URL` is the public devnet endpoint**, reached from Railway's shared
+  egress addresses. The public endpoint rate-limits per IP, and every SDK
+  user's relayer traffic (simulation, send, confirmation polling, the balance
+  poll) would come from those addresses. It serves stale reads, and not only
+  right after a change: on 2026-10-06 Kora's balance poll reported the fee
+  payer as not found minutes after its first funding finalized, and again four
+  times between 10:41 and 10:49Z, hours after it was funded. On the signing
+  path the same stale read refuses a valid transaction. Move to a provider's
+  devnet URL (from stdin, [above](#the-service)) before the name moves; the old
+  relayer used a keyed provider.
+- **Nothing watches it.** `[metrics.fee_payer_balance]` is on, but nothing
+  scrapes port 9090; Railway's healthcheck runs only at deploy time, and there
+  is one replica. When the fee payer runs dry, or a crash loop uses up the
+  restart policy, sponsorship fails for every devnet SDK user and nobody is
+  told. Add a small scheduled check (a Railway cron service in this project,
+  or a scheduled GitHub Action) that calls `getBalance` on the fee payer
+  through a provider's devnet RPC and `GET /liveness` on the public domain,
+  and posts to a webhook when the balance falls below a floor (say 0.3 SOL) or
+  liveness fails; and a Railway deployment webhook for crashed and failed
+  deploys. Not Kora's `signer_balance_lamports`: it comes from Kora's balance
+  poll through `RPC_URL`, which on the public endpoint intermittently reports
+  the payer as not found (above), so an alert on it would fire on a funded
+  payer — or have to ignore the very reading that means empty. Once `RPC_URL`
+  is a provider, the metric (`kora-devnet.railway.internal:9090/metrics`) is a
+  fair second source.
+- **The fee payer holds a reserve, not a float.** With no authentication, its
+  balance is what bounds the total: each sponsored transaction may cost it up
+  to the 0.05 SOL cap, nothing counts how many there are, and nothing alerts
+  yet. [Item 4 above](#what-actually-bounds-the-spend) says keep it thin; on
+  2026-10-06 it was topped up from the devnet program's upgrade authority
+  (faucet airdrops were rate-limited) to well above a working float. Bring it
+  down to a float — 0.5 to 1 SOL is plenty: a full end-to-end run of the SDK
+  flows, five sponsored transactions from wallet creation to a session send,
+  cost the payer about 0.0054 SOL — hold the rest on a separate devnet key, and
+  top up by hand or on the alert above. Until that key exists, top-ups come
+  from the upgrade authority, with the maintainer's approval.
+
+Settled:
+
+- **Authentication: none on devnet, by decision (2026-10-06)** — see
+  [The service](#the-service). The alternative, for later: ship a devnet key
+  (or a reCAPTCHA token) as the SDKs' default, release them, then set
+  `KORA_API_KEY` here and check without `--allow-open`.
+
+Beyond the cutover:
 
 - **Lighthouse** (`[kora.lighthouse]`) appends balance assertions that abort a
   transaction if the fee payer loses more than expected — the most direct

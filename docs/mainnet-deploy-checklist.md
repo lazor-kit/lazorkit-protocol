@@ -278,11 +278,13 @@ end — see [Two-id rehearsal](#two-id-rehearsal).
 - [ ] Relayer: **a new service at a new URL**, running
       `deploy/kora/kora.mainnet.toml` (v2 id only), with its own thin-funded
       signer. Pass `scripts/kora-check.cjs <new-url> --cluster mainnet` with no
-      FAIL. **Do not edit the relayer v1 apps use today.** Its config is not in
-      any repo and Seedless sponsors through it; narrowing its allowlist to the
-      v2 id refuses every v1 transaction from that moment — the flag day phase A
-      exists to avoid. Before anything else, record its current `getConfig` and
-      which apps call it, in the deploy log.
+      FAIL, with the relayer's key in `KORA_API_KEY` (an authenticated relayer
+      refuses the script's later probes without it). **Do not edit the relayer
+      v1 apps use today.** Its config is not in any repo and Seedless sponsors
+      through it; narrowing its allowlist to the v2 id refuses every v1
+      transaction from that moment — the flag day phase A exists to avoid.
+      Before anything else, record its current `getConfig` and which apps call
+      it, in the deploy log.
 - [ ] Publish the SDKs whose `PROGRAM_ID_MAINNET` is the v2 id, then move
       `latest` to them. Pinned `^0.3` users — Seedless — are not moved by that.
       Any wrapper that switches to sdk-legacy 1.x (`@lazorkit/wallet`) ships it
@@ -795,8 +797,9 @@ The configuration itself is written out, for both clusters, in
 a README covering the env vars and the Railway steps. Every value carries its
 reasoning inline; the things that actually bound a stranger are
 `require_one_of_programs` (a transaction that never touches LazorKit is refused
-outright), authentication, `max_allowed_lamports` set from measured cost, and
-the fee payer's own balance. Not `rate_limit`: on beta.8 it is applied per
+outright), authentication (mainnet only — the devnet relayer runs without an
+API key, by decision on 2026-10-06; see the README), `max_allowed_lamports` set
+from measured cost, and the fee payer's own balance. Not `rate_limit`: on beta.8 it is applied per
 connection, by delaying requests over it, so it is not a cap on the server's
 total rate or on how fast the sponsor can be spent.
 
@@ -813,18 +816,38 @@ with an SDK change; the steps are in
 Meanwhile how much SOL the sponsor holds carries more of the weight — see the
 funding item under "Config gates for v2".
 
-Check any relayer against all of this from the outside, with no key and no
-transaction:
+Check any relayer against all of this from the outside, with no transaction.
+The first probe is always anonymous; after it, a relayer with authentication on
+needs the key — on beta.8 it refuses every method but `liveness` to a stranger,
+`getVersion` included, so a keyless run against a correctly configured relayer
+FAILs with `no config readable (401)`. Give the key through the environment, not
+`--key`, which puts it in the process table:
 
 ```bash
-node scripts/kora-check.cjs https://kora.devnet.lazorkit.com --cluster devnet
+KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs <relayer-url> --cluster mainnet
 ```
 
-It exits non-zero on a FAIL, so it can gate a deploy. Today that endpoint
-returns three: no authentication, no Secp256r1 precompile in `allowed_programs`,
-and the fee-payer policy above on an unauthenticated host. Its `usage limit`
-line is a WARN on any beta.8 relayer: `getConfig` there does not return the
-usage-limit table, so the script cannot tell on from off.
+The devnet relayer on Railway runs without a key, by decision (2026-10-06,
+[`deploy/kora/README.md`](../deploy/kora/README.md#the-service)), so it is
+checked anonymously with `--allow-open`, which turns exactly its two
+open-relayer FAILs (`authentication`, `fee payer policy`) into WARNs — only
+while `require_one_of_programs` names nothing but the LazorKit v2 program (not
+v1: from the outside full v1 and the sunset binary look the same) — and is
+refused with `--cluster mainnet`:
+
+```bash
+node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --cluster devnet --allow-open
+```
+
+It exits non-zero on a FAIL, so it can gate a deploy. Against
+`https://kora.devnet.lazorkit.com`, while that name still points at the old
+relayer (beta.7, no authentication, so no key is needed there), the config
+recorded above (not a fresh run) FAILs on authentication, on the v2 program
+(the old relayer allows only v1), on the Secp256r1 precompile, and on the
+fee-payer policy above on an unauthenticated host, with WARNs besides for the
+version, the v1 program and the extra programs. Its `usage limit` line is a
+WARN on any beta.8 relayer: `getConfig` there does not return the usage-limit
+table, so the script cannot tell on from off.
 
 ### The key that leaked
 

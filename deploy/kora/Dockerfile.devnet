@@ -1,0 +1,30 @@
+# Kora paymaster for LazorKit devnet, as deployed on Railway.
+#
+# Build context is this directory (deploy/kora); README.md "Applying it on
+# Railway" has the deploy steps. Kora takes its config only from --config, so
+# the file is baked in and a config change is a rebuild, not a variable edit.
+#
+# No secret is in the image. The environment carries them:
+#   KORA_PRIVATE_KEY  the devnet fee payer, read by signers.devnet.toml
+#   KORA_API_KEY      read by `rpc start` itself ([env: KORA_API_KEY]); not set
+#                     on the devnet service, by decision (README, "The service")
+#   RPC_URL           read by kora itself ([env: RPC_URL]); required here
+#   PORT              optional, 8080 when unset
+# The RPC URL stays out of argv on purpose: a provider URL can carry its key in
+# the query string, and argv is visible in the process table.
+
+# v2.2.0-beta.8, pinned by its multi-arch index digest (amd64 + arm64).
+FROM ghcr.io/solana-foundation/kora:v2.2.0-beta.8@sha256:1b929cd9b32e6a3dddb646669fbe0d30651e07377b2bface044cd84289df59bf
+
+WORKDIR /app
+COPY kora.devnet.toml signers.devnet.toml ./
+
+# Kora writes nothing to disk with cache and usage limits off.
+USER nobody
+
+EXPOSE 8080
+
+# `--config` is a top-level flag and has to come before the subcommand. Without
+# RPC_URL kora would quietly default to http://127.0.0.1:8899, so refuse to
+# start instead. exec, so kora is PID 1 and gets the platform's SIGTERM.
+CMD ["/bin/sh", "-c", ": \"${RPC_URL:?RPC_URL is not set}\"; exec kora --config /app/kora.devnet.toml rpc start --port \"${PORT:-8080}\" --signers-config /app/signers.devnet.toml"]
