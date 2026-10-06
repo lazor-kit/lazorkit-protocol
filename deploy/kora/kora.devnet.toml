@@ -42,7 +42,8 @@ rate_limit = 100
 #   - `max_allowed_lamports`: 0.05 SOL per transaction;
 #   - `[validation.fee_payer_policy]`: everything shut except System transfer
 #     and create-account, which the protocol's own CPIs need;
-#   - the fee payer's own balance (devnet SOL, topped up as it is spent).
+#   - the fee payer's own balance: devnet SOL, but kept to a working float and
+#     topped up as it is spent, because with no key it bounds the total.
 # `rate_limit` is not one of them — it is per connection, see [kora].
 #
 # Mainnet is not changed by this: kora.mainnet.toml expects KORA_API_KEY.
@@ -106,9 +107,14 @@ get_supported_tokens = false
 #   FeeRecord, 32 bytes (once/payer) 0.0008128 SOL
 #   token account, 165 bytes        0.00148844 SOL
 # so CreateWallet costs the payer ~0.0029 SOL and a migration lands around 0.01.
-# Devnet is deliberately looser than mainnet's 0.015, because rehearsals and
-# integrator testing create odd shapes and a refusal here costs nothing but
-# faucet SOL. It is still half of the 0.1 this relayer runs today.
+# Devnet is deliberately looser than mainnet's 0.015, so that rehearsals and
+# integrator testing with odd shapes are not refused at the relayer. That slack
+# is not free: with no authentication here (see [kora.auth]) this is what any
+# one sponsored transaction may cost the payer, and the payer's balance is what
+# bounds the total — so the balance is kept to a working float, not a reserve
+# (deploy/kora/README.md, "Still open"). Faucet airdrops are rate-limited, so a
+# top-up is a deliberate transfer, not a free refill. The old devnet relayer
+# allowed 0.1.
 max_allowed_lamports = 50000000
 
 # Payer, plus an Ed25519 owner where one signs. Passkey flows add no signature:
@@ -257,8 +263,11 @@ blocked_account_extensions = []
 # `max_allowed_lamports`, the fee-payer policy and the fee payer's balance —
 # not by authentication, which devnet runs without (see [kora.auth]), and not by
 # `rate_limit`, which is per connection. On devnet that balance is devnet SOL;
-# keep it modest anyway and watch [metrics.fee_payer_balance], because this is
-# the rehearsal.
+# keep it to a working float anyway and alert on it, because this is the
+# rehearsal. While RPC_URL is the public endpoint, alert on `getBalance` through
+# a provider rather than on [metrics.fee_payer_balance]: that metric comes from
+# Kora's own poll through RPC_URL, which intermittently reads the payer as not
+# found (README, "Still open").
 #
 # Turning it back on is the same here as on mainnet: SDK sends a `user_id`,
 # KORA_REDIS_URL set, `fallback_if_unavailable` stays false, flip `enabled`.

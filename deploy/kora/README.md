@@ -51,9 +51,11 @@ carry:
    rounded. 0.015 SOL on mainnet against the 0.1 the relayer runs today.
 4. **The fee payer's own balance** — the hard ceiling under all of the above.
    Keep the sponsor thinly funded (what a bad day may cost, topped up as it is
-   spent, not a reserve) and alert on it: `[metrics.fee_payer_balance]` exports
+   spent, not a reserve) and alert on it. `[metrics.fee_payer_balance]` exports
    `signer_balance_lamports` per signer on the metrics port (9090), refreshed
-   every `expiry_seconds`.
+   every `expiry_seconds`, but that number comes from Kora's own balance poll
+   through `RPC_URL`, so it is only as good as that endpoint; the devnet alert
+   reads the balance itself (see [Still open](#still-open)).
 
 `rate_limit` is not on that list. On beta.8 it is tower's `RateLimitLayer` in
 the HTTP middleware, which the server builds afresh for each connection: each
@@ -285,6 +287,16 @@ Railway builds `Dockerfile.devnet` and swaps the deployment in once
 `/liveness` answers. A config change is the same command after editing
 `kora.devnet.toml`; a secret change is a variable edit and a redeploy.
 
+**Do not roll back past deployment `b3647717`** (2026-10-06 10:33Z, the first
+without a key), and do not use Redeploy on one older than it. Railway's
+rollback restores the old deployment's image *and its variables*, and Redeploy
+rebuilds it with them; every deployment before `b3647717` carries
+`KORA_API_KEY`, so either brings authentication back and every caller on the
+SDK defaults gets 401. Fix forward with `railway up` instead. After any
+rollback, run the check below with `--allow-open`: if `authentication` PASSes,
+delete the key (`railway variable delete KORA_API_KEY --service kora-devnet`)
+and redeploy.
+
 ### Checking it
 
 Then check from the outside — no transaction, non-zero exit on a failure, so it
@@ -298,10 +310,11 @@ node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --clus
 `--allow-open` turns exactly the two lines an unauthenticated relayer FAILs —
 `authentication` and `fee payer policy` — into WARNs that say the flag allowed
 them, and only while `getConfig` shows `require_one_of_programs` naming nothing
-but the LazorKit program (the bound the decision rests on; otherwise both stay
-FAIL and say why). Everything else is checked as before, and the flag is
-refused with `--cluster mainnet`. Without it the same run exits 1 on those two
-lines, which is the right default for any relayer that is meant to
+but the LazorKit v2 program (the bound the decision rests on; otherwise both
+stay FAIL and say why). The v1 id does not count: from the outside, full v1 and
+the sunset binary look the same. Everything else is checked as before, and the
+flag is refused with `--cluster mainnet`. Without it the same run exits 1 on
+those two lines, which is the right default for any relayer that is meant to
 authenticate.
 
 What it should say once this config is live: `version 2.2.0-beta.8`,
@@ -323,9 +336,10 @@ KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs https://kora-d
 
 ## Still open
 
-Three things stand between this service and `kora.devnet.lazorkit.com`, and
-none of them is a change to this directory. Authentication and funding are
-settled; both follow the list.
+Four things stand between this service and `kora.devnet.lazorkit.com`, and
+none of them is a change to this directory. The last two do not wait for the
+name: this service's own URL is already in this public repository, and it
+sponsors anyone. Authentication is settled; it follows the list.
 
 - **The name is still held on Railway by the old service.** Railway refuses to
   add it to this service as a custom domain — the API answers only "Failed to
@@ -345,23 +359,39 @@ settled; both follow the list.
 - **`RPC_URL` is the public devnet endpoint**, reached from Railway's shared
   egress addresses. The public endpoint rate-limits per IP, and every SDK
   user's relayer traffic (simulation, send, confirmation polling, the balance
-  poll) would come from those addresses. It has already served a stale read:
-  on 2026-10-06 Kora's balance poll reported the freshly funded fee payer as
-  not found, minutes after its funding finalized. On the signing path the same
-  stale read refuses a valid transaction. Move to a provider's devnet URL (from
-  stdin, [above](#the-service)) before the name moves; the old relayer used a
-  keyed provider.
+  poll) would come from those addresses. It serves stale reads, and not only
+  right after a change: on 2026-10-06 Kora's balance poll reported the fee
+  payer as not found minutes after its first funding finalized, and again four
+  times between 10:41 and 10:49Z, hours after it was funded. On the signing
+  path the same stale read refuses a valid transaction. Move to a provider's
+  devnet URL (from stdin, [above](#the-service)) before the name moves; the old
+  relayer used a keyed provider.
 - **Nothing watches it.** `[metrics.fee_payer_balance]` is on, but nothing
   scrapes port 9090; Railway's healthcheck runs only at deploy time, and there
   is one replica. When the fee payer runs dry, or a crash loop uses up the
   restart policy, sponsorship fails for every devnet SDK user and nobody is
-  told. Before the name moves, add a small scheduled check (a Railway cron
-  service in this project, or a scheduled GitHub Action) that reads
-  `signer_balance_lamports` from `kora-devnet.railway.internal:9090/metrics`
-  (or `getBalance` on the fee payer) and `GET /liveness` on the public domain,
+  told. Add a small scheduled check (a Railway cron service in this project,
+  or a scheduled GitHub Action) that calls `getBalance` on the fee payer
+  through a provider's devnet RPC and `GET /liveness` on the public domain,
   and posts to a webhook when the balance falls below a floor (say 0.3 SOL) or
   liveness fails; and a Railway deployment webhook for crashed and failed
-  deploys.
+  deploys. Not Kora's `signer_balance_lamports`: it comes from Kora's balance
+  poll through `RPC_URL`, which on the public endpoint intermittently reports
+  the payer as not found (above), so an alert on it would fire on a funded
+  payer — or have to ignore the very reading that means empty. Once `RPC_URL`
+  is a provider, the metric (`kora-devnet.railway.internal:9090/metrics`) is a
+  fair second source.
+- **The fee payer holds a reserve, not a float.** With no authentication, its
+  balance is what bounds the total: each sponsored transaction may cost it up
+  to the 0.05 SOL cap, nothing counts how many there are, and nothing alerts
+  yet. [Item 4 above](#what-actually-bounds-the-spend) says keep it thin; on
+  2026-10-06 it was topped up from the devnet program's upgrade authority
+  (faucet airdrops were rate-limited) to well above a working float. Bring it
+  down to a float — 0.5 to 1 SOL is plenty: a full end-to-end run of the SDK
+  flows, five sponsored transactions from wallet creation to a session send,
+  cost the payer about 0.0054 SOL — hold the rest on a separate devnet key, and
+  top up by hand or on the alert above. Until that key exists, top-ups come
+  from the upgrade authority, with the maintainer's approval.
 
 Settled:
 
@@ -369,15 +399,6 @@ Settled:
   [The service](#the-service). The alternative, for later: ship a devnet key
   (or a reCAPTCHA token) as the SDKs' default, release them, then set
   `KORA_API_KEY` here and check without `--allow-open`.
-- **Funding.** The fee payer (`4fKjmPaKh6y5yU3a1yWnPV7M5x3x4zWmuEVSVbVyPpFd`,
-  devnet only) was first funded with 1 SOL from another devnet key, then
-  topped up on 2026-10-06 with 10 devnet SOL from the devnet program's upgrade
-  authority, in transaction
-  `2mu2bjXK6NzTWGKepfjBAGcmgF7ZyXTnajJz6wiUkhmFfxH3pCPPmhSYqd3fXx21LoJY3UW4QDVF3K1jNhkrsnid`,
-  leaving it at about 10.99 SOL. Top-ups come from that key for now, with the
-  maintainer's approval; faucet airdrops were rate-limited on 2026-10-06. It
-  is devnet SOL, but the balance is still the last bound on the sponsor, so
-  the alert above is what keeps it honest.
 
 Beyond the cutover:
 

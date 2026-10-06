@@ -831,7 +831,8 @@ The devnet relayer on Railway runs without a key, by decision (2026-10-06,
 [`deploy/kora/README.md`](../deploy/kora/README.md#the-service)), so it is
 checked anonymously with `--allow-open`, which turns exactly its two
 open-relayer FAILs (`authentication`, `fee payer policy`) into WARNs — only
-while `require_one_of_programs` names nothing but the LazorKit program — and is
+while `require_one_of_programs` names nothing but the LazorKit v2 program (not
+v1: from the outside full v1 and the sunset binary look the same) — and is
 refused with `--cluster mainnet`:
 
 ```bash
@@ -840,9 +841,11 @@ node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --clus
 
 It exits non-zero on a FAIL, so it can gate a deploy. Against
 `https://kora.devnet.lazorkit.com`, while that name still points at the old
-relayer (beta.7, no authentication, so no key is needed there), it returns
-three: no authentication, no Secp256r1 precompile in `allowed_programs`, and
-the fee-payer policy above on an unauthenticated host. Its `usage limit` line is a
+relayer (beta.7, no authentication, so no key is needed there), the config
+recorded above (not a fresh run) FAILs on authentication, on the v2 program
+(the old relayer allows only v1), on the Secp256r1 precompile, and on the
+fee-payer policy above on an unauthenticated host, with WARNs besides for the
+version, the v1 program and the extra programs. Its `usage limit` line is a
 WARN on any beta.8 relayer: `getConfig` there does not return the usage-limit
 table, so the script cannot tell on from off.
 

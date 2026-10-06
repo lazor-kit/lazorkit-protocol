@@ -18,8 +18,10 @@
 // turns exactly the two open-relayer FAILs, `authentication` and the
 // `fee payer policy` line, into WARNs that say the flag allowed them; nothing
 // else changes. It does so only while `getConfig` shows
-// `require_one_of_programs` naming nothing but the LazorKit program, the bound
-// that decision rests on; otherwise the two lines stay FAIL and say why.
+// `require_one_of_programs` naming nothing but the LazorKit v2 program, the
+// bound that decision rests on; otherwise the two lines stay FAIL and say why.
+// Not v1 either: from here a full v1 program and the sunset binary look the
+// same, so a gate naming v1 keeps both lines FAIL.
 // Devnet only: with `--cluster mainnet` it is refused, because a mainnet
 // relayer has to authenticate.
 //
@@ -140,16 +142,18 @@ async function run(url, cluster, apiKey, allowOpen) {
   const anonymous = await rpc(url, 'getConfig');
   const authed = apiKey ? await rpc(url, 'getConfig', apiKey) : null;
   // What --allow-open rests on: every sponsored transaction has to touch
-  // LazorKit. A gate that also names another program (System, say) lets a
-  // transaction through on that one alone.
+  // LazorKit v2. A gate that also names another program (System, say) lets a
+  // transaction through on that one alone. The v1 id is refused too: this
+  // script cannot see whether it runs the sunset binary or full v1 (H-3), and
+  // the configs keep it out of the gate until phase B (kora-config-lint.cjs
+  // fails it before then). Revisit this line with that edit.
   const gate = (anonymous.json?.result?.validation_config ?? anonymous.json?.result?.validation ?? {}).require_one_of_programs;
-  const gated =
-    Array.isArray(gate) && gate.length > 0 && gate.every((p) => p === LAZORKIT[cluster] || p === LAZORKIT_V1[cluster]);
+  const gated = Array.isArray(gate) && gate.length > 0 && gate.every((p) => p === LAZORKIT[cluster]);
   const allowed = allowOpen && gated;
   const allowNote = allowOpen
     ? gated
       ? ' (allowed by --allow-open)'
-      : ' (--allow-open not applied: require_one_of_programs does not name only the LazorKit program)'
+      : ' (--allow-open not applied: require_one_of_programs does not name only the LazorKit v2 program)'
     : '';
   if (anonymous.status === 200 && anonymous.json?.result) {
     line(allowed ? 'warn' : false, 'authentication', 'none — getConfig answers a stranger with no x-api-key' + allowNote);
