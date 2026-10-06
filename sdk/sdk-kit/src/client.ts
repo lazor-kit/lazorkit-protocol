@@ -391,14 +391,15 @@ function assertAddAuthorityRole(
   }
 }
 
-/// A session with no actions is not "a session with no limits" — it is a key
-/// with *more* power over the vault than a bounded Delegate. The action buffer
-/// is what switches on the vault invariants the program checks after the CPI
-/// (owner and data length; every vault token account unchanged but for its
-/// balance; no SOL and no mint the actions do not name leaving the vault), so
-/// an empty buffer disables all of them: such a key can reassign the vault,
-/// seize its token accounts, or move any asset it holds. That is a deliberate
-/// capability, never a default, so it has to be asked for by name.
+/// A session with no actions is not "a session with no limits" in name only —
+/// it has no spending limit at all. The action buffer is what switches on the
+/// policy rules (no SOL and no mint the actions do not name leaving the
+/// vault, and the limits on those they do), so an empty buffer lets the key
+/// move any asset the vault holds until it expires: more than a bounded
+/// Delegate can. It still cannot change who controls the vault or its token
+/// accounts — the program holds every signer but an Owner to that — but
+/// spending without a limit is a deliberate capability, never a default, so
+/// it has to be asked for by name.
 function assertSessionActions(
   actions: SessionAction[] | undefined,
   unrestricted = false,
@@ -406,9 +407,9 @@ function assertSessionActions(
   if ((!actions || actions.length === 0) && !unrestricted) {
     throw new Error(
       'createSession with no actions grants an UNRESTRICTED session key — it can ' +
-        'move the whole vault and even reassign it, which is more power than a ' +
-        'bounded Delegate has. Pass actions: [Actions.solLimit(...), ...] to bound ' +
-        'it, or unrestricted: true to say you meant it.',
+        'move everything the vault holds, which is more than a bounded Delegate ' +
+        'can. Pass actions: [Actions.solLimit(...), ...] to bound it, or ' +
+        'unrestricted: true to say you meant it.',
     );
   }
 }

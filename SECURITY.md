@@ -45,7 +45,7 @@ LazorKit V2 underwent an audit by **Accretion** plus internal pre-mainnet review
 - Transfer-allocate-assign pattern prevents create-account DoS.
 - Session action enforcement: expired spending limits are a hard deny; expired whitelists block all programs.
 - `SolMaxPerTx` uses per-CPI gross-outflow tracking (DeFi round-trips can't bypass the per-tx cap).
-- Vault metadata and token-account invariants enforced for every signer with a policy (blocks `System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount`, `FreezeAccount` escapes; a token account that becomes vault-owned during the Execute may carry no delegate or close authority).
+- Vault metadata and token-account invariants enforced for every signer but an Owner — sessions with or without actions, Admins and Delegates, in Execute and ExecuteDeferred (blocks `System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount`, `FreezeAccount` escapes; a token account that becomes vault-owned during the Execute may carry no delegate or close authority).
 - A policy bounds SOL and every mint the vault holds directly: SOL with no `Sol*` action and a mint with no `Token*` action may not leave (3037 / 3038). Balances are summed per mint over every vault token account in the Execute, each counted once, which also prevents the dummy-account bypass.
 - Admin-gated protocol instructions verify config ownership before reading admin field.
 - Constant-time comparison on the signed challenge field.

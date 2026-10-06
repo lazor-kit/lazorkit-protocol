@@ -177,9 +177,9 @@ const { instructions, sessionPda } = await client.createSession({
 **Important scoping notes**:
 - A policy names what may leave the vault, and nothing it does not name may. With no `Sol*` action the vault's SOL may not fall (3037), rent the vault pays for a new account included; a mint with no `Token*` action may not leave the vault's token accounts (3038). The session above can move SOL but no token. Both are net over one Execute, inflows always pass, and wSOL is a mint, not SOL. A policy holds at most 16 actions, so it can name about 15 mints. For a swap, name the mint it sells, and create the output ATA in a top-level instruction the fee payer funds, before the Execute, or give the session a `SolLimit` that covers the rent.
 - What this covers is the vault's own SOL and the balances of the token accounts it owns directly. Value the vault controls any other way (stake or nonce accounts, positions in other programs, mint or upgrade authorities it holds) is bounded only by `ProgramWhitelist`; see [docs/Architecture.md](docs/Architecture.md#what-a-policy-bounds).
-- `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit enforces vault metadata and token-account invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount`, `FreezeAccount`, etc.): every vault token account the Execute passes writable must end it unchanged but for its balance.
+- `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit enforces vault metadata and token-account invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount`, `FreezeAccount`, etc.): every vault token account the Execute passes writable must end it unchanged but for its balance. These hold for every signer but an Owner — every session, with or without actions, every Admin and Delegate — so no non-Owner signer can hand the vault or its token accounts to anyone. Authorities the vault holds over other accounts (stake, nonce, mint, upgrade) are not checked: bound them with `ProgramWhitelist`, or keep them away from sessions and Admins.
 - Expired spending limits = **fully exhausted** (deny). Expired whitelists = **hard deny**. Expired blacklists = silently dropped.
-- Omitting `actions` creates an unrestricted session — it can do anything the wallet can until it expires.
+- Omitting `actions` creates an unrestricted session — it can spend anything the vault holds until it expires. Like every non-Owner signer, it cannot change who controls the vault or its token accounts (`Assign`, `SetAuthority`, `Approve`, `CloseAccount` of an existing account): those take an Owner.
 
 ## Cost
 
@@ -223,7 +223,7 @@ Each authority has its own PDA, so different authorities on the same wallet exec
 - Fee-eligible instructions require canonical protocol fee accounts and per-payer `FeeRecord` accounting.
 - Expired session limits treated as fully exhausted (never "unlocked").
 - `SolMaxPerTx` uses per-CPI gross-outflow tracking — DeFi round-trips can't bypass the per-tx cap by returning most lamports.
-- Vault and token-account invariants enforced for every signer with a policy (blocks `System::Assign`, `SetAuthority`, `Approve` escapes; a token account that becomes vault-owned during the Execute may carry no delegate or close authority).
+- Vault and token-account invariants enforced for every signer but an Owner — sessions with or without actions, Admins, Delegates, in Execute and ExecuteDeferred (blocks `System::Assign`, `SetAuthority`, `Approve` escapes; a token account that becomes vault-owned during the Execute may carry no delegate or close authority).
 - A policy bounds what it names: SOL and mints it does not name may not leave the vault. Balances are summed per mint over every vault token account in the Execute, each counted once (prevents dummy-account bypass).
 
 Report vulnerabilities via [SECURITY.md](SECURITY.md).

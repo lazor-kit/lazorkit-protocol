@@ -379,6 +379,12 @@ the sunset binary that ran both migrations is the one with 0.9.3's entrypoint
   on the default pairing, so a v1 passkey wallet migrating through the sunset
   binary is covered end to end.
 
+The table records the artifacts this rehearsal ran on. **The v2 rows are no
+longer this branch's build:** applying the vault invariants to every signer but
+an Owner moved both v2 artifacts (`scripts/release-hashes.txt` has the current
+ones; the sunset artifacts did not change). Rehearse §3 again on the current
+four before deploying them.
+
 | artifact | id | size | SHA-256 |
 |---|---|---|---|
 | v1 — `solana program dump` of the live program | `LazorjRF…`, `4h3XoNRe…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
@@ -429,8 +435,9 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet runs this branch's devnet artifact.** Devnet's v2 (`57bTNW…`) runs
-`d95e5c2b…` (D13 and the heap-capacity fix), upgraded on 2026-10-04 in slot
+**Devnet runs the previous devnet artifact.** Devnet's v2 (`57bTNW…`) runs
+`d95e5c2b…` (D13 and the heap-capacity fix), not this branch's build, which
+also applies the vault invariants to every non-Owner signer. Upgraded on 2026-10-04 in slot
 507081509; before that it ran the D13 build `efea949f…` from 2026-10-03 (slot
 507022596). A smoke run on each passed the full lifecycle and every D13 case
 (3037, 3038, 3032), and lazor-kit #108's devnet run (S2) passed against

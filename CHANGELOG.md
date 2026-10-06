@@ -6,6 +6,85 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — the vault invariants bind every signer but an Owner (program; needs a review before the mainnet deploy)
+
+**Program** (both v2 artifacts change: devnet `d95e5c2b…` → `30ac9bef…`,
+mainnet `67d47162…` → `96f4adc1…`, 153624 bytes each; both sunset artifacts are
+byte-identical)
+
+- After the CPI loop, Execute holds the vault to I-0 (owner and data length
+  unchanged, 3030 / 3031) and I-2 / I-3 (every writable vault token account
+  unchanged but for its balance, and a token account that became vault-owned
+  carries no delegate and no close authority, 3032) for **every signer that is
+  not an Owner**: sessions with and without actions, Admins, Delegates, and any
+  rank other than Owner, policy or not. Such a change would outlive the
+  signer — a session's expiry, `RevokeSession` and `RemoveAuthority` do not
+  undo it — so spending without a limit and changing who controls the vault
+  are separate powers. An Owner keeps both.
+  The policy rules (I-4 to I-6, 3023–3029, 3037, 3038) are unchanged and still
+  apply only to a signer with a policy.
+- ExecuteDeferred applies the same rule. It has no authority account, so
+  `Authorize` records whether an Owner signed it in `DeferredExecAccount.flags`
+  (bit 0, `DEFERRED_FLAG_OWNER`), the first of what were five padding bytes; no
+  other field moves and the account stays 176 bytes. An Admin's deferred
+  execution is guarded, an Owner's is not. A DeferredExec written before this
+  build holds zero there and is guarded, so an authorization pending across the
+  upgrade (at most 9,000 slots) can only lose power. No other execute path lets
+  a non-Owner make the vault sign: `MigrateWallet` is Owner-only, and no other
+  instruction CPIs as the vault.
+- Now refused to every non-Owner signer, policy or not (still open to an
+  Owner): any change to the vault's owner or data length (`System::Assign`,
+  `Allocate`); on a vault token account the Execute passes writable,
+  `SetAuthority` (any type), `Approve` / `ApproveChecked` and raising an
+  allowance, `Revoke`, `CloseAccount` (including unwrapping a wSOL account the
+  vault already had), `FreezeAccount` / `ThawAccount`, Token-2022 `Reallocate`
+  and `WithdrawExcessLamports`; and handing the vault a token account that still
+  has a delegate or a close authority. Still open to every signer within its
+  policy: SOL and token transfers, creating vault token accounts (vault-funded
+  ATAs included), and a temporary wSOL account created, synced and closed back
+  to the vault in one Execute. Neither SDK builds any of the refused operations
+  for a session or an Admin; an integration that needs one signs it with an
+  Owner. No new error codes: 3030–3032 keep their names and now cover every
+  non-Owner signer.
+- Heap: the copy of each vault token account (`192t` in the Execute sum,
+  `docs/Architecture.md`) is now allocated for every non-Owner signer, not only
+  a policy-bearing one, and for an Admin's ExecuteDeferred.
+- Compute, litesvm, Ed25519 Execute of one SOL transfer, before → after: an
+  Owner 22,482 → 22,498 CU; an Admin 22,482 → 23,111 and a session without
+  actions 22,426 → 23,048; with an SPL transfer and 8 writable vault token
+  accounts, an Admin 28,839 → 32,981 and an Owner 28,839 → 28,855.
+- Tests: `program/tests/non_owner_invariants_tests.rs` (litesvm), 83 tests:
+  Owner, Admin, Delegate, a session without actions and one with actions,
+  each against eleven escapes (Assign and Allocate of the vault; SetAuthority
+  of the account owner and of the close authority, Approve, Revoke,
+  CloseAccount, unwrapping an existing wSOL account, Token-2022 `Reallocate`
+  and `WithdrawExcessLamports` on a vault Token-2022 account; handing the vault
+  an account with a close authority) and four spending flows (SOL transfer, token transfer,
+  vault-funded ATA, temporary wSOL round trip); and ExecuteDeferred: the flag
+  `Authorize` writes, an Admin refused Assign, Allocate, SetAuthority and
+  Approve and allowed a transfer, an Owner allowed Assign, and an Owner's
+  authorization with the flag cleared refused. 28 of them (an Admin, a session
+  without actions, the flag) cover behaviour this build adds; all pass.
+  `policy_unlisted_assets_tests` R1 now expects a session without actions to
+  spend but not to Approve or close an account. Unit tests pin the
+  DeferredExec layout, the flag, and who is guarded for every rank byte.
+- The v2 hashes in `scripts/release-hashes.txt` changed
+  (`check-release-hashes.sh` on the pinned toolchain, macOS arm64: the two v2
+  artifacts as above, both sunset artifacts ok; the same script reproduces
+  `develop`'s recorded hashes on the same machine). The two-id rehearsal has
+  not been re-run on these artifacts; the deploy checklist says so above its
+  table, which still records the 2026-10-04 run. Devnet still runs
+  `d95e5c2b…`.
+
+**SDKs** (no API change)
+
+- `@lazorkit/sdk` and `@lazorkit/sdk-legacy`: the comment on
+  `assertSessionActions` and the error a session with no actions throws
+  without `unrestricted: true` say such a session can move everything the
+  vault holds but cannot change who controls the vault or its token accounts.
+  sdk-legacy's README
+  error table describes 3030–3032 as applying to every non-Owner signer.
+
 ### Changed — Kora usage limits are off until the SDKs send a `user_id`
 
 **Relayer config** (`deploy/kora/`; no program or SDK change)

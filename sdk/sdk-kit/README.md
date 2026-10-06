@@ -57,6 +57,10 @@ This SDK targets protocol v2, which is **not wire-compatible with v1**:
   sells, and create its output ATA in a top-level instruction the fee payer
   funds, before the Execute, or give the policy a `SolLimit` that covers the
   rent.
+- Only an Owner may change who controls the vault or its token accounts
+  (`System::Assign`/`Allocate`, `SetAuthority`, `Approve`, `Revoke`,
+  `CloseAccount` of an existing account): every other signer — any session, an
+  Admin, a Delegate — is refused with 3030–3032, policy or not.
 - `AddAuthority`/`RemoveAuthority` need the wallet account **writable**.
 - Serialized `DeferredPayload`s carry a version and are rejected across the
   boundary — re-authorize rather than replaying one.
