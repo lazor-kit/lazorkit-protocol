@@ -127,7 +127,8 @@ byte-identical)
 
 **SDKs** — breaking for both. `@lazorkit/sdk-legacy` is a stable line
 (1.4.0), so this is a new major (2.0.0); `@lazorkit/sdk` is a pre-release line
-(1.0.0-rc.6), so the next rc. Versions are set when this lands.
+(1.0.0-rc.6), so the next rc: `@lazorkit/sdk-legacy` 2.0.0 and `@lazorkit/sdk`
+1.0.0-rc.7.
 
 - `createSession` / `prepareCreateSession`: `expiresAt` is Unix time in
   seconds. Both throw before any read or passkey prompt on an `expiresAt`
