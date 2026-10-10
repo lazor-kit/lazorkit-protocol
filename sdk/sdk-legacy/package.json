@@ -1,7 +1,7 @@
 {
   "name": "@lazorkit/sdk-legacy",
-  "version": "1.4.0",
-  "description": "LazorKit Protocol TypeScript SDK \u2014 passkey-based smart wallet on Solana (web3.js v1)",
+  "version": "2.0.0",
+  "description": "LazorKit Protocol TypeScript SDK — passkey-based smart wallet on Solana (web3.js v1)",
   "keywords": [
     "solana",
     "wallet",
@@ -30,10 +30,22 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./approval": {
+      "types": "./dist/approval/index.d.ts",
+      "default": "./dist/approval/index.js"
+    },
     "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "approval": [
+        "dist/approval/index.d.ts"
+      ]
+    }
   },
   "files": [
     "dist",
+    "approval",
     "README.md",
     "LICENSE"
   ],
@@ -45,7 +57,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/check-approval-imports.cjs",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build"
   },

@@ -598,6 +598,62 @@ async function getWebAuthnResponse(
 }
 ```
 
+### Typed approval requests (`@lazorkit/sdk-legacy/approval`)
+
+A passkey challenge is a hash: a page that shows only the challenge cannot say
+what it approves. For `CreateSession`, `RevokeSession` and `RemoveAuthority`
+the SDK can also hand over the request the challenge is computed from, so the
+page that asks for the passkey shows exactly what it signs and computes the
+challenge itself. Pass the credential id to the prepare call and forward
+`prepared.request`:
+
+```typescript
+import {
+  withApprovalFragment,
+  parseTypedReply,
+  verifyApprovalReply,
+} from '@lazorkit/sdk-legacy/approval';
+
+const prepared = await client.prepareCreateSession({
+  payer, walletPda, sessionKey, expiresAt, actions,
+  secp256r1: { credentialIdHash, credentialId, authorityPda }, // credentialId: the raw id bytes
+});
+
+// The request travels in the URL fragment: #/?lk1=<base64url JSON>. Over the
+// size cap this throws TypedRequestTooLargeError; it never truncates.
+const url = withApprovalFragment(portalUrl, prepared.request!);
+
+// The portal signs at the slot and counter it reads when the user approves,
+// and says which in its reply. Check the reply before sending anything:
+const { binding } = verifyApprovalReply(prepared.request!, {
+  clientDataJson: response.clientDataJson,
+  typed: parseTypedReply(reply.typed), // undefined from a portal without typed requests
+});
+const { instructions } = client.finalizeCreateSession(prepared, response, binding);
+```
+
+`verifyApprovalReply` throws `PortalReplyMismatchError` when the passkey signed
+anything but this request (at the portal's slot and a counter no lower than
+the request's), and `finalizeX(..., binding)` checks the same again. A reply
+without a `typed` block must carry the SDK's own challenge, as today.
+
+`prepared.request` is set when `secp256r1.credentialId` is given (its SHA-256
+must be `credentialIdHash`) and the client's program is the devnet or mainnet
+v2 deployment. With a credential id, `prepareCreateSession` throws
+`TransactionTooLargeError` before asking for anything when the signed
+transaction could not fit 1,232 bytes: the program receives the WebAuthn data
+whole, which leaves room for `MAX_PASSKEY_SESSION_ACTIONS_BYTES` (224) bytes
+of actions. `rebindSecp256r1(prepared, { slot, counter })` recomputes any
+prepared passkey signing at another slot and counter.
+
+The subpath also holds what the portal side needs: `readApprovalFragment`,
+`checkApprovalQuery`, `approvalReadPlan`, `describeApproval` (what the request
+approves, as data: amounts in base units, windows in seconds, a screen class,
+and the reason when it would fail on chain), `approvalChallenge` and
+`typedReplyFor`. It imports only `@noble/hashes` and `@noble/curves`: no
+`@solana/web3.js` and no `buffer`, so it bundles on its own for the browser and
+React Native.
+
 ### Messages and ownership proofs: never a transaction challenge
 
 The program approves a transaction by the challenge in a passkey signature,

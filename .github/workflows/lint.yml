@@ -215,3 +215,13 @@ jobs:
       - name: typecheck tests-sdk
         working-directory: tests-sdk
         run: npx tsc -p tsconfig.json --noEmit
+
+      # Typed approval requests, off chain: the challenge against the SDK, a
+      # reference written from the program, and the vectors that
+      # program/tests/typed_approval_vectors_tests.rs (the litesvm job) signs
+      # with and lands; the codec, the decoder, transaction sizes, and the
+      # bundle of @lazorkit/sdk-legacy/approval. Needs no validator.
+      # 21-approval-e2e needs a validator and runs with tests-sdk locally.
+      - name: approval unit tests
+        working-directory: tests-sdk
+        run: npx vitest run tests/20-approval-unit.test.ts
