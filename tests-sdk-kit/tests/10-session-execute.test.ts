@@ -20,10 +20,10 @@ import {
   sendTxExpectError,
   airdrop,
   getBalance,
-  getSlot,
   systemTransferFromPda,
   type TestContext,
   makeClient,
+  getUnixTime,
 } from './common.js';
 
 describe('Session Execute', () => {
@@ -54,8 +54,8 @@ describe('Session Execute', () => {
 
   it('executes SOL transfer via session key', async () => {
     const sessionSigner = await generateKeyPairSigner();
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 9000n;
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 3_600n;
 
     const { instructions: createIxs, sessionPda } = await client.createSession({
       payer: ctx.payer.address,
@@ -85,14 +85,14 @@ describe('Session Execute', () => {
   it('rejects execution with wrong session key', async () => {
     const sessionSigner = await generateKeyPairSigner();
     const wrongSigner = await generateKeyPairSigner();
-    const currentSlot = await getSlot(ctx);
+    const now = await getUnixTime(ctx);
 
     const { instructions: createIxs, sessionPda } = await client.createSession({
       payer: ctx.payer.address,
       walletPda,
       adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
       sessionKey: sessionSigner.address,
-      expiresAt: currentSlot + 9000n,
+      expiresAt: now + 3_600n,
       // Deliberately unrestricted: this test exercises the actionless session.
       unrestricted: true,
     });
@@ -110,8 +110,8 @@ describe('Session Execute', () => {
 
   it('rejects execution with expired session', async () => {
     const sessionSigner = await generateKeyPairSigner();
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 10n;
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 10n;
 
     const { instructions: createIxs, sessionPda } = await client.createSession({
       payer: ctx.payer.address,
@@ -124,14 +124,13 @@ describe('Session Execute', () => {
     });
     await sendTx(ctx, createIxs, [ownerSigner]);
 
-    // Wait for the slot to pass expiry, rather than for a fixed time: a loaded
-    // validator produces slots more slowly than the ~2.5/s the old 5 s sleep
-    // assumed, and then the session is still live and the test fails for a
-    // reason that has nothing to do with expiry.
+    // Wait for the cluster clock to pass expiry, rather than for a fixed
+    // time: the program reads `Clock::unix_timestamp`, which can run apart
+    // from this machine's clock.
     const deadline = Date.now() + 60_000;
-    while ((await getSlot(ctx)) <= expiresAt) {
-      if (Date.now() > deadline) throw new Error(`slot never passed ${expiresAt}`);
-      await new Promise((r) => setTimeout(r, 400));
+    while ((await getUnixTime(ctx)) <= expiresAt) {
+      if (Date.now() > deadline) throw new Error(`the cluster clock never passed ${expiresAt}`);
+      await new Promise((r) => setTimeout(r, 500));
     }
 
     const recipient = (await generateKeyPairSigner()).address;

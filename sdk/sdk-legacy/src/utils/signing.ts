@@ -233,6 +233,7 @@ export function buildDataPayloadForTransfer(
 
 /**
  * CreateSession data payload: [session_key(32)][expires_at(8)][actions_len(2)][actions(N)]
+ * `expires_at` is Unix time in seconds.
  */
 export function buildDataPayloadForSession(
   sessionKey: Uint8Array,

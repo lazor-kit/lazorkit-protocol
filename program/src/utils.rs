@@ -48,6 +48,28 @@ mod spl_id_tests {
     }
 }
 
+/// The cluster's Unix time, in seconds, as the `u64` that session expiries,
+/// action expiries and recurring-limit windows are stored in.
+///
+/// Every duration a person reads off a screen ("until 6:50 PM", "50 USDC a
+/// day") is measured with this, not with slots: slots run at whatever pace the
+/// cluster manages (about 400 ms on mainnet, faster on devnet), so a duration
+/// written in slots is only ever "about" one in time. `unix_timestamp` is the
+/// stake-weighted median of the validators' own clocks, held within a bounded
+/// drift of the PoH estimate, so it can run slightly fast or slow, never far.
+///
+/// What stays in slots is what is about landing a transaction rather than about
+/// a person's time: the Secp256r1 signature's age (`auth::secp256r1`, the same
+/// 150-slot horizon as a recent blockhash) and the deferred-execution window
+/// (`Authorize`'s `expiry_offset`, signed as a slot count).
+///
+/// A negative timestamp never occurs on a real cluster. It is refused rather
+/// than read as 0, which would put every expiry in the future.
+#[inline]
+pub fn unix_now(clock: &pinocchio::sysvars::clock::Clock) -> Result<u64, ProgramError> {
+    u64::try_from(clock.unix_timestamp).map_err(|_| ProgramError::InvalidArgument)
+}
+
 /// Wrapper around the `sol_get_stack_height` syscall
 pub fn get_stack_height() -> u64 {
     #[cfg(target_os = "solana")]
@@ -203,5 +225,33 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[31] = 1;
         assert!(!is_all_zero(&bytes));
+    }
+}
+
+#[cfg(test)]
+mod unix_now_tests {
+    use super::unix_now;
+    use pinocchio::sysvars::clock::Clock;
+
+    fn clock(unix_timestamp: i64) -> Clock {
+        Clock {
+            slot: 507_081_509,
+            epoch_start_timestamp: 0,
+            epoch: 0,
+            leader_schedule_epoch: 0,
+            unix_timestamp,
+        }
+    }
+
+    #[test]
+    fn reads_the_timestamp_not_the_slot() {
+        assert_eq!(unix_now(&clock(1_791_331_200)), Ok(1_791_331_200));
+        assert_eq!(unix_now(&clock(0)), Ok(0));
+    }
+
+    #[test]
+    fn refuses_a_negative_timestamp() {
+        assert!(unix_now(&clock(-1)).is_err());
+        assert!(unix_now(&clock(i64::MIN)).is_err());
     }
 }

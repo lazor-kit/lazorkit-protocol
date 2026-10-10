@@ -399,6 +399,7 @@ export function createCreateSessionIx(params: {
   adminAuthorityPda: Address;
   sessionPda: Address;
   sessionKey: Uint8Array;
+  /** Unix time (seconds) after which the session is refused. Not a slot. */
   expiresAt: bigint;
   actionsBuffer?: Uint8Array;
   authPayload?: Uint8Array;

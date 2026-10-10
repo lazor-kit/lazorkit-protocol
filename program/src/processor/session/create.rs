@@ -26,7 +26,9 @@ use crate::{
 ///
 /// Layout:
 /// - `session_key`: The public key of the ephemeral session signer (32 bytes).
-/// - `expires_at`: The absolute slot height when this session expires (8 bytes).
+/// - `expires_at`: Unix time in seconds after which this session is refused (8
+///   bytes, u64 LE). At most [`MAX_SESSION_SECONDS`] ahead of the cluster's
+///   `unix_timestamp`.
 /// - `actions_len`: Length of the actions buffer in bytes (2 bytes, u16 LE). 0 = no actions.
 /// - `actions`: Raw actions buffer (variable, `actions_len` bytes).
 ///
@@ -110,6 +112,19 @@ impl ParsedCreateSessionArgs {
             args_end_offset: 40,
         })
     }
+}
+
+/// The longest a session may live: 30 days, in seconds.
+pub const MAX_SESSION_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+/// `expires_at` must be after `now` and at most [`MAX_SESSION_SECONDS`] after
+/// it, both Unix seconds; otherwise `InvalidSessionDuration` (3008).
+#[inline]
+pub fn check_session_expiry(expires_at: u64, now: u64) -> Result<(), ProgramError> {
+    if expires_at <= now || expires_at > now.saturating_add(MAX_SESSION_SECONDS) {
+        return Err(AuthError::InvalidSessionDuration.into());
+    }
+    Ok(())
 }
 
 /// Processes the `CreateSession` instruction.
@@ -209,19 +224,10 @@ pub fn process(
         return Err(AuthError::PermissionDenied.into());
     }
 
-    // Validate expires_at: must be in the future and within max session duration
-    {
-        let clock = Clock::get()?;
-        let current_slot = clock.slot;
-        if args.expires_at <= current_slot {
-            return Err(AuthError::InvalidSessionDuration.into());
-        }
-        // Max session duration: ~30 days at ~2.5 slots/sec = 6,480,000 slots
-        const MAX_SESSION_SLOTS: u64 = 6_480_000;
-        if args.expires_at > current_slot.saturating_add(MAX_SESSION_SLOTS) {
-            return Err(AuthError::InvalidSessionDuration.into());
-        }
-    }
+    // Validate expires_at: Unix time, in the future and within the max session
+    // duration. A slot number (what clients before time-based expiry sent) is
+    // decades in the past as a time and is refused here.
+    check_session_expiry(args.expires_at, crate::utils::unix_now(&Clock::get()?)?)?;
 
     // Authenticate Authorizer
     // instruction_data layout: [args(40)][actions_len(2)][actions(N)][auth_payload...]
@@ -480,5 +486,39 @@ mod tests {
         let result = ParsedCreateSessionArgs::from_bytes(&data);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().actions_bytes.len(), actions.len());
+    }
+
+    // ─── Expiry (Unix seconds) ──────────────────────────────────────────
+
+    const NOW: u64 = 1_791_158_400;
+
+    fn duration_error(r: Result<(), ProgramError>) -> bool {
+        r == Err(ProgramError::Custom(
+            AuthError::InvalidSessionDuration as u32,
+        ))
+    }
+
+    #[test]
+    fn expiry_must_be_after_now_and_within_thirty_days() {
+        assert_eq!(MAX_SESSION_SECONDS, 2_592_000);
+        assert!(duration_error(check_session_expiry(NOW, NOW)));
+        assert!(duration_error(check_session_expiry(NOW - 1, NOW)));
+        assert_eq!(check_session_expiry(NOW + 1, NOW), Ok(()));
+        assert_eq!(check_session_expiry(NOW + MAX_SESSION_SECONDS, NOW), Ok(()));
+        assert!(duration_error(check_session_expiry(
+            NOW + MAX_SESSION_SECONDS + 1,
+            NOW
+        )));
+        assert!(duration_error(check_session_expiry(u64::MAX, NOW)));
+    }
+
+    /// What an SDK from before time-based expiry sends: a slot. Refused, not
+    /// read as a time decades ago that some later check might mistake.
+    #[test]
+    fn a_slot_is_refused_as_an_expiry() {
+        assert!(duration_error(check_session_expiry(
+            507_081_509 + 50_000,
+            NOW
+        )));
     }
 }

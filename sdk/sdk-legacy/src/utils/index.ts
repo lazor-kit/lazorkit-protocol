@@ -55,6 +55,7 @@ export {
   type PasskeyWalletCandidate,
   type OwnershipProof,
   type AuthorityRoleName,
+  type ClusterClock,
   type WalletFacts,
 } from './ownership';
 // The challenge a passkey signs for a message, never the message itself.

@@ -13,7 +13,9 @@
 //! Security model (learned from Swig wallet):
 //! - Saturating arithmetic throughout to prevent overflow/underflow
 //! - Balance increases (vault gains) are ignored, only outflows count
-//! - Recurring limit windows align to slot boundaries
+//! - Time is Unix seconds (`Clock::unix_timestamp`): action expiries and
+//!   recurring windows are measured in seconds, not slots
+//! - A recurring window restarts at the spend that opens it
 //! - Recurring limits validate single-tx doesn't exceed full window limit
 //! - State mutations only happen after all checks pass
 //! - Zero spending transactions pass through without triggering limits
@@ -149,7 +151,7 @@ pub fn evaluate_pre_actions(
     loc: PolicyLocation,
     compact_instructions: &[CompactInstructionRef<'_>],
     accounts: &[AccountInfo],
-    current_slot: u64,
+    now: u64,
 ) -> Result<(), ProgramError> {
     if !loc.is_present(session_data) {
         return Ok(());
@@ -185,7 +187,7 @@ pub fn evaluate_pre_actions(
                 actions_buf,
                 ActionType::ProgramWhitelist,
                 target_program,
-                current_slot,
+                now,
             )
         {
             return Err(AuthError::ActionProgramNotWhitelisted.into());
@@ -197,7 +199,7 @@ pub fn evaluate_pre_actions(
             actions_buf,
             ActionType::ProgramBlacklist,
             target_program,
-            current_slot,
+            now,
         ) {
             return Err(AuthError::ActionProgramBlacklisted.into());
         }
@@ -212,11 +214,11 @@ fn names_program(
     actions_buf: &[u8],
     action_type: ActionType,
     program: &Pubkey,
-    current_slot: u64,
+    now: u64,
 ) -> bool {
     actions.iter().any(|a| {
         a.action_type == action_type
-            && !is_expired(a, current_slot)
+            && !is_expired(a, now)
             && actions_buf[a.data_offset..a.data_offset + 32] == program[..]
     })
 }
@@ -391,7 +393,7 @@ pub fn evaluate_post_actions(
     vault_lamports_after: u64,
     vault_lamports_gross_out: u64,
     mint_flows: &[MintFlow],
-    current_slot: u64,
+    now: u64,
 ) -> Result<(), ProgramError> {
     if !loc.is_present(session_data) {
         return Ok(());
@@ -413,7 +415,7 @@ pub fn evaluate_post_actions(
     // if any SOL was spent and a limit action has expired, the tx is rejected.
     // This prevents a session with expired limits from becoming unrestricted.
     for action in &actions {
-        let action_expired = is_expired(action, current_slot);
+        let action_expired = is_expired(action, now);
         let abs_data_offset = loc.abs(action.data_offset);
 
         match action.action_type {
@@ -451,7 +453,7 @@ pub fn evaluate_post_actions(
                     let window = read_u64(&session_data[abs_data_offset..], 16);
                     let last_reset = read_u64(&session_data[abs_data_offset..], 24);
 
-                    let effective_spent = if current_slot.saturating_sub(last_reset) > window {
+                    let effective_spent = if now.saturating_sub(last_reset) > window {
                         // Window expired — reset. But single tx can't exceed full limit.
                         if sol_spent > limit {
                             return Err(AuthError::ActionSolRecurringLimitExceeded.into());
@@ -474,7 +476,7 @@ pub fn evaluate_post_actions(
     // ── Phase 1b: Validate all token limits (read-only check) ───────
     // Same policy as SOL limits: expired = treat as fully exhausted.
     for action in &actions {
-        let action_expired = is_expired(action, current_slot);
+        let action_expired = is_expired(action, now);
         let abs_data_offset = loc.abs(action.data_offset);
 
         match action.action_type {
@@ -519,9 +521,7 @@ pub fn evaluate_post_actions(
                             let window = read_u64(&session_data[abs_data_offset..], 48);
                             let last_reset = read_u64(&session_data[abs_data_offset..], 56);
 
-                            let effective_spent = if current_slot.saturating_sub(last_reset)
-                                > window
-                            {
+                            let effective_spent = if now.saturating_sub(last_reset) > window {
                                 if token_spent > limit {
                                     return Err(AuthError::ActionTokenRecurringLimitExceeded.into());
                                 }
@@ -565,7 +565,7 @@ pub fn evaluate_post_actions(
 
     // ── Phase 2: All checks passed. Now write state mutations. ──────
     for action in &actions {
-        if is_expired(action, current_slot) {
+        if is_expired(action, now) {
             continue;
         }
 
@@ -591,20 +591,19 @@ pub fn evaluate_post_actions(
 
                     // The window restarts at the spend that opened it, not at a
                     // grid boundary. Snapping `last_reset` back to
-                    // `(current_slot / window) * window` made the window expire
+                    // `(now / window) * window` made the window expire
                     // early by however far into it the spend fell: a spend at
                     // `kW + W - 1` reset and pinned `last_reset = kW`, so a
-                    // spend two slots later at `kW + W + 1` satisfied
+                    // spend two seconds later at `kW + W + 1` satisfied
                     // `W + 1 > W` and reset again — two full allowances inside
-                    // a second, against a cap the granter wrote as one per
-                    // window. Recording the spend's own slot makes the
+                    // moments, against a cap the granter wrote as one per
+                    // window. Recording the spend's own time makes the
                     // worst-case rate equal the nominal cap.
-                    let (new_spent, new_last_reset) =
-                        if current_slot.saturating_sub(last_reset) > window {
-                            (sol_spent, current_slot)
-                        } else {
-                            (spent.saturating_add(sol_spent), last_reset)
-                        };
+                    let (new_spent, new_last_reset) = if now.saturating_sub(last_reset) > window {
+                        (sol_spent, now)
+                    } else {
+                        (spent.saturating_add(sol_spent), last_reset)
+                    };
 
                     write_u64(&mut session_data[abs_data_offset..], 8, new_spent);
                     write_u64(&mut session_data[abs_data_offset..], 24, new_last_reset);
@@ -640,12 +639,11 @@ pub fn evaluate_post_actions(
                     // the spend that opened it, not at a grid boundary, so a
                     // spend landing late in a window cannot immediately open a
                     // second one.
-                    let (new_spent, new_last_reset) =
-                        if current_slot.saturating_sub(last_reset) > window {
-                            (token_spent, current_slot)
-                        } else {
-                            (spent.saturating_add(token_spent), last_reset)
-                        };
+                    let (new_spent, new_last_reset) = if now.saturating_sub(last_reset) > window {
+                        (token_spent, now)
+                    } else {
+                        (spent.saturating_add(token_spent), last_reset)
+                    };
 
                     write_u64(&mut session_data[abs_data_offset..], 40, new_spent);
                     write_u64(&mut session_data[abs_data_offset..], 56, new_last_reset);
@@ -660,10 +658,11 @@ pub fn evaluate_post_actions(
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
-/// Check if an action has expired.
+/// Check if an action has expired. `now` and `expires_at` are Unix seconds;
+/// an action is live through its `expires_at` second, and 0 never expires.
 #[inline]
-fn is_expired(action: &ActionView, current_slot: u64) -> bool {
-    action.expires_at != 0 && current_slot > action.expires_at
+fn is_expired(action: &ActionView, now: u64) -> bool {
+    action.expires_at != 0 && now > action.expires_at
 }
 
 // SPL program ids live in `crate::utils` (single source of truth, pinned by
@@ -820,11 +819,11 @@ mod tests {
         before: u64,
         after: u64,
         mint_flows: &[MintFlow],
-        slot: u64,
+        now: u64,
     ) -> Result<(), ProgramError> {
         let gross = before.saturating_sub(after);
         let loc = PolicyLocation::of(session_data).expect("session data resolves");
-        evaluate_post_actions(session_data, loc, before, after, gross, mint_flows, slot)
+        evaluate_post_actions(session_data, loc, before, after, gross, mint_flows, now)
     }
 
     fn build_sol_recurring(limit: u64, spent: u64, window: u64, last_reset: u64) -> Vec<u8> {
@@ -967,13 +966,13 @@ mod tests {
         let actions = build_action(3, 0, &500_000u64.to_le_bytes());
         let mut session_data = build_session_data(&actions);
 
-        for slot in 100..110 {
+        for now in 100..110 {
             let result = eval_post(
                 &mut session_data,
                 2_000_000,
                 1_500_000, // 500k each time
                 &[],
-                slot,
+                now,
             );
             assert!(result.is_ok());
         }
@@ -987,11 +986,11 @@ mod tests {
         let actions = build_action(2, 0, &data);
         let mut session_data = build_session_data(&actions);
 
-        // Spend 600k at slot 50
+        // Spend 600k at t = 50
         let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 50);
         assert!(result.is_ok());
 
-        // Spend 500k more at slot 60 — total 1.1M > 1M limit
+        // Spend 500k more at t = 60 — total 1.1M > 1M limit
         let result = eval_post(&mut session_data, 1_400_000, 900_000, &[], 60);
         assert!(result.is_err());
     }
@@ -1002,10 +1001,10 @@ mod tests {
         let actions = build_action(2, 0, &data);
         let mut session_data = build_session_data(&actions);
 
-        // Spend 900k at slot 50
+        // Spend 900k at t = 50
         eval_post(&mut session_data, 2_000_000, 1_100_000, &[], 50).unwrap();
 
-        // At slot 150 (after window), 500k should work again
+        // At t = 150 (after window), 500k should work again
         let result = eval_post(&mut session_data, 1_100_000, 600_000, &[], 150);
         assert!(result.is_ok());
 
@@ -1020,26 +1019,26 @@ mod tests {
 
     /// The window may not restart twice in quick succession. With a grid-aligned
     /// reset, a spend landing at the end of a window pinned `last_reset` to the
-    /// window's start, so a spend two slots later cleared `> window` again and
+    /// window's start, so a spend two seconds later cleared `> window` again and
     /// the cap was worth double what the granter wrote.
     #[test]
     fn test_sol_recurring_limit_cannot_double_reset_across_a_boundary() {
-        // limit 1 SOL per 100-slot window.
+        // limit 1 SOL per 100-second window.
         let data = build_sol_recurring(1_000_000, 0, 100, 0);
         let actions = build_action(2, 0, &data);
         let mut session_data = build_session_data(&actions);
 
-        // Spend the full allowance late in the first window (slot 199).
+        // Spend the full allowance late in the first window (t = 199).
         eval_post(&mut session_data, 5_000_000, 4_000_000, &[], 199)
             .expect("first window's allowance");
 
-        // Two slots later the old code reset again (199 -> aligned 100, and
-        // 201 - 100 = 101 > 100). It must not: only 2 slots of a 100-slot
+        // Two seconds later the old code reset again (199 -> aligned 100, and
+        // 201 - 100 = 101 > 100). It must not: only 2 seconds of a 100-second
         // window have elapsed.
         let result = eval_post(&mut session_data, 4_000_000, 3_000_000, &[], 201);
         assert!(
             result.is_err(),
-            "a second full allowance 2 slots later must be refused"
+            "a second full allowance 2 seconds later must be refused"
         );
 
         // A spend past the real window boundary is allowed again.
@@ -1053,7 +1052,7 @@ mod tests {
         let actions = build_action(2, 0, &data);
         let mut session_data = build_session_data(&actions);
 
-        // At slot 150 (fresh window), try to spend more than the full limit
+        // At t = 150 (fresh window), try to spend more than the full limit
         let result = eval_post(
             &mut session_data,
             5_000_000,
@@ -1123,7 +1122,7 @@ mod tests {
     #[test]
     fn test_combined_recurring_and_max_per_tx() {
         let mut actions_buf = Vec::new();
-        // SolRecurringLimit: 1M per 100 slots
+        // SolRecurringLimit: 1M per 100 seconds
         actions_buf.extend_from_slice(&build_action(
             2,
             0,
@@ -1150,10 +1149,10 @@ mod tests {
     #[test]
     fn test_expired_action_blocks_spending() {
         // Expired spending limits are treated as fully exhausted (not skipped).
-        let actions = build_action(3, 50, &500_000u64.to_le_bytes()); // Expires at slot 50
+        let actions = build_action(3, 50, &500_000u64.to_le_bytes()); // Expires at t = 50
         let mut session_data = build_session_data(&actions);
 
-        // At slot 100, action expired — any spend should FAIL
+        // At t = 100, action expired — any spend should FAIL
         let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 100);
         assert!(result.is_err());
 
@@ -1163,17 +1162,17 @@ mod tests {
     }
 
     #[test]
-    fn test_action_active_at_expiry_slot() {
-        // Action expires at slot 50. At exactly slot 50 it should still be active.
-        // Only expired when current_slot > expires_at.
+    fn test_action_active_through_its_expiry_second() {
+        // Action expires at t = 50. At exactly t = 50 it should still be active.
+        // Only expired when now > expires_at.
         let actions = build_action(3, 50, &500_000u64.to_le_bytes());
         let mut session_data = build_session_data(&actions);
 
-        // At slot 50 — still active, 600k > 500k → fail
+        // At t = 50 — still active, 600k > 500k → fail
         let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 50);
         assert!(result.is_err());
 
-        // At slot 51 — expired, any spend → also fail (expired = exhausted)
+        // At t = 51 — expired, any spend → also fail (expired = exhausted)
         let result = eval_post(&mut session_data, 2_000_000, 1_400_000, &[], 51);
         assert!(result.is_err());
     }
@@ -1181,14 +1180,14 @@ mod tests {
     #[test]
     fn test_mixed_expired_and_active_actions() {
         let mut actions_buf = Vec::new();
-        // SolMaxPerTx: 500k, expires at slot 50
+        // SolMaxPerTx: 500k, expires at t = 50
         actions_buf.extend_from_slice(&build_action(3, 50, &500_000u64.to_le_bytes()));
         // SolLimit: 2M, never expires
         actions_buf.extend_from_slice(&build_action(1, 0, &2_000_000u64.to_le_bytes()));
 
         let mut session_data = build_session_data(&actions_buf);
 
-        // At slot 100: MaxPerTx expired → any spend blocked by expired MaxPerTx
+        // At t = 100: MaxPerTx expired → any spend blocked by expired MaxPerTx
         let result = eval_post(&mut session_data, 5_000_000, 2_000_000, &[], 100);
         assert!(result.is_err());
 
@@ -1229,18 +1228,18 @@ mod tests {
         let mut session_data = build_session_data(&actions);
         let abs_offset = SESSION_HEADER_SIZE + ACTION_HEADER_SIZE;
 
-        // Spend 300k at slot 50
+        // Spend 300k at t = 50
         eval_post(&mut session_data, 2_000_000, 1_700_000, &[], 50).unwrap();
 
         assert_eq!(read_u64(&session_data[abs_offset..], 8), 300_000); // spent
         assert_eq!(read_u64(&session_data[abs_offset..], 24), 0); // last_reset (first window)
 
-        // Spend 200k at slot 60
+        // Spend 200k at t = 60
         eval_post(&mut session_data, 1_700_000, 1_500_000, &[], 60).unwrap();
 
         assert_eq!(read_u64(&session_data[abs_offset..], 8), 500_000); // cumulative
 
-        // Window reset at slot 200
+        // Window reset at t = 200
         eval_post(&mut session_data, 1_500_000, 1_300_000, &[], 200).unwrap();
 
         assert_eq!(read_u64(&session_data[abs_offset..], 8), 200_000); // reset + new spend
@@ -1446,13 +1445,13 @@ mod tests {
         let actions = build_action(6, 0, &build_token_max_per_tx(&mint, 500_000));
         let mut session_data = build_session_data(&actions);
 
-        for slot in 100..105 {
+        for now in 100..105 {
             let snapshots = vec![MintFlow {
                 mint,
                 before: 500_000,
                 after: 0,
             }];
-            let result = eval_post(&mut session_data, 0, 0, &snapshots, slot);
+            let result = eval_post(&mut session_data, 0, 0, &snapshots, now);
             assert!(result.is_ok());
         }
     }
@@ -1465,7 +1464,7 @@ mod tests {
         let actions = build_action(5, 0, &build_token_recurring(&mint, 1_000_000, 0, 100, 0));
         let mut session_data = build_session_data(&actions);
 
-        // Spend 600k at slot 50 — OK
+        // Spend 600k at t = 50 — OK
         let s1 = vec![MintFlow {
             mint,
             before: 600_000,
@@ -1473,7 +1472,7 @@ mod tests {
         }];
         eval_post(&mut session_data, 0, 0, &s1, 50).unwrap();
 
-        // Spend 500k more at slot 60 → total 1.1M > 1M limit → fail
+        // Spend 500k more at t = 60 → total 1.1M > 1M limit → fail
         let s2 = vec![MintFlow {
             mint,
             before: 500_000,
@@ -1489,7 +1488,7 @@ mod tests {
         let actions = build_action(5, 0, &build_token_recurring(&mint, 1_000_000, 0, 100, 0));
         let mut session_data = build_session_data(&actions);
 
-        // Spend 900k at slot 50
+        // Spend 900k at t = 50
         let s1 = vec![MintFlow {
             mint,
             before: 900_000,
@@ -1497,7 +1496,7 @@ mod tests {
         }];
         eval_post(&mut session_data, 0, 0, &s1, 50).unwrap();
 
-        // At slot 150 (after window), spending resets → 500k OK
+        // At t = 150 (after window), spending resets → 500k OK
         let s2 = vec![MintFlow {
             mint,
             before: 500_000,
@@ -1512,7 +1511,7 @@ mod tests {
     #[test]
     fn test_expired_token_limit_blocks_spending() {
         let mint = [0x44; 32];
-        let actions = build_action(4, 50, &build_token_limit(&mint, 1_000_000)); // expires at slot 50
+        let actions = build_action(4, 50, &build_token_limit(&mint, 1_000_000)); // expires at t = 50
         let mut session_data = build_session_data(&actions);
         let snapshots = vec![MintFlow {
             mint,
@@ -1520,7 +1519,7 @@ mod tests {
             after: 0,
         }];
 
-        // At slot 100 (expired), any token spend → fail
+        // At t = 100 (expired), any token spend → fail
         let result = eval_post(&mut session_data, 0, 0, &snapshots, 100);
         assert!(result.is_err());
     }
@@ -1733,7 +1732,7 @@ mod tests {
         actions_buf.extend_from_slice(&build_action(3, 50, &500_000u64.to_le_bytes())); // SolMaxPerTx, expires at 50
         let mut session_data = build_session_data(&actions_buf);
 
-        // At slot 100 (both expired), even 1 lamport spend is blocked
+        // At t = 100 (both expired), even 1 lamport spend is blocked
         let result = eval_post(&mut session_data, 1_000_000, 999_999, &[], 100);
         assert!(result.is_err());
 

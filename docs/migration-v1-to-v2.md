@@ -78,7 +78,9 @@ build a wallet that lists a victim's passkey and keep a hand on the vault. Hence
 wallet of this program with **exactly one authority — this whole key (for a
 passkey: credential-id hash, public key and relying party) at Owner rank — no
 session or deferred execution the program still accepts** (live through its
-expiry slot; unreadable counts as live), **a vault that is still a plain system
+expiry: the second for a v2 session, the slot for a deferred execution or a v2
+session written with a slot before time-based expiry; unreadable counts as
+live), **a vault that is still a plain system
 account**, and **no delegate, foreign close authority, handed-away canonical
 account of a watched mint, or unreadable account among the vault's token
 accounts**. It reads the authorities, then sessions and deferred executions,

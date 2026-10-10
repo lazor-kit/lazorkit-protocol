@@ -396,6 +396,15 @@ export async function getSlot(ctx: TestContext): Promise<bigint> {
 }
 
 /**
+ * The cluster's Unix time (seconds), as the program reads it: session and
+ * action expiries are measured in it, not in slots.
+ */
+export async function getUnixTime(ctx: TestContext): Promise<bigint> {
+  const { unixTimestamp } = await makeClient(ctx.rpc as never).getClusterTime();
+  return unixTimestamp;
+}
+
+/**
  * Helper for tests that bypass the high-level client and call low-level
  * builders (createCreateWalletIx / createExecuteIx /
  * createExecuteDeferredIx) directly. Strict-fee enforcement requires

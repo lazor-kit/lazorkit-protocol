@@ -163,7 +163,8 @@ const { instructions, sessionPda } = await client.createSession({
   walletPda,
   adminSigner: ed25519(ownerKp.publicKey),
   sessionKey: sessionKp.publicKey,
-  expiresAt: currentSlot + 216_000n,  // ~1 day
+  // Unix seconds, by the cluster clock (not slots): a day, at most 30.
+  expiresAt: (await client.getClusterTime()).unixTimestamp + 86_400n,
   actions: [
     Actions.programWhitelist(SystemProgram.programId),
     Actions.solMaxPerTx(1_000_000_000n),       // 1 SOL per tx
@@ -179,6 +180,7 @@ const { instructions, sessionPda } = await client.createSession({
 - What this covers is the vault's own SOL and the balances of the token accounts it owns directly. Value the vault controls any other way (stake or nonce accounts, positions in other programs, mint or upgrade authorities it holds) is bounded only by `ProgramWhitelist`; see [docs/Architecture.md](docs/Architecture.md#what-a-policy-bounds).
 - `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit enforces vault metadata and token-account invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount`, `FreezeAccount`, etc.): every vault token account the Execute passes writable must end it unchanged but for its balance. These hold for every signer but an Owner — every session, with or without actions, every Admin and Delegate — so no non-Owner signer can hand the vault or its token accounts to anyone. Authorities the vault holds over other accounts (stake, nonce, mint, upgrade) are not checked: bound them with `ProgramWhitelist`, or keep them away from sessions and Admins.
 - Expired spending limits = **fully exhausted** (deny). Expired whitelists = **hard deny**. Expired blacklists = silently dropped.
+- Time is Unix seconds by the cluster clock (`Clock::unix_timestamp`): a session's `expiresAt`, an action's `expiresAt`, and a recurring limit's `windowSeconds` (`86_400n` is a day on any cluster). A deferred execution's `expiryOffset` is still a slot count.
 - Omitting `actions` creates an unrestricted session — it can spend anything the vault holds until it expires. Like every non-Owner signer, it cannot change who controls the vault or its token accounts (`Assign`, `SetAuthority`, `Approve`, `CloseAccount` of an existing account): those take an Owner.
 
 ## Cost

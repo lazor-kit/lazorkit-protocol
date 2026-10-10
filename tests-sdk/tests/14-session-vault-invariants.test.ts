@@ -23,8 +23,8 @@ import {
   setupTest,
   sendTx,
   sendTxExpectError,
-  getSlot,
   type TestContext,
+  getUnixTime,
 } from './common';
 import { LazorKitClient, ed25519, session, Actions } from '../../sdk/sdk-legacy/src';
 
@@ -89,13 +89,13 @@ describe('H1 — Session vault invariants', () => {
     sessionPda: PublicKey;
   }> {
     const sessionKp = Keypair.generate();
-    const currentSlot = await getSlot(ctx);
+    const now = await getUnixTime(ctx);
     const { instructions, sessionPda } = await client.createSession({
       payer: ctx.payer.publicKey,
       walletPda,
       adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
       sessionKey: sessionKp.publicKey,
-      expiresAt: currentSlot + 9000n,
+      expiresAt: now + 3_600n,
       actions: [
         // Realistic "SOL-only spender" config:
         //   - Session can only call System Program

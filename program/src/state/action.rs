@@ -5,6 +5,11 @@
 //!
 //! Each action has an 11-byte header: [type: u8][data_len: u16 LE][expires_at: u64 LE]
 //! followed by type-specific data bytes.
+//!
+//! Times are Unix seconds (`Clock::unix_timestamp`): `expires_at` (0 = never),
+//! and a recurring limit's `window` (a length in seconds) and `last_reset` (the
+//! time of the spend that opened the current window). Builds before time-based
+//! expiry stored slots in all three.
 
 use pinocchio::program_error::ProgramError;
 
@@ -109,6 +114,7 @@ pub const PROGRAM_BLACKLIST_SIZE: usize = 32;
 #[derive(Debug, Clone)]
 pub struct ActionView {
     pub action_type: ActionType,
+    /// Unix time (seconds) after which the action counts as expired; 0 never.
     pub expires_at: u64,
     /// Byte offset of this action's data within the actions buffer
     /// (relative to start of actions buffer, NOT session account start).
@@ -317,6 +323,7 @@ pub fn validate_actions_buffer(buf: &[u8]) -> Result<(), ProgramError> {
 
 // SolRecurringLimit: [limit: u64][spent: u64][window: u64][last_reset: u64] = 32 bytes
 // Offsets: limit = 0..8, spent = 8..16, window = 16..24, last_reset = 24..32
+// window: seconds; last_reset: Unix seconds (0 until the first spend)
 
 // SolMaxPerTx: [max: u64] = 8 bytes
 // Offsets: max = 0..8
@@ -326,6 +333,7 @@ pub fn validate_actions_buffer(buf: &[u8]) -> Result<(), ProgramError> {
 
 // TokenRecurringLimit: [mint: [u8;32]][limit: u64][spent: u64][window: u64][last_reset: u64] = 64 bytes
 // Offsets: mint = 0..32, limit = 32..40, spent = 40..48, window = 48..56, last_reset = 56..64
+// window: seconds; last_reset: Unix seconds (0 until the first spend)
 
 // TokenMaxPerTx: [mint: [u8;32]][max: u64] = 40 bytes
 // Offsets: mint = 0..32, max = 32..40
@@ -382,7 +390,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&1_000_000u64.to_le_bytes()); // limit
         data.extend_from_slice(&0u64.to_le_bytes()); // spent
-        data.extend_from_slice(&216_000u64.to_le_bytes()); // window (~1 day)
+        data.extend_from_slice(&86_400u64.to_le_bytes()); // window (1 day)
         data.extend_from_slice(&0u64.to_le_bytes()); // last_reset
         let buf = build_action(2, 0, &data);
         let actions = parse_actions(&buf).unwrap();
@@ -478,7 +486,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&1_000_000u64.to_le_bytes()); // limit
         data.extend_from_slice(&100u64.to_le_bytes()); // spent (should be 0!)
-        data.extend_from_slice(&216_000u64.to_le_bytes()); // window
+        data.extend_from_slice(&86_400u64.to_le_bytes()); // window (1 day)
         data.extend_from_slice(&0u64.to_le_bytes()); // last_reset
         let buf = build_action(2, 0, &data);
         assert!(validate_actions_buffer(&buf).is_err());
@@ -507,7 +515,7 @@ mod tests {
         let mut sol_rec = Vec::new();
         sol_rec.extend_from_slice(&1_000_000u64.to_le_bytes());
         sol_rec.extend_from_slice(&0u64.to_le_bytes());
-        sol_rec.extend_from_slice(&216_000u64.to_le_bytes());
+        sol_rec.extend_from_slice(&86_400u64.to_le_bytes());
         sol_rec.extend_from_slice(&0u64.to_le_bytes());
         buf.extend_from_slice(&build_action(2, 0, &sol_rec));
         // ProgramWhitelist

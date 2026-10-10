@@ -25,6 +25,7 @@ const {
   Connection,
   Keypair,
   PublicKey,
+  SYSVAR_CLOCK_PUBKEY,
   Transaction,
   TransactionInstruction,
   sendAndConfirmTransaction,
@@ -70,7 +71,14 @@ function closeIx(caller, session, refund) {
   console.log(`keeper    ${keeper.publicKey.toBase58()}`);
   console.log(`refund    ${refund.toBase58()}`);
 
-  const slot = await connection.getSlot();
+  // The program compares a v2 session's expiry with the clock's Unix time and a
+  // v1 session's (a slot, as v1 wrote it) with its slot; read both from one
+  // Clock sysvar so the filter below makes the same split. (The sunset binary
+  // owns v1 sessions only, and reads every expiry as a slot.)
+  const clockInfo = await connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY);
+  if (!clockInfo || clockInfo.data.length < 40) throw new Error('cannot read the Clock sysvar');
+  const slot = clockInfo.data.readBigUInt64LE(0);
+  const unixTimestamp = clockInfo.data.readBigInt64LE(32);
   const found = [];
   let live = 0;
   // One scan per discriminator: memcmp filters are ANDed, so a single call
@@ -81,10 +89,12 @@ function closeIx(caller, session, refund) {
     });
     for (const { pubkey, account } of accounts) {
       if (account.data.length < SESSION_HEADER) continue;
-      const expiresAt = Number(account.data.readBigUInt64LE(OFF_EXPIRES_AT));
-      // The program refuses a session in its final slot, so filter the same way
+      const expiresAt = account.data.readBigUInt64LE(OFF_EXPIRES_AT);
+      // The program will not close a session that is still live — through its
+      // final second (v2) or its final slot (v1) — so filter the same way
       // rather than spending a transaction to be told.
-      if (expiresAt >= slot) {
+      const now = disc === DISC_SESSION_V2 ? unixTimestamp : slot;
+      if (expiresAt >= now) {
         live++;
         continue;
       }
@@ -94,7 +104,7 @@ function closeIx(caller, session, refund) {
 
   const byVersion = (v) => found.filter((s) => s.version === v);
   const sum = (rows) => rows.reduce((n, s) => n + s.lamports, 0);
-  console.log(`\nslot ${slot}`);
+  console.log(`\nslot ${slot}, Unix time ${unixTimestamp}`);
   console.log(`  expired v1 sessions ${byVersion(1).length}  →  ${sol(sum(byVersion(1)))} SOL`);
   console.log(`  expired v2 sessions ${byVersion(2).length}  →  ${sol(sum(byVersion(2)))} SOL`);
   console.log(`  still live          ${live}  (left alone)`);

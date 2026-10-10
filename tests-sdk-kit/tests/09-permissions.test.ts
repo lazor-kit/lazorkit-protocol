@@ -27,9 +27,9 @@ import {
   setupTest,
   sendTx,
   sendTxExpectError,
-  getSlot,
   type TestContext,
   makeClient,
+  getUnixTime,
 } from './common.js';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils.js';
 import { createAddAuthorityIx } from '../../sdk/sdk-kit/src/instructions/builders.js';
@@ -224,13 +224,13 @@ describe('Permission Boundaries', () => {
 
   it('spender cannot create session', async () => {
     const sessionSigner = await generateKeyPairSigner();
-    const currentSlot = await getSlot(ctx);
+    const now = await getUnixTime(ctx);
     const { instructions } = await client.createSession({
       payer: ctx.payer.address,
       walletPda,
       adminSigner: ed25519(spenderSigner.address, spenderAuthPda),
       sessionKey: sessionSigner.address,
-      expiresAt: currentSlot + 9000n,
+      expiresAt: now + 3_600n,
       // Deliberately unrestricted: this test exercises the actionless session.
       unrestricted: true,
     });
@@ -306,7 +306,7 @@ describe('Permission Boundaries', () => {
 
     it('secp256r1 spender cannot create session', async () => {
       const sessionSigner = await generateKeyPairSigner();
-      const currentSlot = await getSlot(ctx);
+      const now = await getUnixTime(ctx);
 
       const prepared = await client.prepareCreateSession({
         payer: ctx.payer.address,
@@ -317,7 +317,7 @@ describe('Permission Boundaries', () => {
           authorityPda: secpSpenderAuthPda,
         },
         sessionKey: sessionSigner.address,
-        expiresAt: currentSlot + 9000n,
+        expiresAt: now + 3_600n,
         // Deliberately unrestricted: this test exercises the actionless session.
         unrestricted: true,
       });

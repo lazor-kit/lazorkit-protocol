@@ -63,7 +63,8 @@ pub enum AuthError {
     /// expiry a session ends only through `RevokeSession`, signed by the
     /// wallet's own Owner or Admin; the permissionless path exists because an
     /// expired session can no longer authorise anything, and that is only true
-    /// once the slot is strictly past `expires_at`.
+    /// once `Clock::unix_timestamp` is strictly past `expires_at` (for a v1
+    /// session, which stores a slot, once `Clock::slot` is).
     SessionNotExpired = 3036,
     /// The vault's SOL balance fell during an Execute whose policy names no SOL
     /// action (`SolLimit`, `SolRecurringLimit` or `SolMaxPerTx`). A policy lists

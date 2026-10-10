@@ -5,6 +5,10 @@
  * They are immutable — once set, they cannot be changed. To change permissions,
  * revoke the session and create a new one.
  *
+ * Times are Unix seconds: an action's `expiresAt` (0 = none of its own) and a
+ * recurring limit's `windowSeconds`. The program reads both against the
+ * cluster clock (`Clock::unix_timestamp`), not slots.
+ *
  * A policy names what may leave the vault, and nothing it does not name may
  * (protocol v2): with no `Sol*` action the vault's SOL may not fall, rent the
  * vault pays for a new account included, and a mint with no `Token*` action
@@ -24,7 +28,7 @@
  * import { Actions, serializeActions, address } from '@lazorkit/sdk';
  *
  * const actions = [
- *   Actions.solRecurringLimit({ limit: 1_000_000_000n, window: 216_000n }),
+ *   Actions.solRecurringLimit({ limit: 1_000_000_000n, windowSeconds: 86_400n }), // 1 SOL a day
  *   Actions.programWhitelist(address('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4')),
  *   Actions.solMaxPerTx(500_000_000n),
  *   // Without a Token* action no token may leave, so name each one a swap sells.
@@ -40,6 +44,7 @@ import {
   type Address,
   type Encoder,
 } from '@solana/kit';
+import { MIN_UNIX_SECONDS } from '../time.js';
 
 // ─── Action Type IDs (must match program/src/state/action.rs) ────────
 
@@ -60,7 +65,12 @@ export interface SolLimitAction {
   type: SessionActionType.SolLimit;
   /** Lifetime SOL spending cap in lamports. */
   remaining: bigint;
-  /** Optional per-action expiry (slot). 0 = inherit session expiry. */
+  /**
+   * Optional expiry of this action alone, Unix seconds; 0 or unset = none (it
+   * lives as long as the session or authority). An expired limit counts as
+   * exhausted, an expired whitelist as deny-all, an expired blacklist entry as
+   * lifted.
+   */
   expiresAt?: bigint;
 }
 
@@ -68,8 +78,9 @@ export interface SolRecurringLimitAction {
   type: SessionActionType.SolRecurringLimit;
   /** Max lamports per window. */
   limit: bigint;
-  /** Window size in slots. */
-  window: bigint;
+  /** Window length in seconds (86_400n = a day). A window opens at the spend
+   *  that finds the previous one over. */
+  windowSeconds: bigint;
   expiresAt?: bigint;
 }
 
@@ -94,8 +105,8 @@ export interface TokenRecurringLimitAction {
   mint: Address;
   /** Max tokens per window. */
   limit: bigint;
-  /** Window size in slots. */
-  window: bigint;
+  /** Window length in seconds (86_400n = a day). */
+  windowSeconds: bigint;
   expiresAt?: bigint;
 }
 
@@ -147,10 +158,10 @@ export const Actions = {
     expiresAt,
   }),
 
-  /** SOL spending cap per time window. */
+  /** SOL spending cap per window of `windowSeconds` seconds. */
   solRecurringLimit: (params: {
     limit: bigint;
-    window: bigint;
+    windowSeconds: bigint;
     expiresAt?: bigint;
   }): SolRecurringLimitAction => ({
     type: SessionActionType.SolRecurringLimit,
@@ -174,11 +185,11 @@ export const Actions = {
     ...params,
   }),
 
-  /** Token spending cap per time window per mint. */
+  /** Token spending cap per window of `windowSeconds` seconds, per mint. */
   tokenRecurringLimit: (params: {
     mint: Address;
     limit: bigint;
-    window: bigint;
+    windowSeconds: bigint;
     expiresAt?: bigint;
   }): TokenRecurringLimitAction => ({
     type: SessionActionType.TokenRecurringLimit,
@@ -238,7 +249,7 @@ const addressEncoder = getAddressEncoder();
 // Inner data encoders. Each maps to an exact byte length expected by
 // validate_actions_buffer:
 //   SolLimit            =  8  (remaining: u64)
-//   SolRecurringLimit   = 32  (limit, spent=0, window, last_reset=0; all u64)
+//   SolRecurringLimit   = 32  (limit, spent=0, window (seconds), last_reset=0; all u64)
 //   SolMaxPerTx         =  8  (max: u64)
 //   TokenLimit          = 40  (mint: 32 + remaining: u64)
 //   TokenRecurringLimit = 64  (mint: 32 + limit, spent=0, window, last_reset=0)
@@ -300,7 +311,7 @@ function encodeActionData(action: SessionAction): Uint8Array {
       return solRecurringLimitData.encode({
         limit: action.limit,
         spent: 0n,
-        window: action.window,
+        window: action.windowSeconds,
         lastReset: 0n,
       }) as Uint8Array;
     case SessionActionType.SolMaxPerTx:
@@ -315,7 +326,7 @@ function encodeActionData(action: SessionAction): Uint8Array {
         mint: action.mint,
         limit: action.limit,
         spent: 0n,
-        window: action.window,
+        window: action.windowSeconds,
         lastReset: 0n,
       }) as Uint8Array;
     case SessionActionType.TokenMaxPerTx:
@@ -343,14 +354,41 @@ function writeU64LE(buf: Uint8Array, offset: number, value: bigint): void {
 }
 
 /**
+ * Throws when an action's times are plainly not seconds: an `expiresAt` other
+ * than 0 below 2020-01-01 (a slot, what the field held before time-based
+ * expiry), or a recurring window of 0. The program would store such a slot as
+ * a time long past: a limit or a whitelist then denies everything, and a
+ * blacklist entry stops blocking its program. Every policy goes through here,
+ * a session's and a Delegate's alike.
+ */
+function assertActionTimes(action: SessionAction): void {
+  const at = action.expiresAt ?? 0n;
+  if (at !== 0n && at < MIN_UNIX_SECONDS) {
+    throw new Error(
+      `an action's expiresAt ${at} is not a Unix time in seconds (it looks like a slot); ` +
+        'use 0 / leave it unset for no expiry of its own',
+    );
+  }
+  if (
+    (action.type === SessionActionType.SolRecurringLimit ||
+      action.type === SessionActionType.TokenRecurringLimit) &&
+    action.windowSeconds <= 0n
+  ) {
+    throw new Error('a recurring limit needs windowSeconds > 0');
+  }
+}
+
+/**
  * Serialize an array of SessionActions into the flat byte buffer format
- * expected by the program. Returns an empty buffer for an empty array.
+ * expected by the program. Returns an empty buffer for an empty array. Throws
+ * on an expiry that is plainly a slot, or a recurring window of zero.
  */
 export function serializeActions(actions: SessionAction[]): Uint8Array {
   if (actions.length === 0) return new Uint8Array(0);
 
   const parts: Uint8Array[] = [];
   for (const action of actions) {
+    assertActionTimes(action);
     const data = encodeActionData(action);
     const header = new Uint8Array(ACTION_HEADER_SIZE);
     header[0] = action.type;

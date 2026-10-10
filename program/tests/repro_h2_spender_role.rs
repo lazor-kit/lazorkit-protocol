@@ -184,11 +184,10 @@ fn h2_a_control_delegate_is_blocked_from_privileged_instructions() {
             ],
             &context.program_id,
         );
-        let clock: solana_sdk::clock::Clock = context.svm.get_sysvar();
 
         let mut data = vec![5u8];
         data.extend_from_slice(session.pubkey().as_ref());
-        data.extend_from_slice(&(clock.slot + 100_000).to_le_bytes());
+        data.extend_from_slice(&(unix_now(&context.svm) + 100_000).to_le_bytes());
         data.extend_from_slice(&0u16.to_le_bytes());
 
         let ix = Instruction {
@@ -508,8 +507,7 @@ fn create_session_as(
 ) -> Result<Pubkey, litesvm::types::FailedTransactionMetadata> {
     let session = Keypair::new();
     let session_pda = session_pda_for(context.program_id, wallet, &session);
-    let clock: solana_sdk::clock::Clock = context.svm.get_sysvar();
-    let expires_at = clock.slot + 100_000;
+    let expires_at = unix_now(&context.svm) + 100_000;
 
     let mut data = vec![5u8]; // CreateSession
     data.extend_from_slice(session.pubkey().as_ref());

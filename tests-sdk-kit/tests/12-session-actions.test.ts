@@ -44,10 +44,10 @@ import {
   sendTxExpectError,
   airdrop,
   getBalance,
-  getSlot,
   systemTransferFromPda,
   type TestContext,
   makeClient,
+  getUnixTime,
 } from './common.js';
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
@@ -88,8 +88,8 @@ describe('Session Actions', () => {
 
   async function createSessionWith(actions: SessionAction[]) {
     const sessionSigner = await generateKeyPairSigner();
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 50_000n;
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 21_600n;
 
     const { instructions: createIxs, sessionPda } = await client.createSession({
       payer: ctx.payer.address,
@@ -134,13 +134,13 @@ describe('Session Actions', () => {
 
     it('undefined actions — same as no actions', async () => {
       const sessionSigner = await generateKeyPairSigner();
-      const currentSlot = await getSlot(ctx);
+      const now = await getUnixTime(ctx);
       const { instructions: createIxs, sessionPda } = await client.createSession({
         payer: ctx.payer.address,
         walletPda,
         adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
         sessionKey: sessionSigner.address,
-        expiresAt: currentSlot + 50_000n,
+        expiresAt: now + 21_600n,
         // Deliberately unrestricted: this test exercises the actionless session.
         unrestricted: true,
       });
@@ -373,7 +373,7 @@ describe('Session Actions', () => {
       const { sessionSigner, sessionPda } = await createSessionWith([
         Actions.solRecurringLimit({
           limit: 2n * LAMPORTS_PER_SOL,
-          window: 50_000n,
+          windowSeconds: 21_600n, // 6 hours: longer than the test
         }),
       ]);
       const r1 = (await generateKeyPairSigner()).address;
@@ -453,14 +453,14 @@ describe('Session Actions', () => {
   describe('Creation Validation', () => {
     it('whitelist + blacklist conflict rejected at creation', async () => {
       const sessionSigner = await generateKeyPairSigner();
-      const currentSlot = await getSlot(ctx);
+      const now = await getUnixTime(ctx);
       const random = (await generateKeyPairSigner()).address;
       const { instructions: createIxs } = await client.createSession({
         payer: ctx.payer.address,
         walletPda,
         adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
         sessionKey: sessionSigner.address,
-        expiresAt: currentSlot + 50_000n,
+        expiresAt: now + 21_600n,
         actions: [
           Actions.programWhitelist(SYSTEM_PROGRAM_ADDRESS),
           Actions.programBlacklist(random),

@@ -708,11 +708,13 @@ If the protocol isn't initialized or is disabled, both resolvers return `undefin
 ```typescript
 import { Actions } from '@lazorkit/sdk-legacy';
 
+// Expiry is Unix time in seconds, by the cluster's clock (not slots).
+const { unixTimestamp } = await client.getClusterTime();
 const { instructions, sessionPda } = await client.createSession({
   payer, walletPda,
   adminSigner: ed25519(ownerKp.publicKey),
   sessionKey: sessionKp.publicKey,
-  expiresAt: currentSlot + 9000n,
+  expiresAt: unixTimestamp + 3600n, // an hour; at most MAX_SESSION_SECONDS (30 days)
   actions: [
     Actions.programWhitelist(SystemProgram.programId),
     Actions.solMaxPerTx(1_000_000_000n),
@@ -742,15 +744,28 @@ ATA in a top-level instruction the fee payer funds, before the Execute, or give
 the session a `solLimit` that covers the rent. A policy holds at most 16
 actions.
 
+**Time is Unix seconds.** A session's `expiresAt`, an action's `expiresAt`
+and a recurring limit's `windowSeconds` are read against the cluster clock
+(`Clock::unix_timestamp`, which `getClusterTime()` returns), so "an hour" or
+"a day" means that on any cluster. The session lives through its `expiresAt`
+second and is refused from the next (3009). `createSession` throws on a value
+that looks like a slot, which is what these fields held before, and
+`serializeActions` throws on an action expiry that looks like one (a Delegate
+policy included); a session
+created with a slot by an older SDK is refused on chain (3008), and one stored
+by an older program reads as long expired. A deferred execution's
+`expiryOffset` is still a slot count (it bounds when tx2 lands, like a
+blockhash).
+
 Action builders (via `Actions`):
 
 | Builder | Notes |
 |---|---|
 | `Actions.solLimit(remaining, expiresAt?)` | Lifetime SOL cap |
-| `Actions.solRecurringLimit({ limit, window, expiresAt? })` | Per-window SOL cap |
+| `Actions.solRecurringLimit({ limit, windowSeconds, expiresAt? })` | Per-window SOL cap (`windowSeconds: 86_400n` = a day) |
 | `Actions.solMaxPerTx(max, expiresAt?)` | Max SOL per execute (gross outflow, not net) |
 | `Actions.tokenLimit({ mint, remaining, expiresAt? })` | Lifetime token cap |
-| `Actions.tokenRecurringLimit({ mint, limit, window, expiresAt? })` | Per-window token cap |
+| `Actions.tokenRecurringLimit({ mint, limit, windowSeconds, expiresAt? })` | Per-window token cap |
 | `Actions.tokenMaxPerTx({ mint, max, expiresAt? })` | Max tokens per execute |
 | `Actions.programWhitelist(programId, expiresAt?)` | Only allow these programs (repeatable) |
 | `Actions.programBlacklist(programId, expiresAt?)` | Block these programs (repeatable) |

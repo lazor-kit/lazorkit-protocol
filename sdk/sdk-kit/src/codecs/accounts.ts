@@ -98,7 +98,8 @@ export function decodeAuthorityAccount(
 //   [3..8]   _padding:      [u8; 5]
 //   [8..40]  wallet:        Pubkey
 //   [40..72] sessionKey:    Pubkey
-//   [72..80] expiresAt:     u64 LE
+//   [72..80] expiresAt:     u64 LE, Unix seconds (a slot in accounts written
+//                           before time-based expiry: read as a time, expired)
 //   [80..]   actions buffer (variable, optional)
 //
 // The actions buffer is parsed separately (see codecs/actions.ts for the
@@ -110,6 +111,7 @@ export interface SessionAccountData {
   version: number;
   wallet: Address;
   sessionKey: Address;
+  /** Unix time (seconds) after which the program refuses the session. */
   expiresAt: bigint;
 }
 

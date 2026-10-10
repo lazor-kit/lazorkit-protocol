@@ -82,6 +82,10 @@ export class AuthorityAccount implements AuthorityAccountData {
  * SessionAccount layout (80 bytes fixed header + optional actions):
  * [discriminator: u8][bump: u8][version: u8][padding: 5 bytes]
  * [wallet: Pubkey(32)][sessionKey: Pubkey(32)][expiresAt: u64 LE]
+ *
+ * `expiresAt` is Unix time in seconds; the program refuses the session once
+ * the cluster clock is past it. A session written before time-based expiry
+ * holds a slot there, which as a time is long past: it is expired.
  */
 export interface SessionAccountData {
   discriminator: number;

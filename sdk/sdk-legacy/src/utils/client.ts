@@ -97,6 +97,7 @@ import {
 import { concatBytes } from './bytes';
 import { buildCompactLayout } from './compact';
 import { serializeActions, type SessionAction } from './actions';
+import { MIN_UNIX_SECONDS } from './time';
 import {
   deferredExpiry,
   describePasskeyWallets,
@@ -104,14 +105,17 @@ import {
   isPlainSystemAccount,
   pickOwnWallet,
   readAccounts,
+  readClusterClock,
   readSpendingState,
   scanPasskeyWalletCandidates,
   sessionExpiry,
+  sessionLive,
   tokenAccountProblem,
   vaultTokenGrants,
   verifyOwnershipProof,
   watchedMints,
   watchedTokenAccounts,
+  type ClusterClock,
   type OwnershipProof,
   type PasskeyWalletCandidate,
   type WalletFacts,
@@ -389,6 +393,23 @@ function assertSessionActions(
   }
 }
 
+/** The longest a session may live, as the program enforces: 30 days. */
+export const MAX_SESSION_SECONDS = 30n * 24n * 60n * 60n;
+
+/**
+ * Throws when a session's expiry is plainly not a time in seconds. Its actions'
+ * times are checked where every policy is built, in `serializeActions`.
+ */
+function assertSessionTimes(expiresAt: bigint): void {
+  if (expiresAt < MIN_UNIX_SECONDS) {
+    throw new Error(
+      `expiresAt ${expiresAt} is not a Unix time in seconds (it looks like a slot). ` +
+        'Sessions expire by the cluster clock: pass e.g. ' +
+        '(await client.getClusterTime()).unixTimestamp + 3600n.',
+    );
+  }
+}
+
 /**
  * Shared pipeline for prepareExecute + prepareAuthorize:
  *  1. runs buildCompactLayout over fixed keys + user instructions
@@ -585,6 +606,22 @@ export class LazorKitClient {
   }
   findTreasuryShard(shardId: number) {
     return findTreasuryShardPda(shardId, this.programId);
+  }
+
+  /**
+   * The cluster's clock as the program reads it: the slot, and the Unix time
+   * (seconds) that session expiries, action expiries and recurring windows are
+   * measured against. Read from the Clock sysvar, so it is the time the
+   * program will see at that slot, which can differ from this machine's clock
+   * by seconds to minutes. Use it to set `expiresAt`:
+   *
+   * ```ts
+   * const { unixTimestamp } = await client.getClusterTime();
+   * await client.createSession({ ..., expiresAt: unixTimestamp + 3600n });
+   * ```
+   */
+  async getClusterTime(): Promise<ClusterClock> {
+    return readClusterClock(this.connection);
   }
 
   /**
@@ -1211,6 +1248,9 @@ export class LazorKitClient {
     walletPda: PublicKey;
     secp256r1: Secp256r1Params;
     sessionKey: PublicKey;
+    /** Unix time (seconds) after which the program refuses the session, at
+     *  most {@link MAX_SESSION_SECONDS} after the cluster clock — read it with
+     *  {@link LazorKitClient.getClusterTime}. Not a slot. */
     expiresAt: bigint;
     /** Actions bounding what this session may spend. An asset they do not
      *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
@@ -1221,6 +1261,7 @@ export class LazorKitClient {
     unrestricted?: boolean;
   }): Promise<PreparedCreateSession> {
     assertSessionActions(params.actions, params.unrestricted);
+    assertSessionTimes(params.expiresAt);
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
@@ -1805,8 +1846,8 @@ export class LazorKitClient {
   ): Promise<{ problem: string | null; signatureCount: number; slot: number }> {
     const { authType, credentialOrPubkey: credential, secp256r1Pubkey, rpId } =
       resolveOwnerFields(owner);
-    // The slot first: one older than the scans can only count more things live.
-    const slot = BigInt(await this.connection.getSlot());
+    // The clock first: one older than the scans can only count more things live.
+    const clock = await readClusterClock(this.connection);
     const [vault] = this.findVault(wallet);
     const watched = watchedTokenAccounts(vault, mints);
     const read = await readSpendingState(
@@ -1854,12 +1895,14 @@ export class LazorKitClient {
     ) {
       return fail(`wallet ${where} lists this passkey's credential with another public key or relying party`);
     }
-    // The program refuses a session or deferred execution only once the slot
-    // is past its expiry; one too short to read counts as live.
-    if (sessions.some((x) => sessionExpiry(x.account.data) >= slot)) {
+    // The program refuses a session or deferred execution only once the clock
+    // is past its expiry; one too short to read counts as live. This is a v2
+    // wallet: its sessions expire by Unix time (a slot-valued one by its slot:
+    // see sessionLive), deferred executions by slot.
+    if (sessions.some((x) => sessionLive(2, sessionExpiry(x.account.data), clock))) {
       return fail(`wallet ${where} has a live session`);
     }
-    if (deferred.some((x) => deferredExpiry(x.account.data) >= slot)) {
+    if (deferred.some((x) => deferredExpiry(x.account.data) >= clock.slot)) {
       return fail(`wallet ${where} has a pending deferred execution`);
     }
     if (!isPlainSystemAccount(vaultInfo)) {
@@ -2321,7 +2364,7 @@ export class LazorKitClient {
    *   walletPda,
    *   adminSigner: ed25519(ownerKp.publicKey),
    *   sessionKey: sessionKp.publicKey,
-   *   expiresAt: currentSlot + 9000n,
+   *   expiresAt: (await client.getClusterTime()).unixTimestamp + 3600n, // an hour
    * });
    * ```
    */
@@ -2330,6 +2373,9 @@ export class LazorKitClient {
     walletPda: PublicKey;
     adminSigner: AdminSigner;
     sessionKey: PublicKey;
+    /** Unix time (seconds) after which the program refuses the session, at
+     *  most {@link MAX_SESSION_SECONDS} after the cluster clock — read it with
+     *  {@link LazorKitClient.getClusterTime}. Not a slot. */
     expiresAt: bigint;
     /** Actions bounding what this session may spend. An asset they do not
      *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
@@ -2343,6 +2389,7 @@ export class LazorKitClient {
     sessionPda: PublicKey;
   }> {
     assertSessionActions(params.actions, params.unrestricted);
+    assertSessionTimes(params.expiresAt);
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
     const s = params.adminSigner;

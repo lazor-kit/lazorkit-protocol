@@ -34,10 +34,10 @@ import {
   sendTx,
   airdrop,
   getBalance,
-  getSlot,
   systemTransferFromPda,
   type TestContext,
   makeClient,
+  getUnixTime,
 } from './common.js';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils.js';
 
@@ -181,8 +181,8 @@ describe('E2E Company Workflow', () => {
 
   it('Step 7: Admin creates Session', async () => {
     const sessionKey = await generateKeyPairSigner();
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 9000n;
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 3_600n;
     const { instructions } = await client.createSession({
       payer: ctx.payer.address,
       walletPda,
