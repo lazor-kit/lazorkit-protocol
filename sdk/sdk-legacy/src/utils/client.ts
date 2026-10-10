@@ -88,6 +88,8 @@ import {
 import {
   prepareSecp256r1,
   finalizeSecp256r1,
+  rebindSecp256r1,
+  type ChallengeBinding,
   buildDataPayloadForAdd,
   buildDataPayloadForTransfer,
   buildDataPayloadForSession,
@@ -129,6 +131,17 @@ import type {
   DeferredPayload,
 } from './types';
 import type { AccountInfo, AccountMeta } from '@solana/web3.js';
+import {
+  APPROVAL_PROGRAM_ADDRESSES,
+  MAX_CREDENTIAL_ID_BYTES,
+  validateApprovalRequest,
+  type ApprovalCluster,
+  type CreateSessionRequest,
+  type RemoveAuthorityRequest,
+  type RevokeSessionRequest,
+} from '../approval';
+import { PortalReplyMismatchError } from '../approval/errors';
+import { base64urlEncode, utf8Decode } from '../approval/bytes';
 
 // ─── Prepared operation types (for secp256r1 prepare/finalize flow) ──
 
@@ -178,6 +191,8 @@ export interface PreparedAddAuthority extends PreparedBase {
 }
 
 export interface PreparedRemoveAuthority extends PreparedBase {
+  /** The typed approval request for a portal; present when `secp256r1.credentialId` was given. */
+  request?: RemoveAuthorityRequest;
   /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
@@ -210,6 +225,8 @@ export interface PreparedTransferOwnership extends PreparedBase {
 
 export interface PreparedCreateSession extends PreparedBase {
   sessionPda: PublicKey;
+  /** The typed approval request for a portal; present when `secp256r1.credentialId` was given. */
+  request?: CreateSessionRequest;
   /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
@@ -225,6 +242,8 @@ export interface PreparedCreateSession extends PreparedBase {
 }
 
 export interface PreparedRevokeSession extends PreparedBase {
+  /** The typed approval request for a portal; present when `secp256r1.credentialId` was given. */
+  request?: RevokeSessionRequest;
   /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
@@ -297,6 +316,91 @@ function assertNonZeroBytes(value: Uint8Array, name: string): void {
   if (value.every((b) => b === 0)) {
     throw new Error(`${name} must not be all zero bytes`);
   }
+}
+
+// ─── Typed approval requests ──────────────────────────────────────────
+
+/** The cluster a typed request names for this program, if it is a known v2 deployment. */
+function approvalClusterOf(programId: PublicKey): ApprovalCluster | undefined {
+  const id = programId.toBase58();
+  for (const cluster of Object.keys(APPROVAL_PROGRAM_ADDRESSES) as ApprovalCluster[]) {
+    if (APPROVAL_PROGRAM_ADDRESSES[cluster] === id) return cluster;
+  }
+  return undefined;
+}
+
+/** Throws unless `credentialId` is 1 to 1023 bytes whose SHA-256 is `credentialIdHash`. */
+function assertCredentialId(credentialId: Uint8Array, credentialIdHash: Uint8Array): void {
+  if (credentialId.length < 1 || credentialId.length > MAX_CREDENTIAL_ID_BYTES) {
+    throw new Error(`credentialId must be 1 to ${MAX_CREDENTIAL_ID_BYTES} bytes, got ${credentialId.length}`);
+  }
+  const hash = sha256(credentialId);
+  if (!hash.every((b, i) => b === credentialIdHash[i])) {
+    throw new Error('credentialId does not hash to credentialIdHash');
+  }
+}
+
+/**
+ * The typed approval request for a prepared passkey operation, or undefined
+ * when the caller gave no credential id or the program is not a known v2
+ * deployment (a portal checks `programId` against its own configuration).
+ */
+function typedRequest<R extends CreateSessionRequest | RevokeSessionRequest | RemoveAuthorityRequest>(
+  kind: R['kind'],
+  args: R['args'],
+  ctx: {
+    programId: PublicKey;
+    payer: PublicKey;
+    walletPda: PublicKey;
+    authorityPda: PublicKey;
+    p: Secp256r1Params;
+    slot: bigint;
+    counter: number;
+  },
+): R | undefined {
+  if (!ctx.p.credentialId) return undefined;
+  const cluster = approvalClusterOf(ctx.programId);
+  if (!cluster) return undefined;
+  const request = {
+    v: 1,
+    kind,
+    cluster,
+    programId: ctx.programId.toBase58(),
+    wallet: ctx.walletPda.toBase58(),
+    authority: ctx.authorityPda.toBase58(),
+    credentialId: base64urlEncode(ctx.p.credentialId),
+    payer: ctx.payer.toBase58(),
+    counter: ctx.counter,
+    preparedSlot: ctx.slot.toString(),
+    ...(ctx.p.minContextSlot !== undefined ? { minContextSlot: ctx.p.minContextSlot } : {}),
+    args,
+  };
+  return validateApprovalRequest(request) as R;
+}
+
+/**
+ * The signing to finalize with: `signing` itself, or with a binding, the same
+ * signing at that slot and counter, once the authenticator's clientDataJSON
+ * is checked to carry its challenge.
+ */
+function boundSigning(
+  signing: PreparedSecp256r1,
+  response: WebAuthnResponse,
+  binding: ChallengeBinding | undefined,
+): PreparedSecp256r1 {
+  if (!binding) return signing;
+  const rebound = rebindSecp256r1(signing, binding);
+  const text = utf8Decode(response.clientDataJson);
+  let challenge: unknown;
+  try {
+    challenge = text === undefined ? undefined : (JSON.parse(text) as { challenge?: unknown }).challenge;
+  } catch {
+    challenge = undefined;
+  }
+  if (challenge !== base64urlEncode(rebound.challenge)) {
+    throw new PortalReplyMismatchError('clientDataJSON does not carry the challenge at this slot and counter');
+  }
+  return rebound;
 }
 
 /** Resolves a CreateWalletOwner to the low-level fields needed by IX builders */
@@ -776,6 +880,7 @@ export class LazorKitClient {
     if (p.publicKeyBytes) {
       assertByteLength(p.publicKeyBytes, 33, 'publicKeyBytes');
     }
+    if (p.credentialId) assertCredentialId(p.credentialId, p.credentialIdHash);
     const authorityPda =
       p.authorityPda ?? this.findAuthority(walletPda, p.credentialIdHash)[0];
 
@@ -1102,8 +1207,15 @@ export class LazorKitClient {
       publicKeyBytes,
     });
 
+    const request = typedRequest<RemoveAuthorityRequest>(
+      'removeAuthority',
+      { target: params.targetAuthorityPda.toBase58(), refund: refundDest.toBase58() },
+      { programId: this.programId, payer: params.payer, walletPda: params.walletPda, authorityPda, p: params.secp256r1, slot, counter },
+    );
+
     return {
       challenge: signing.challenge,
+      ...(request ? { request } : {}),
       _internal: {
         signing,
         payer: params.payer,
@@ -1116,13 +1228,19 @@ export class LazorKitClient {
     };
   }
 
+  /**
+   * Phase 2. `binding`: the slot and counter a typed portal reply says the
+   * passkey signed at (`verifyApprovalReply(...).binding`); the challenge is
+   * recomputed at them and must be the one in `response.clientDataJson`.
+   */
   finalizeRemoveAuthority(
     prepared: PreparedRemoveAuthority,
     response: WebAuthnResponse,
+    binding?: ChallengeBinding,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
     const { authPayload, precompileIx } = finalizeSecp256r1(
-      i.signing,
+      boundSigning(i.signing, response, binding),
       response,
     );
     const ix = createRemoveAuthorityIx({
@@ -1291,9 +1409,20 @@ export class LazorKitClient {
       publicKeyBytes,
     });
 
+    const request = typedRequest<CreateSessionRequest>(
+      'createSession',
+      {
+        sessionKey: params.sessionKey.toBase58(),
+        expiresAt: params.expiresAt.toString(),
+        actions: base64urlEncode(actionsBuffer ?? new Uint8Array(0)),
+      },
+      { programId: this.programId, payer: params.payer, walletPda: params.walletPda, authorityPda, p: params.secp256r1, slot, counter },
+    );
+
     return {
       challenge: signing.challenge,
       sessionPda,
+      ...(request ? { request } : {}),
       _internal: {
         signing,
         payer: params.payer,
@@ -1308,13 +1437,15 @@ export class LazorKitClient {
     };
   }
 
+  /** Phase 2. `binding`: as for {@link LazorKitClient.finalizeRemoveAuthority}. */
   finalizeCreateSession(
     prepared: PreparedCreateSession,
     response: WebAuthnResponse,
+    binding?: ChallengeBinding,
   ): { instructions: TransactionInstruction[]; sessionPda: PublicKey } {
     const i = prepared._internal;
     const { authPayload, precompileIx } = finalizeSecp256r1(
-      i.signing,
+      boundSigning(i.signing, response, binding),
       response,
     );
     const ix = createCreateSessionIx({
@@ -1368,8 +1499,15 @@ export class LazorKitClient {
       publicKeyBytes,
     });
 
+    const request = typedRequest<RevokeSessionRequest>(
+      'revokeSession',
+      { session: params.sessionPda.toBase58(), refund: refundDest.toBase58() },
+      { programId: this.programId, payer: params.payer, walletPda: params.walletPda, authorityPda, p: params.secp256r1, slot, counter },
+    );
+
     return {
       challenge: signing.challenge,
+      ...(request ? { request } : {}),
       _internal: {
         signing,
         payer: params.payer,
@@ -1382,13 +1520,15 @@ export class LazorKitClient {
     };
   }
 
+  /** Phase 2. `binding`: as for {@link LazorKitClient.finalizeRemoveAuthority}. */
   finalizeRevokeSession(
     prepared: PreparedRevokeSession,
     response: WebAuthnResponse,
+    binding?: ChallengeBinding,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
     const { authPayload, precompileIx } = finalizeSecp256r1(
-      i.signing,
+      boundSigning(i.signing, response, binding),
       response,
     );
     const ix = createRevokeSessionIx({

@@ -196,6 +196,13 @@ export function deserializeDeferredPayload(serialized: string): DeferredPayload 
 export interface Secp256r1Params {
   /** SHA256 of the credential ID (32 bytes) — used as PDA seed */
   credentialIdHash: Uint8Array;
+  /**
+   * The WebAuthn credential id itself (1 to 1023 bytes), whose SHA-256 must be
+   * `credentialIdHash`. When given, `prepareCreateSession`,
+   * `prepareRevokeSession` and `prepareRemoveAuthority` also return `request`,
+   * the typed approval request a portal shows (`@lazorkit/sdk-legacy/approval`).
+   */
+  credentialId?: Uint8Array;
   /** Compressed public key (33 bytes). Auto-fetched from the on-chain authority account if omitted. */
   publicKeyBytes?: Uint8Array;
   /** Pre-derived authority PDA (auto-derived from credentialIdHash if omitted) */

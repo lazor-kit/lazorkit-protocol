@@ -34,6 +34,13 @@ export interface PreparedSecp256r1 {
     counter: number;
     sysvarIxIndex: number;
     publicKeyBytes: Uint8Array;
+    /** What the challenge is computed from besides the slot and counter, kept
+     *  so `rebindSecp256r1` can recompute it at another slot and counter. */
+    discriminator: Uint8Array;
+    signedPayload: Uint8Array;
+    payer: PublicKey;
+    wallet: PublicKey;
+    programId: PublicKey;
   };
 }
 
@@ -91,8 +98,54 @@ export function prepareSecp256r1(params: {
       counter: params.counter,
       sysvarIxIndex: params.sysvarIxIndex,
       publicKeyBytes: params.publicKeyBytes,
+      discriminator: params.discriminator,
+      signedPayload: params.signedPayload,
+      payer: params.payer,
+      wallet: params.wallet,
+      programId: params.programId,
     },
   };
+}
+
+/** The slot and counter a passkey challenge commits to. */
+export interface ChallengeBinding {
+  slot: bigint;
+  counter: number;
+}
+
+/**
+ * The same prepared signing at another slot and counter: the challenge is
+ * recomputed from the inputs `prepared` kept, and every other input is
+ * unchanged. Used when the party that shows the request picks the slot and
+ * counter at the moment the user approves (a typed portal request), so the
+ * signature's 150-slot window starts then rather than when the app prepared.
+ *
+ * Only the slot and counter move. Callers must check the binding came with a
+ * signature over the recomputed challenge (`verifyApprovalReply` in
+ * `@lazorkit/sdk-legacy/approval`); finalizing with a binding checks it too.
+ */
+export function rebindSecp256r1(prepared: PreparedSecp256r1, binding: ChallengeBinding): PreparedSecp256r1 {
+  const i = prepared._internal;
+  if (!i.discriminator || !i.signedPayload || !i.payer || !i.wallet || !i.programId) {
+    throw new Error('rebindSecp256r1: this prepared signing does not carry its challenge inputs');
+  }
+  if (typeof binding.slot !== 'bigint' || binding.slot < 0n || binding.slot > 0xffff_ffff_ffff_ffffn) {
+    throw new RangeError(`rebindSecp256r1: slot out of range: ${String(binding.slot)}`);
+  }
+  if (!Number.isInteger(binding.counter) || binding.counter < 0 || binding.counter > 0xffff_ffff) {
+    throw new RangeError(`rebindSecp256r1: counter out of range: ${String(binding.counter)}`);
+  }
+  return prepareSecp256r1({
+    discriminator: i.discriminator,
+    signedPayload: i.signedPayload,
+    sysvarIxIndex: i.sysvarIxIndex,
+    slot: binding.slot,
+    counter: binding.counter,
+    payer: i.payer,
+    wallet: i.wallet,
+    programId: i.programId,
+    publicKeyBytes: i.publicKeyBytes,
+  });
 }
 
 /**

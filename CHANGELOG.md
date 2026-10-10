@@ -6,6 +6,42 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — typed approval requests: `@lazorkit/sdk-legacy/approval` (SDK only; the program is unchanged)
+
+A passkey signs a 32-byte challenge, which says nothing to the person
+approving it. For `CreateSession`, `RevokeSession` and `RemoveAuthority` the
+SDK now also produces the request the challenge is computed from, so the page
+that asks for the passkey can show what it approves and compute the challenge
+itself, at the slot and counter it reads when the user approves.
+
+- New entry point `@lazorkit/sdk-legacy/approval`, importing only
+  `@noble/hashes` and `@noble/curves` (a build step and a bundle test refuse
+  anything else): the v1 request envelope and its single canonical encoding
+  (`encodeApprovalRequest`, `decodeApprovalRequest`, the `#/?lk1=` URL
+  fragment, an 8,192-character cap that throws `TypedRequestTooLargeError`
+  rather than truncate); `approvalChallenge(request, { slot, counter })` and
+  `signedPayloadOf`, the program's recipe; `decodeActions`, which accepts an
+  actions buffer exactly when `validate_actions_buffer` does; the portal's
+  checks (`checkApprovalQuery`, `approvalReadPlan`, `describeApproval` with
+  account decoders) and reply (`typedReplyFor`, `typedReplyParams`); the
+  SDK's reply check (`verifyApprovalReply`, `PortalReplyMismatchError`); PDA
+  helpers without `@solana/web3.js`.
+- `prepareCreateSession`, `prepareRevokeSession` and `prepareRemoveAuthority`
+  return `request` when `secp256r1.credentialId` (new, optional; its SHA-256
+  must be `credentialIdHash`) is given and the program is the devnet or
+  mainnet v2 deployment.
+- `rebindSecp256r1(prepared, { slot, counter })`; `PreparedSecp256r1._internal`
+  keeps the challenge's other inputs. `finalizeCreateSession`,
+  `finalizeRevokeSession` and `finalizeRemoveAuthority` take an optional
+  `binding` and check that the response signed the challenge at it.
+- Tests: `tests-sdk/tests/20-approval-unit.test.ts` (10,000 seeded cases per
+  kind against the SDK's own challenge and a reference written from
+  `secp256r1/mod.rs`; codec, decoder, replies, descriptions, bundle; no
+  validator, run in CI) and `21-approval-e2e.test.ts` (on a validator: 30
+  typed requests per kind land; changing any signed field after signing is
+  refused; a request prepared more than 150 slots before approval lands; the
+  decoder against CreateSession on about 500 mutated buffers).
+
 ### Changed — session expiry and policy time are Unix seconds (program and SDKs; breaking; needs a review before the mainnet deploy)
 
 **Program** (both v2 artifacts change: devnet `30ac9bef…` → `f2779b66…`,
