@@ -17,7 +17,7 @@ import { requestCredentialId, type ApprovalRequest } from './envelope';
 import { PortalReplyMismatchError } from './errors';
 import { credentialIdHash, findAuthorityAddress } from './pda';
 
-// ─── Portal: the request against its query (DESIGN §3.2 steps 2–3) ───
+// ─── Portal: the request against the query it arrived with ───────────
 
 export type ApprovalQueryCheck =
   | { ok: true }
@@ -132,7 +132,7 @@ export function parseTypedReplyParams(get: (name: string) => string | null | und
   return parseTypedReply({ v: APPROVAL_VERSION, kind, slot, counter: Number(counter), sysvarIxIndex: Number(sysvarIx) });
 }
 
-// ─── SDK: the reply against its own request (DESIGN §2.3) ───────────
+// ─── SDK: the reply against its own request ─────────────────────────
 
 export interface VerifiedApprovalReply {
   /** The slot and counter to finalize with. */

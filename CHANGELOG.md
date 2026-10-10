@@ -8,6 +8,9 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added — typed approval requests: `@lazorkit/sdk-legacy/approval` (SDK only; the program is unchanged)
 
+Ships in the same `@lazorkit/sdk-legacy` 2.0.0 as the time-based expiry
+change below; the wallet SDKs that use it depend on `^2.0.0`.
+
 A passkey signs a 32-byte challenge, which says nothing to the person
 approving it. For `CreateSession`, `RevokeSession` and `RemoveAuthority` the
 SDK now also produces the request the challenge is computed from, so the page
@@ -30,6 +33,20 @@ itself, at the slot and counter it reads when the user approves.
   return `request` when `secp256r1.credentialId` (new, optional; its SHA-256
   must be `credentialIdHash`) is given and the program is the devnet or
   mainnet v2 deployment.
+- With `secp256r1.credentialId`, `prepareCreateSession` throws
+  `TransactionTooLargeError` (code `transaction-too-large`) before any read or
+  passkey prompt when the signed transaction could not fit 1,232 bytes. The
+  program receives authenticatorData and clientDataJSON whole, so a passkey
+  CreateSession has room for far fewer actions than the 2,048-byte buffer
+  cap: `MAX_PASSKEY_SESSION_ACTIONS_BYTES` (224) with the assumed lengths
+  (`ASSUMED_AUTHENTICATOR_DATA_BYTES` 37, `ASSUMED_CLIENT_DATA_JSON_BYTES`
+  320); `createSessionTransactionBytes` sizes one. `describeApproval` refuses
+  such a request as `request-invalid` / `transaction-too-large`. Without a
+  credential id nothing changes.
+- `describeApproval` reads stored times in the binary's unit: Unix seconds
+  with `time-expiry` (a slot an earlier build stored reads as ended), slots
+  without it, and judges none when the features are unknown. Policies carry
+  `timeUnit`.
 - `rebindSecp256r1(prepared, { slot, counter })`; `PreparedSecp256r1._internal`
   keeps the challenge's other inputs. `finalizeCreateSession`,
   `finalizeRevokeSession` and `finalizeRemoveAuthority` take an optional
@@ -40,7 +57,11 @@ itself, at the slot and counter it reads when the user approves.
   validator, run in CI) and `21-approval-e2e.test.ts` (on a validator: 30
   typed requests per kind land; changing any signed field after signing is
   refused; a request prepared more than 150 slots before approval lands; the
-  decoder against CreateSession on about 500 mutated buffers).
+  decoder against CreateSession on about 500 mutated buffers), and
+  `program/tests/typed_approval_vectors_tests.rs` (litesvm, in CI): the
+  challenge of each kind pinned as a vector, from payload builders that sign
+  a CreateSession, RevokeSession and RemoveAuthority the program accepts;
+  `20-approval-unit` checks `approvalChallenge` against the same vectors.
 
 ### Changed — session expiry and policy time are Unix seconds (program and SDKs; breaking; needs a review before the mainnet deploy)
 

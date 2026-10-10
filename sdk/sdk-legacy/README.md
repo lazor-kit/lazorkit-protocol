@@ -639,7 +639,11 @@ without a `typed` block must carry the SDK's own challenge, as today.
 
 `prepared.request` is set when `secp256r1.credentialId` is given (its SHA-256
 must be `credentialIdHash`) and the client's program is the devnet or mainnet
-v2 deployment. `rebindSecp256r1(prepared, { slot, counter })` recomputes any
+v2 deployment. With a credential id, `prepareCreateSession` throws
+`TransactionTooLargeError` before asking for anything when the signed
+transaction could not fit 1,232 bytes: the program receives the WebAuthn data
+whole, which leaves room for `MAX_PASSKEY_SESSION_ACTIONS_BYTES` (224) bytes
+of actions. `rebindSecp256r1(prepared, { slot, counter })` recomputes any
 prepared passkey signing at another slot and counter.
 
 The subpath also holds what the portal side needs: `readApprovalFragment`,

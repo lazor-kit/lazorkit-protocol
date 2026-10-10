@@ -1,7 +1,7 @@
 // Errors of typed approval requests. Each carries a stable `code` so the
 // portal and both SDKs can map it without matching message text.
 
-/** The codes a portal refuses a typed request with (DESIGN §3.4). */
+/** The codes a portal refuses a typed request with. */
 export const APPROVAL_REFUSAL_CODES = [
   'typed-malformed',
   'typed-unsupported',
@@ -74,5 +74,22 @@ export class ApprovalActionsError extends Error {
     super(message);
     this.name = 'ApprovalActionsError';
     this.programError = programError;
+  }
+}
+
+/**
+ * A passkey transaction that would not fit in one transaction once signed.
+ * Thrown before any passkey is asked, so no one approves what cannot be sent.
+ */
+export class TransactionTooLargeError extends Error {
+  readonly code = 'transaction-too-large' as const;
+  /** The estimated size, in bytes, with the assumed WebAuthn lengths. */
+  readonly bytes: number;
+  readonly limit: number;
+  constructor(bytes: number, limit: number, what: string) {
+    super(`${what} would be about ${bytes} bytes once signed, over the ${limit}-byte transaction limit`);
+    this.name = 'TransactionTooLargeError';
+    this.bytes = bytes;
+    this.limit = limit;
   }
 }

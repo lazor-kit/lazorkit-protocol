@@ -140,7 +140,9 @@ import {
   type RemoveAuthorityRequest,
   type RevokeSessionRequest,
 } from '../approval';
-import { PortalReplyMismatchError } from '../approval/errors';
+import { PortalReplyMismatchError, TransactionTooLargeError } from '../approval/errors';
+import { MAX_TRANSACTION_BYTES } from '../approval/constants';
+import { createSessionTransactionBytes } from '../approval/size';
 import { base64urlEncode, utf8Decode } from '../approval/bytes';
 
 // ─── Prepared operation types (for secp256r1 prepare/finalize flow) ──
@@ -1380,16 +1382,29 @@ export class LazorKitClient {
   }): Promise<PreparedCreateSession> {
     assertSessionActions(params.actions, params.unrestricted);
     assertSessionTimes(params.expiresAt);
+    const actionsBuffer =
+      params.actions && params.actions.length > 0
+        ? serializeActions(params.actions)
+        : undefined;
+    // A caller passing the credential id asks for a request to show in a
+    // portal: refuse here what could not be sent once signed, so no one is
+    // asked to approve it.
+    if (params.secp256r1.credentialId) {
+      const bytes = createSessionTransactionBytes(actionsBuffer?.length ?? 0);
+      if (bytes > MAX_TRANSACTION_BYTES) {
+        throw new TransactionTooLargeError(
+          bytes,
+          MAX_TRANSACTION_BYTES,
+          `A passkey CreateSession with ${actionsBuffer?.length ?? 0} bytes of actions`,
+        );
+      }
+    }
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
-    const actionsBuffer =
-      params.actions && params.actions.length > 0
-        ? serializeActions(params.actions)
-        : undefined;
 
     const dataPayload = buildDataPayloadForSession(
       sessionKeyBytes,

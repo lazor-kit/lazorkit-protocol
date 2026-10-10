@@ -18,7 +18,13 @@
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'crypto';
 import * as path from 'path';
-import { PublicKey, type AccountInfo } from '@solana/web3.js';
+import {
+  PublicKey,
+  Transaction,
+  TransactionMessage,
+  VersionedTransaction,
+  type AccountInfo,
+} from '@solana/web3.js';
 import * as A from '../../sdk/sdk-legacy/src/approval';
 import {
   LazorKitClient,
@@ -140,7 +146,7 @@ function reference(c: Case, slot = c.slot, counter = c.counter): Buffer {
   });
 }
 
-/** The envelope for a case, written by hand from DESIGN §2.1 (not by the SDK). */
+/** The envelope for a case, written by hand from the v1 field list (not by the SDK). */
 function envelopeOf(c: Case): A.ApprovalRequest {
   const base = {
     v: 1 as const,
@@ -217,6 +223,7 @@ describe('approvalChallenge — parity with the SDK and the program', () => {
         devnet: new LazorKitClient(connection, PROGRAM_ID_DEVNET),
         mainnet: new LazorKitClient(connection, PROGRAM_ID_MAINNET),
       };
+      let tooLarge = 0;
       for (let i = 0; i < CASES; i++) {
         const c = randomCase(rng, kind, i);
         const cluster = i % 2 === 0 ? 'devnet' : 'mainnet';
@@ -239,14 +246,30 @@ describe('approvalChallenge — parity with the SDK and the program', () => {
           sessionActions = drawn.actions;
           c.actions = drawn.buffer;
         }
+        const createArgs = {
+          sessionKey: new PublicKey(c.sessionKey),
+          expiresAt: c.expiresAt,
+          ...(sessionActions.length ? { actions: sessionActions } : { unrestricted: true as const }),
+        };
+        if (kind === 'createSession' && c.actions.length > A.MAX_PASSKEY_SESSION_ACTIONS_BYTES) {
+          // Too large to send once signed: refused before any request exists.
+          // Without the credential id (no request) the challenge is unchanged.
+          await expect(client.prepareCreateSession({ ...common, ...createArgs })).rejects.toBeInstanceOf(
+            A.TransactionTooLargeError,
+          );
+          const bare = await client.prepareCreateSession({
+            ...common,
+            secp256r1: { ...secp256r1, credentialId: undefined },
+            ...createArgs,
+          });
+          expect(bare.request).toBeUndefined();
+          expect(Buffer.from(bare.challenge).equals(reference(c)), `case ${i}`).toBe(true);
+          tooLarge++;
+          continue;
+        }
         const prepared =
           kind === 'createSession'
-            ? await client.prepareCreateSession({
-                ...common,
-                sessionKey: new PublicKey(c.sessionKey),
-                expiresAt: c.expiresAt,
-                ...(sessionActions.length ? { actions: sessionActions } : { unrestricted: true }),
-              })
+            ? await client.prepareCreateSession({ ...common, ...createArgs })
             : kind === 'revokeSession'
               ? await client.prepareRevokeSession({
                   ...common,
@@ -271,14 +294,57 @@ describe('approvalChallenge — parity with the SDK and the program', () => {
         expect(Buffer.from(prepared.challenge).equals(ref), `case ${i}`).toBe(true);
         expect(Buffer.from(A.approvalChallenge(req, A.preparedBinding(req))).equals(ref)).toBe(true);
       }
+      if (kind === 'createSession') {
+        expect(tooLarge).toBeGreaterThan(CASES / 20);
+        expect(tooLarge).toBeLessThan(CASES - CASES / 20);
+      }
     }, 600_000);
   }
+
+  it('matches the vectors the program suite signs with and lands (program/tests/typed_approval_vectors_tests.rs)', () => {
+    const fill = (b: number) => addr(new Uint8Array(32).fill(b));
+    const actions = Buffer.from(
+      '0308000000000000000000' + '80841e0000000000' +
+        '0428000000000000000000' + '55'.repeat(32) + '404b4c0000000000',
+      'hex',
+    );
+    const base = {
+      v: 1 as const,
+      cluster: 'devnet' as const,
+      programId: PROGRAM_ADDRESS_DEVNET,
+      wallet: fill(0x11),
+      authority: fill(0x12),
+      credentialId: b64url(new Uint8Array([1, 2, 3])),
+      payer: fill(0x22),
+      counter: 42,
+      preparedSlot: '234567890',
+    };
+    const vectors: [A.ApprovalRequest, string][] = [
+      [
+        { ...base, kind: 'createSession', args: { sessionKey: fill(0x33), expiresAt: '1791072000', actions: b64url(actions) } },
+        'd1841cf56f964039a42a5a2569f3a030991cdd8d3d5b8f29387e97ca34f8333a',
+      ],
+      [
+        { ...base, kind: 'revokeSession', args: { session: fill(0x44), refund: fill(0x22) } },
+        '83051a9cb28655e7ae605e66556d085a9b32d9d9986807ef16ffc174aada6beb',
+      ],
+      [
+        { ...base, kind: 'removeAuthority', args: { target: fill(0x77), refund: fill(0x22) } },
+        '7768f9770b74d4ec77eaf3178fa2cdc712b330f66e02472cf360b36c4d912df9',
+      ],
+    ];
+    for (const [req, hex] of vectors) {
+      const decoded = A.decodeApprovalRequest(A.encodeApprovalRequest(req));
+      expect(Buffer.from(A.approvalChallenge(decoded, A.preparedBinding(decoded))).toString('hex'), req.kind).toBe(hex);
+    }
+  });
 
   it('createSession: the request carries the exact buffer the SDK serialized', async () => {
     const rng = new Rng(77);
     const client = new LazorKitClient(stubConnection(() => 6), PROGRAM_ID_DEVNET);
     for (let i = 0; i < 300; i++) {
       const { actions, buffer } = sdkActions(rng);
+      if (buffer.length > A.MAX_PASSKEY_SESSION_ACTIONS_BYTES) continue;
       const credentialId = rng.bytes(16);
       const prepared = await client.prepareCreateSession({
         payer: new PublicKey(rng.bytes(32)),
@@ -713,6 +779,108 @@ describe('PDAs and encodings without web3.js', () => {
   });
 });
 
+// ─── Transaction size ─────────────────────────────────────────────
+
+describe('passkey CreateSession size', () => {
+  const blockhash = new PublicKey(new Uint8Array(32).fill(0xbb)).toBase58();
+
+  /** The transaction finalizeCreateSession gives, serialized both ways. */
+  async function built(actions: SessionAction[], authData: number, clientData: number) {
+    const client = new LazorKitClient(stubConnection(() => 3), PROGRAM_ID_DEVNET);
+    const credentialId = new Uint8Array([9, 9, 9]);
+    const payer = new PublicKey(new Uint8Array(32).fill(0x21));
+    const prepared = await client.prepareCreateSession({
+      payer,
+      walletPda: new PublicKey(new Uint8Array(32).fill(0x31)),
+      // No credential id: no request, so no size check; this measures.
+      secp256r1: { credentialIdHash: sha256(credentialId), publicKeyBytes: new Uint8Array(33).fill(2), slotOverride: 5n },
+      sessionKey: new PublicKey(new Uint8Array(32).fill(0x41)),
+      expiresAt: A.MIN_UNIX_SECONDS + 1n,
+      ...(actions.length ? { actions } : { unrestricted: true }),
+    });
+    const { instructions } = client.finalizeCreateSession(prepared, {
+      signature: new Uint8Array(64).fill(1),
+      authenticatorData: new Uint8Array(authData).fill(2),
+      clientDataJsonHash: new Uint8Array(32).fill(3),
+      clientDataJson: new Uint8Array(clientData).fill(0x61),
+    });
+    const legacy = new Transaction({ feePayer: payer, recentBlockhash: blockhash }).add(...instructions);
+    const v0 = new VersionedTransaction(
+      new TransactionMessage({ payerKey: payer, recentBlockhash: blockhash, instructions }).compileToV0Message(),
+    );
+    return { legacy: 1 + 64 + legacy.serializeMessage().length, v0: v0.serialize().length };
+  }
+
+  it('createSessionTransactionBytes is the size of the transaction the SDK builds (v0; legacy is 2 less)', async () => {
+    // web3.js serializes into a buffer of about the limit, so the cases are
+    // drawn to fit; the limit itself is the next test.
+    const rng = new Rng(1232);
+    let measured = 0;
+    for (let i = 0; i < 400; i++) {
+      const { actions, buffer } = sdkActions(rng);
+      const authData = rng.pick([37, 37, 69, 120]);
+      const clientData = rng.pick([40, 120, 180, 256, 320, 400]);
+      const estimate = A.createSessionTransactionBytes(buffer.length, {
+        authenticatorDataBytes: authData,
+        clientDataJsonBytes: clientData,
+      });
+      if (estimate > A.MAX_TRANSACTION_BYTES) continue;
+      const size = await built(actions, authData, clientData);
+      expect(size.v0, `case ${i}`).toBe(estimate);
+      expect(size.legacy, `case ${i}`).toBe(estimate - 2);
+      measured++;
+    }
+    expect(measured).toBeGreaterThan(100);
+  });
+
+  it('the most actions that fit with the assumed WebAuthn lengths', () => {
+    const max = A.MAX_PASSKEY_SESSION_ACTIONS_BYTES;
+    expect(max).toBe(224);
+    expect(A.createSessionFits(max)).toBe(true);
+    expect(A.createSessionFits(max + 1)).toBe(false);
+    expect(A.createSessionTransactionBytes(max)).toBe(A.MAX_TRANSACTION_BYTES);
+  });
+
+  it('at the limit, the transaction the SDK builds is exactly 1,232 bytes, and one more byte is over', async () => {
+    // SolMaxPerTx (19 bytes) and TokenLimit (51) actions, then clientDataJSON
+    // grown until the estimate is the limit: web3.js agrees byte for byte.
+    const actions: SessionAction[] = [
+      { type: 3, max: 1n },
+      ...Array.from({ length: 3 }, (_, k): SessionAction => ({ type: 4, mint: new PublicKey(new Uint8Array(32).fill(k + 1)), remaining: 1n })),
+    ];
+    let clientData = 100;
+    while (A.createSessionTransactionBytes(172, { clientDataJsonBytes: clientData + 1 }) <= A.MAX_TRANSACTION_BYTES) clientData++;
+    expect(A.createSessionTransactionBytes(172, { clientDataJsonBytes: clientData })).toBe(A.MAX_TRANSACTION_BYTES);
+    const size = await built(actions, 37, clientData);
+    expect(size.v0).toBe(A.MAX_TRANSACTION_BYTES);
+    expect((await built(actions, 37, clientData + 1)).v0).toBe(A.MAX_TRANSACTION_BYTES + 1);
+  });
+
+  it('prepareCreateSession refuses, with a credential id, what could not be sent once signed', async () => {
+    const client = new LazorKitClient(stubConnection(() => 3), PROGRAM_ID_DEVNET);
+    const credentialId = new Uint8Array([1, 2, 3]);
+    const mint = (k: number) => new PublicKey(new Uint8Array(32).fill(k));
+    const args = (n: number) => ({
+      payer: new PublicKey(new Uint8Array(32).fill(0x21)),
+      walletPda: new PublicKey(new Uint8Array(32).fill(0x31)),
+      secp256r1: { credentialIdHash: sha256(credentialId), credentialId, publicKeyBytes: new Uint8Array(33).fill(2), slotOverride: 5n },
+      sessionKey: new PublicKey(new Uint8Array(32).fill(0x41)),
+      expiresAt: A.MIN_UNIX_SECONDS + 1n,
+      // TokenLimit actions, 51 bytes each.
+      actions: Array.from({ length: n }, (_, k): SessionAction => ({ type: 4, mint: mint(k + 1), remaining: 1n })),
+    });
+    const fits = await client.prepareCreateSession(args(4));
+    expect(fits.request).toBeDefined();
+    const err = await client.prepareCreateSession(args(5)).catch((e) => e);
+    expect(err).toBeInstanceOf(A.TransactionTooLargeError);
+    expect(err).toMatchObject({ code: 'transaction-too-large', limit: 1232, bytes: A.createSessionTransactionBytes(255) });
+    // Without a credential id, nothing changes for existing callers.
+    const { secp256r1, ...rest } = args(5);
+    const bare = await client.prepareCreateSession({ ...rest, secp256r1: { ...secp256r1, credentialId: undefined } });
+    expect(bare.request).toBeUndefined();
+  });
+});
+
 // ─── describeApproval ─────────────────────────────────────────────
 
 const PID = PROGRAM_ADDRESS_DEVNET;
@@ -791,6 +959,7 @@ describe('describeApproval', () => {
   const lamports = (n: bigint) => { const d = new Uint8Array(8); for (let i = 0; i < 8; i++) d[i] = Number((n >> BigInt(8 * i)) & 0xffn); return d; };
   const solLimit = (n: bigint, exp = 0n) => rawAction(1, exp, lamports(n));
   const solMax = (n: bigint) => rawAction(3, 0n, lamports(n));
+  const solMaxAt = (n: bigint, exp: bigint) => rawAction(3, exp, lamports(n));
   const tokLimit = (mint: string, n: bigint) => rawAction(4, 0n, Uint8Array.from([...new PublicKey(mint).toBytes(), ...lamports(n)]));
   const tokRecurring = (mint: string, n: bigint, w: bigint) => { const d = new Uint8Array(64); d.set(new PublicKey(mint).toBytes()); d.set(lamports(n), 32); d.set(lamports(w), 48); return rawAction(5, 0n, d); };
   const whitelist = (id: string) => rawAction(10, 0n, new PublicKey(id).toBytes());
@@ -878,6 +1047,7 @@ describe('describeApproval', () => {
     ['expiry past 30 days', () => A.describeApproval(create([], NOW + 2_592_001n), view(), opts), 'request-invalid', 'expiry-too-far'],
     ['invalid actions', () => A.describeApproval(create([solLimit(1n), solLimit(1n)]), view(), opts), 'request-invalid', 'actions-invalid'],
     ['whitelist + blacklist', () => A.describeApproval(create([whitelist(OTHER), rawAction(11, 0n, new Uint8Array(32))]), view(), opts), 'request-invalid', 'actions-whitelist-blacklist'],
+    ['too large to send once signed', () => A.describeApproval(create([1, 2, 3].map((k) => tokRecurring(addr(new Uint8Array(32).fill(k)), 5n, 60n))), view(), opts), 'request-invalid', 'transaction-too-large'],
     ['session exists', () => A.describeApproval(create([]), view({ session: sessionSnap(wallet, NOW) }), opts), 'request-invalid', 'session-exists'],
     ['wallet missing', () => A.describeApproval(create([]), view({ wallet: null }), opts), 'request-invalid', 'wallet-missing'],
     ['authority missing', () => A.describeApproval(create([]), view({ authority: null }), opts), 'request-invalid', 'authority-missing'],
@@ -908,6 +1078,47 @@ describe('describeApproval', () => {
       const unknown = ok(A.describeApproval(revoke(), view({ session: sessionSnap(wallet, NOW - 1n) }), { features: null })) as A.RevokeSessionDescription;
       expect(unknown).toMatchObject({ expiresAtUnit: 'unknown', ended: undefined });
     });
+
+    // A recurring SOL limit as stored: limit 10, spent 4, window, last reset.
+    const stored = (window: bigint, lastReset: bigint, expiresAt = 0n) => {
+      const d = new Uint8Array(32);
+      d.set(lamports(10n), 0);
+      d.set(lamports(4n), 8);
+      d.set(lamports(window), 16);
+      d.set(lamports(lastReset), 24);
+      return rawAction(2, expiresAt, d);
+    };
+
+    it('with time-expiry, every stored time is Unix seconds: a slot an earlier build stored has ended', () => {
+      const d = ok(A.describeApproval(revoke(), view({ session: sessionSnap(wallet, SLOT + 6_480_000n, stored(86_400n, NOW - 100n, SLOT + 1_000n)) }), opts)) as A.RevokeSessionDescription;
+      expect(d).toMatchObject({ expiresAtUnit: 'seconds', ended: true });
+      expect(d.policy!.timeUnit).toBe('seconds');
+      expect(d.policy!.assets[0].recurring).toMatchObject({ expired: true, leftInWindow: 0n });
+    });
+
+    it('without time-expiry, the session, its actions and windows are slots, read against the clock’s slot', () => {
+      const slotBinary = { features: ['wallet-bound-challenge', 'd13', 'nonowner-invariants'] };
+      const live = sessionSnap(wallet, SLOT + 600n, Buffer.concat([stored(9_000n, SLOT - 100n), solMaxAt(3n, SLOT + 50n)]));
+      const d = ok(A.describeApproval(revoke(), view({ session: live }), slotBinary)) as A.RevokeSessionDescription;
+      expect(d).toMatchObject({ expiresAtUnit: 'slot', ended: false });
+      expect(d.policy!.timeUnit).toBe('slot');
+      expect(d.policy!.assets[0].recurring).toMatchObject({ expired: false, spent: 4n, leftInWindow: 6n });
+      expect(d.policy!.assets[0].perPayment).toMatchObject({ amount: 3n, expired: false });
+      expect(d.policy!.assets[0].cannotSpend).toBe(false);
+      // A window of 50 slots opened 100 slots ago has restarted.
+      const reset = ok(A.describeApproval(revoke(), view({ session: sessionSnap(wallet, SLOT + 600n, stored(50n, SLOT - 100n)) }), slotBinary)) as A.RevokeSessionDescription;
+      expect(reset.policy!.assets[0].recurring!.leftInWindow).toBe(10n);
+      const over = ok(A.describeApproval(revoke(), view({ session: sessionSnap(wallet, SLOT - 1n) }), slotBinary)) as A.RevokeSessionDescription;
+      expect(over.ended).toBe(true);
+    });
+
+    it('with unknown features, no policy time is judged', () => {
+      const d = ok(A.describeApproval(revoke(), view({ session: sessionSnap(wallet, NOW + 600n, stored(86_400n, NOW - 100n, 1n)) }), { features: null })) as A.RevokeSessionDescription;
+      expect(d.policy!.timeUnit).toBe('unknown');
+      expect(d.policy!.assets[0].recurring!.expired).toBe(false);
+      expect(d.policy!.assets[0].recurring!.leftInWindow).toBeUndefined();
+      expect(d.policy!.assets[0].cannotSpend).toBe(false);
+    });
     it('refuses a missing session, another wallet’s, a refund to the session itself', () => {
       expect(A.describeApproval(revoke(), view({ session: null }), opts)).toMatchObject({ reason: 'session-missing' });
       expect(A.describeApproval(revoke(), view({ session: sessionSnap(payer, NOW) }), opts)).toMatchObject({ reason: 'session-wrong-wallet' });
@@ -925,6 +1136,15 @@ describe('describeApproval', () => {
       const key = ok(A.describeApproval(remove(), view({ target: authoritySnap({ wallet, passkey: false, role: 2, policy: solLimit(5n) }) }), opts)) as A.RemoveAuthorityDescription;
       expect(key).toMatchObject({ targetType: 'ed25519', targetRole: 'delegate', targetPublicKey: addr(new Uint8Array(32).fill(7)) });
       expect(key.targetPolicy!.assets[0].lifetime!.amount).toBe(5n);
+      expect(key.targetPolicy!.timeUnit).toBe('seconds');
+    });
+    it('reads the target’s policy times in the binary’s unit', () => {
+      const target = authoritySnap({ wallet, passkey: false, role: 2, policy: solLimit(5n, SLOT + 50n) });
+      const slotBinary = ok(A.describeApproval(remove(), view({ target }), { features: ['d13'] })) as A.RemoveAuthorityDescription;
+      expect(slotBinary.targetPolicy).toMatchObject({ timeUnit: 'slot' });
+      expect(slotBinary.targetPolicy!.assets[0].lifetime).toMatchObject({ amount: 5n, expired: false });
+      const timeBinary = ok(A.describeApproval(remove(), view({ target }), opts)) as A.RemoveAuthorityDescription;
+      expect(timeBinary.targetPolicy!.assets[0].lifetime).toMatchObject({ expired: true });
     });
     it('refuses the last owner, the signer itself, an owner by an admin, a missing target', () => {
       expect(A.describeApproval(remove(), view({ target: authoritySnap({ wallet, credHash: new Uint8Array(32).fill(1) }) }), opts)).toMatchObject({ reason: 'last-owner' });

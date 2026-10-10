@@ -1,5 +1,6 @@
 /**
- * Typed approval requests on a local validator (DESIGN §7.1 items 3 and 4).
+ * Typed approval requests on a local validator: the whole typed flow against
+ * the program, and the actions decoder against CreateSession.
  *
  * - For each kind, random cases go the whole typed way: `prepareX` gives the
  *   request; a portal stand-in checks it against the query and the chain
@@ -525,11 +526,11 @@ describe('typed approval requests on chain', () => {
 });
 
 /**
- * A passkey CreateSession must fit one legacy transaction (1,232 bytes) with
- * the precompile instruction and the WebAuthn payload beside it, which
- * leaves room for about 370 bytes of actions.
+ * A passkey CreateSession must fit one transaction (1,232 bytes) with the
+ * precompile instruction and the WebAuthn payload beside it; prepareX refuses
+ * more actions than fit with the assumed WebAuthn lengths.
  */
-const PASSKEY_ACTIONS_MAX_BYTES = 360;
+const PASSKEY_ACTIONS_MAX_BYTES = A.MAX_PASSKEY_SESSION_ACTIONS_BYTES;
 /** An Ed25519 CreateSession leaves about 760. */
 const ED25519_ACTIONS_MAX_BYTES = 740;
 
@@ -549,7 +550,7 @@ function actionStarts(b: Uint8Array): number[] {
   return starts;
 }
 
-/** Valid buffers, mutated in the ways DESIGN §7.1 item 3 lists. */
+/** Valid buffers, mutated: bit flips, header flips, truncation, duplicates and the like. */
 function drawMutants(rng: Rng, n: number): { name: string; buf: Uint8Array }[] {
   const out: { name: string; buf: Uint8Array }[] = [];
   const valid = () => {

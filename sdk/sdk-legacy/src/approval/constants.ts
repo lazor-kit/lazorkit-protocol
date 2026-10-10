@@ -64,6 +64,26 @@ export const MAX_ACTIONS_BUFFER_BYTES = 2048;
 /** At most this many actions in one buffer. */
 export const MAX_ACTIONS = 16;
 
+/** The largest transaction a cluster accepts, serialized, in bytes (PACKET_DATA_SIZE). */
+export const MAX_TRANSACTION_BYTES = 1232;
+
+/**
+ * The authenticatorData length assumed when sizing a passkey transaction
+ * before it is signed: rpIdHash, flags and signCount, an assertion with no
+ * extensions (the portal requests none).
+ */
+export const ASSUMED_AUTHENTICATOR_DATA_BYTES = 37;
+
+/**
+ * The clientDataJSON length assumed when sizing a passkey transaction before
+ * it is signed. The program receives clientDataJSON whole, and its length is
+ * known only after signing: type, the 43-character challenge, origin and
+ * crossOrigin, plus what browsers may add (a cross-origin frame's topOrigin,
+ * Chrome's occasional `other_keys_can_be_added_here` member). 320 bytes covers
+ * all of them with origins of about 40 characters each.
+ */
+export const ASSUMED_CLIENT_DATA_JSON_BYTES = 320;
+
 /** 2020-01-01 in Unix seconds: below this, a stored expiry is a slot written before time-based expiry. */
 export const MIN_UNIX_SECONDS = 1_577_836_800n;
 

@@ -31,3 +31,4 @@ export * from './challenge';
 export * from './reply';
 export * from './accounts';
 export * from './describe';
+export * from './size';

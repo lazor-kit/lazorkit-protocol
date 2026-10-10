@@ -3,15 +3,15 @@
 // screen class. No English: the portal (or an embedded sheet) words it.
 //
 // `approvalReadPlan` lists what to read; `describeApproval` checks the request
-// against those reads (refusing what would fail on chain, DESIGN §3.4) and
-// describes it (§5). Every number comes from the request's bytes or from a
-// read, never from the app.
+// against those reads (refusing what would fail on chain with
+// `request-invalid`) and describes it. Every number comes from the request's
+// bytes or from a read, never from the app.
 
 import { base58Encode, base64urlDecode, bytesEqual, decodeAddress } from './bytes';
 import {
   APPROVAL_MAX_SESSION_SECONDS,
   CLOCK_SYSVAR_ADDRESS,
-  MIN_UNIX_SECONDS,
+  MAX_TRANSACTION_BYTES,
   type ApprovalCluster,
   type ApprovalFeature,
   type ApprovalKind,
@@ -30,6 +30,7 @@ import {
 } from './accounts';
 import { requestCredentialId, type ApprovalRequest, type CreateSessionRequest } from './envelope';
 import { credentialIdHash, findSessionAddress, findVaultAddress } from './pda';
+import { createSessionTransactionBytes } from './size';
 
 // ─── What to read ────────────────────────────────────────────────────
 
@@ -132,6 +133,7 @@ export type ApprovalInvalidReason =
   | 'expiry-too-far'
   | 'actions-invalid'
   | 'actions-whitelist-blacklist'
+  | 'transaction-too-large'
   | 'session-exists'
   | 'session-missing'
   | 'session-wrong-wallet'
@@ -165,15 +167,16 @@ export interface TokenFacts {
 export interface LimitRule {
   /** Lamports or token base units. For a lifetime limit on chain, what is left. */
   amount: bigint;
-  /** The action's own expiry, Unix seconds; 0 = none. */
+  /** The action's own expiry, in the policy's `timeUnit` (Unix seconds on a time-expiry binary); 0 = none. */
   expiresAt: bigint;
-  /** Expired at the clock read: the program treats it as exhausted. */
+  /** Expired at the clock read: the program treats it as exhausted. False when the time unit is unknown. */
   expired: boolean;
   /** Ends before the session does (createSession only). */
   endsBeforeSession: boolean;
 }
 
 export interface RecurringRule extends LimitRule {
+  /** The window length: seconds, or slots when the policy's `timeUnit` is `slot`. */
   windowSeconds: bigint;
   /** On chain only: spent in the current window, and when it opened (0 = never). */
   spent?: bigint;
@@ -202,7 +205,19 @@ export interface ProgramRules {
   entries: { programId: string; expiresAt: bigint; expired: boolean }[];
 }
 
+/**
+ * How a binary reads stored session and policy times: Unix seconds with
+ * `time-expiry`, slots on a binary confirmed without it, `unknown` when the
+ * features could not be confirmed.
+ */
+export type TimeUnit = 'seconds' | 'slot' | 'unknown';
+
 export interface PolicyDescription {
+  /**
+   * The unit of every time and window in this policy on this binary. With
+   * `unknown`, no rule is marked expired and `leftInWindow` is not computed.
+   */
+  timeUnit: TimeUnit;
   assets: AssetGrant[];
   programs: ProgramRules;
   /** Assets that can leave with no total: per-payment caps only, or (without D13) not named at all. */
@@ -249,8 +264,12 @@ export interface RevokeSessionDescription extends DescriptionBase {
   session: string;
   sessionKey: string;
   expiresAt: bigint;
-  /** How `expiresAt` reads on this binary. */
-  expiresAtUnit: 'seconds' | 'slot' | 'unknown';
+  /**
+   * How `expiresAt` reads on this binary. With `time-expiry` the program reads
+   * every session's expiry as Unix seconds, so a slot left by an earlier build
+   * reads as long ended.
+   */
+  expiresAtUnit: TimeUnit;
   /** Already past its expiry (undefined when the unit is unknown). */
   ended?: boolean;
   refund: string;
@@ -295,22 +314,44 @@ function tokenFacts(mint: string, view: ApprovalChainView, opts: DescribeApprova
   return { mint, decimals: read?.decimals ?? null, tokenProgram: read?.tokenProgram ?? null, listed: false, readable: !!read };
 }
 
-function rule(amount: bigint, expiresAt: bigint, now: bigint, sessionEnd: bigint | undefined): LimitRule {
+/** The binary's time unit and the clock reading in it (undefined when unknown). */
+interface PolicyTime {
+  unit: TimeUnit;
+  now: bigint | undefined;
+}
+
+/**
+ * The time the program compares stored expiries and windows with: the clock's
+ * Unix timestamp on a `time-expiry` binary (program: `unix_now`), its slot on
+ * a binary confirmed without it, nothing when the features are unknown.
+ */
+function policyTime(features: DescribeApprovalOptions['features'], clock: ClockFacts): PolicyTime {
+  if (features === null) return { unit: 'unknown', now: undefined };
+  if (features.includes('time-expiry')) return { unit: 'seconds', now: clock.unixTimestamp };
+  return { unit: 'slot', now: clock.slot };
+}
+
+function isExpired(expiresAt: bigint, now: bigint | undefined): boolean {
+  return now !== undefined && expiresAt !== 0n && now > expiresAt;
+}
+
+function rule(amount: bigint, expiresAt: bigint, now: bigint | undefined, sessionEnd: bigint | undefined): LimitRule {
   return {
     amount,
     expiresAt,
-    expired: expiresAt !== 0n && now > expiresAt,
+    expired: isExpired(expiresAt, now),
     endsBeforeSession: sessionEnd !== undefined && expiresAt !== 0n && expiresAt < sessionEnd,
   };
 }
 
 function describePolicy(
   actions: StoredAction[],
-  now: bigint,
+  time: PolicyTime,
   sessionEnd: bigint | undefined,
   view: ApprovalChainView,
   opts: DescribeApprovalOptions,
 ): PolicyDescription | 'mismatch' {
+  const now = time.now;
   const d13 = !!opts.features?.includes('d13');
   const grants = new Map<string, AssetGrant>();
   const grantFor = (ref: AssetRef): AssetGrant => {
@@ -345,9 +386,12 @@ function describePolicy(
         if ('spent' in a) {
           r.spent = a.spent;
           r.lastReset = a.lastReset;
-          // A window restarts once more than `window` seconds passed since it opened.
-          const reset = now - a.lastReset > a.windowSeconds;
-          r.leftInWindow = r.expired ? 0n : reset ? a.limit : a.limit > a.spent ? a.limit - a.spent : 0n;
+          if (now !== undefined) {
+            // A window restarts once more than `window` passed since it opened
+            // (program: `now.saturating_sub(last_reset) > window`).
+            const reset = now > a.lastReset && now - a.lastReset > a.windowSeconds;
+            r.leftInWindow = r.expired ? 0n : reset ? a.limit : a.limit > a.spent ? a.limit - a.spent : 0n;
+          }
         }
         grantFor(ref).recurring = r;
         break;
@@ -355,7 +399,7 @@ function describePolicy(
       case 'programWhitelist':
       case 'programBlacklist':
         programs.mode = a.type === 'programWhitelist' ? 'only' : 'except';
-        programs.entries.push({ programId: a.programId, expiresAt: a.expiresAt, expired: a.expiresAt !== 0n && now > a.expiresAt });
+        programs.entries.push({ programId: a.programId, expiresAt: a.expiresAt, expired: isExpired(a.expiresAt, now) });
         break;
     }
   }
@@ -387,6 +431,7 @@ function describePolicy(
   }
 
   return {
+    timeUnit: time.unit,
     assets,
     programs,
     uncapped,
@@ -452,13 +497,13 @@ export function describeApproval(
       const s = decodeSessionAccount(view.session, req.programId);
       if (!s) return invalid('session-missing');
       if (s.wallet !== req.wallet) return invalid('session-wrong-wallet');
-      const features = opts.features;
-      const unit: RevokeSessionDescription['expiresAtUnit'] =
-        features === null ? 'unknown' : features.includes('time-expiry') && s.expiresAt >= MIN_UNIX_SECONDS ? 'seconds' : 'slot';
-      const now = unit === 'slot' ? clock.slot : clock.unixTimestamp;
+      // The program reads the session's expiry and its actions' times in one
+      // unit: Unix seconds on a time-expiry binary (where a slot an earlier
+      // build stored reads as long ended), slots before it.
+      const time = policyTime(opts.features, clock);
       let policy: PolicyDescription | null = null;
       try {
-        const p = describePolicy(readStoredActions(s.actions), clock.unixTimestamp, undefined, view, opts);
+        const p = describePolicy(readStoredActions(s.actions), time, undefined, view, opts);
         if (p === 'mismatch') return invalid('mint-decimals-mismatch');
         policy = p;
       } catch {
@@ -472,8 +517,8 @@ export function describeApproval(
           session: req.args.session,
           sessionKey: s.sessionKey,
           expiresAt: s.expiresAt,
-          expiresAtUnit: unit,
-          ended: unit === 'unknown' ? undefined : now > s.expiresAt,
+          expiresAtUnit: time.unit,
+          ended: time.now === undefined ? undefined : time.now > s.expiresAt,
           refund: req.args.refund,
           refundIsPayer: req.args.refund === req.payer,
           policy,
@@ -496,7 +541,7 @@ export function describeApproval(
       let targetPolicy: PolicyDescription | null = null;
       if (t.policy.length > 0) {
         try {
-          const p = describePolicy(readStoredActions(t.policy), clock.unixTimestamp, undefined, view, opts);
+          const p = describePolicy(readStoredActions(t.policy), policyTime(opts.features, clock), undefined, view, opts);
           if (p === 'mismatch') return invalid('mint-decimals-mismatch');
           targetPolicy = p;
         } catch {
@@ -543,13 +588,18 @@ function describeCreate(
   if (expiresAt > now + APPROVAL_MAX_SESSION_SECONDS) return invalid('expiry-too-far');
 
   let actions: DecodedAction[];
+  const actionsBytes = base64urlDecode(req.args.actions);
   try {
-    actions = decodeActions(base64urlDecode(req.args.actions) ?? new Uint8Array(1));
+    actions = decodeActions(actionsBytes ?? new Uint8Array(1));
   } catch (e) {
     const conflict = (e as { programError?: string }).programError === 'ActionWhitelistBlacklistConflict';
     return invalid(conflict ? 'actions-whitelist-blacklist' : 'actions-invalid');
   }
-  const policy = describePolicy(actions as StoredAction[], now, expiresAt, view, opts);
+  // Valid, but too large to send once signed (the SDK refuses it before
+  // asking; an older or other SDK may not).
+  if (createSessionTransactionBytes(actionsBytes!.length) > MAX_TRANSACTION_BYTES) return invalid('transaction-too-large');
+  // createSession is described only on a time-expiry binary (checked above).
+  const policy = describePolicy(actions as StoredAction[], { unit: 'seconds', now }, expiresAt, view, opts);
   if (policy === 'mismatch') return invalid('mint-decimals-mismatch');
 
   let screen: CreateSessionDescription['screen'];
