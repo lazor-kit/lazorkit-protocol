@@ -300,16 +300,20 @@ Optional **actions** buffer appended after the header (variable length, max 2048
 
 **Expired-action policy**: expired spending limits are treated as **fully exhausted** (any spend denied); expired whitelists are **hard deny**; expired blacklist entries are silently dropped.
 
-**Vault invariants**: during any policy-bearing Execute — a session with actions,
-or an authority with a policy — the program records the vault's owner and data
-length, and copies every writable vault-owned token account in the Execute,
-before the CPI loop. Afterwards the vault's owner and data length must be
-unchanged (3030 / 3031), every copied token account unchanged but for its
-balance (3032), and no SOL or mint the policy does not name may have left
-(3037 / 3038). This prevents escape via `System::Assign`, SPL Token
-`SetAuthority`, `Approve`, `CloseAccount` or `FreezeAccount`, and spending an
-asset the granter never listed. The full rule set is in
-[What a policy bounds](#what-a-policy-bounds).
+**Vault invariants**: during any Execute or ExecuteDeferred whose signer is not
+an Owner — a session of any kind, with actions or without, an Admin, a
+Delegate — the program records the vault's owner and data length, and copies
+every writable vault-owned token account in the Execute, before the CPI loop.
+Afterwards the vault's owner and data length must be unchanged (3030 / 3031),
+every copied token account unchanged but for its balance, and a token account
+that became vault-owned during the Execute must carry no delegate and no close
+authority (3032). When the signer carries a policy, no SOL or mint the policy
+does not name may have left either (3037 / 3038). This prevents escape via
+`System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount` or
+`FreezeAccount` — grants that would outlive the session or the key — and
+spending an asset the granter never listed. An Owner is not held to them. The
+full rule set is in [What a policy bounds](#what-a-policy-bounds); who is held
+to it, in [Who the vault invariants bind](#who-the-vault-invariants-bind).
 
 ### DeferredExec PDA — 176 bytes
 
@@ -321,7 +325,8 @@ pub struct DeferredExecAccount {
     pub discriminator: u8,           // 4
     pub version: u8,
     pub bump: u8,
-    pub _padding: [u8; 5],
+    pub flags: u8,                   // bit 0: an Owner signed Authorize
+    pub _padding: [u8; 4],
     pub instructions_hash: [u8; 32], // SHA256 of compact instructions
     pub accounts_hash: [u8; 32],     // SHA256 of referenced account pubkeys
     pub wallet: Pubkey,
@@ -332,6 +337,13 @@ pub struct DeferredExecAccount {
 ```
 
 Temporary account created during `Authorize` (tx1), closed during `ExecuteDeferred` (tx2). The authority's odometer counter is used as a seed nonce, so each authorization gets a unique PDA. Expired authorizations can be reclaimed via `ReclaimDeferred`.
+
+`flags` took the first padding byte, so no other field moved. Bit 0
+(`DEFERRED_FLAG_OWNER`) records that an Owner signed the `Authorize`; without
+it — an Admin's authorization, or any account written before the field existed,
+which holds zero there — `ExecuteDeferred` holds the vault to the invariants
+every non-Owner signer is held to. A pending authorization from before the field
+can therefore only lose power across the upgrade, never gain it.
 
 ### Vault PDA
 
@@ -482,14 +494,56 @@ vault deltas and the vault's token accounts. The action types are shared — `So
 `SolRecurringLimit`, `SolMaxPerTx`, the `Token*` equivalents,
 `ProgramWhitelist`/`ProgramBlacklist`.
 
-An authority with `policy_len == 0` is unbounded and spends like an Owner. That
-is intended for Owner and Admin; it is refused for Delegate.
+An authority with `policy_len == 0` has no spending limit. That is intended for
+Owner and Admin; it is refused for Delegate.
 
-**A session with zero actions is likewise unbounded** — no actions means no
-policy engine runs, so the session key can spend the vault freely until
-expiry. Creating one still requires Owner/Admin authorization, but "session"
-does not imply "limited": attach actions, and the SDK should refuse to build
-a zero-action session without an explicit opt-in.
+**A session with zero actions likewise has no spending limit** — no actions
+means no policy engine runs, so the session key can spend the vault freely
+until expiry. Creating one still requires Owner/Admin authorization, but
+"session" does not imply "limited": attach actions, and the SDK should refuse
+to build a zero-action session without an explicit opt-in.
+
+#### Who the vault invariants bind
+
+Spending and control are separate. An Admin and a session without actions may
+spend any amount while they are live, but neither may hand the vault, or a
+vault token account, to anyone: I-0, I-2 and I-3 below hold for **every signer
+but an Owner**, policy or not, in `Execute` and in `ExecuteDeferred`. Such a
+grant would outlive the signer — it survives the session's expiry,
+`RevokeSession` and `RemoveAuthority` — so a limit on how long a key lives would
+not limit what it leaves behind.
+
+| Signer | I-0, I-2, I-3 (3030 / 3031 / 3032) | Policy rules I-4 to I-6 |
+|---|---|---|
+| Owner (any key type) | no | — (an Owner carries no policy) |
+| Admin, in Execute or through Authorize + ExecuteDeferred | yes | — (an Admin carries no policy) |
+| Delegate | yes | yes |
+| Session with actions | yes | yes |
+| Session without actions | yes | no |
+
+What this refuses a non-Owner, whatever its policy (each is still open to an
+Owner):
+
+- any change to the vault's owner or data length (`System::Assign`,
+  `System::Allocate`);
+- on a vault token account the Execute passes writable: `SetAuthority` (any
+  type), `Approve` / `ApproveChecked` (or raising an existing allowance),
+  `Revoke`, `CloseAccount` — which includes unwrapping a wSOL account the vault
+  already had — `FreezeAccount` / `ThawAccount`, Token-2022 `Reallocate` and
+  `WithdrawExcessLamports`;
+- handing the vault a token account that still carries a delegate or a close
+  authority.
+
+What stays open to every signer, within its policy: SOL and token transfers out
+of the vault, creating vault token accounts (an ATA the vault funds included),
+and a temporary wSOL account created, synced and closed back to the vault within
+one Execute, as a swap does. An integration that needs one of the refused
+operations — tidying up empty token accounts, unwrapping a standing wSOL
+balance, approving a third party — signs it with an Owner.
+
+`ExecuteDeferred` has no authority account to read, so `Authorize` records in
+the DeferredExec's `flags` whether an Owner signed it (see
+[DeferredExec PDA](#deferredexec-pda--176-bytes)).
 
 #### What a policy bounds
 
@@ -546,8 +600,10 @@ Consequences worth stating:
 
 **No opt-out.** There is no action that lifts the rule, and none is reserved:
 an escape hatch is the first thing a malicious app would ask for. A signer that
-must move arbitrary assets is an unbounded one — an Owner, an Admin, or a
-session created with no actions, which both SDKs make an explicit opt-in. A
+must move arbitrary assets is one without a policy — an Owner, an Admin, or a
+session created with no actions, which both SDKs make an explicit opt-in. Of
+those, only an Owner may also change who controls the vault or its token
+accounts (I-0, I-2, I-3). A
 future opt-out would be a new action type; today's `from_u8` refuses unknown
 types with 3020, so no stored buffer could change meaning.
 
@@ -739,7 +795,8 @@ Execute and ExecuteDeferred add two limits that real payloads rarely reached in
   ```text
     40k                       the parsed inner instructions
   + ⌈33(k + M) + C + 76⌉₈     passkey only: accounts-hash preimage, signed payload (C + 32), challenge (44)
-  + 32a + 192t                policy only: the actions; a copy of each vault token account
+  + 32a                       policy only: the actions
+  + 192t                      every signer but an Owner: a copy of each vault token account
   + 72w                       account metas (16) and CPI accounts (56), reused across the CPIs
   + Σ (8nᵢ + ⌈nᵢ⌉₈)           each inner instruction's account list and signer flags
   + 48t + 32a                 policy only: the mint list; the actions, parsed again
@@ -750,9 +807,13 @@ Execute and ExecuteDeferred add two limits that real payloads rarely reached in
   the last allocation of all is not rounded, which without a policy is the last
   instruction's flags. ExecuteDeferred's preimage term is `⌈33(k + M)⌉₈`, with
   no payload or challenge, and it has no policy terms (a policy-bound signer
-  cannot reach it). An Ed25519 or session Execute has no preimage term. The
-  policy terms count for a session with actions and for a Delegate, and a zero
-  count allocates nothing. The sum is exact: a scratch build that logs the
+  cannot reach it); its `192t` counts when an Admin signed the `Authorize`. An
+  Ed25519 or session Execute has no preimage term. The policy terms count for a
+  session with actions and for a Delegate, `192t` for every signer but an Owner
+  (an Admin, a Delegate, a session with or without actions), and a zero count
+  allocates nothing. From this build on `192t` counts for every signer but an
+  Owner; a guard sized for an earlier build counted it only for a signer with a
+  policy. The sum is exact: a scratch build that logs the
   allocator's cursor at the end of Execute and ExecuteDeferred agreed with it to
   the byte on 112 payloads (passkey, ExecuteDeferred, Ed25519, a session and a
   passkey Delegate with sixteen actions), and every payload it put over 32,760
@@ -827,7 +888,7 @@ This means admins, spenders, and session keys can all operate on the same wallet
 Under [transaction v1](#transaction-v1-simd-0385) (4096 bytes, 64 addresses) this is no longer a size workaround. tx2 is held to the same 64-address cap as a direct Execute, and addresses run out before bytes, so deferring buys almost no room there (BONK→WIF: 58 addresses as tx2, 59 as a direct Execute); the measured Jupiter routes fit a direct Execute. What deferring still gives is the separation of signing from sending — in time, within the expiry window, or to another sender such as a relayer or a second device.
 
 1. **TX1 (Authorize)** — signer computes `instructions_hash = SHA256(compact_instructions)` and `accounts_hash = SHA256(referenced_pubkeys)`. These are signed via Secp256r1 and stored in a `DeferredExec` PDA. Odometer counter is incremented.
-2. **TX2 (ExecuteDeferred)** — any payer submits the full compact instructions. Program verifies both hashes, consumes the `DeferredExec` authorization (zeroes its data before any CPI, so nothing reached from the inner instructions can replay it), executes via CPI with vault signing, and only then moves its rent to the original payer. The rent moves last because the runtime syncs a caller's lamport writes into a CPI only for the accounts that CPI is handed: credited earlier, the refund would cross into any inner instruction that names the payer — a paymaster being repaid — without the matching debit, and the CPI would fail with `UnbalancedInstruction`.
+2. **TX2 (ExecuteDeferred)** — any payer submits the full compact instructions. Program verifies both hashes, consumes the `DeferredExec` authorization (zeroes its data before any CPI, so nothing reached from the inner instructions can replay it), executes via CPI with vault signing, holds the vault to the [vault invariants](#who-the-vault-invariants-bind) unless an Owner signed TX1, and only then moves its rent to the original payer. The rent moves last because the runtime syncs a caller's lamport writes into a CPI only for the accounts that CPI is handed: credited earlier, the refund would cross into any inner instruction that names the payer — a paymaster being repaid — without the matching debit, and the CPI would fail with `UnbalancedInstruction`.
 
 ```mermaid
 sequenceDiagram
@@ -994,16 +1055,21 @@ fail the transaction:
   by it before asking for a signature. By that sum the measured route replays
   need 8,756 bytes (SOL→USDC), 15,976 (JUP→POPCAT) and 25,456 (BONK→WIF, 83 +
   7 metas) on a passkey Execute; by the exact one 4,596, 7,153 and 10,155.
-  Without a policy the old guard is safe against a build with the exact
-  sizing, only stricter than it needs to be. With one it is safe against
-  neither build: it leaves out the `64a + 240t` a session with actions or a
-  Delegate allocates, and passes payloads that run out of memory. Beside a
+  For an Owner the old guard is safe against a build with the exact sizing,
+  only stricter than it needs to be. With a policy it is safe against neither
+  build: it leaves out the `64a + 240t` a session with actions or a Delegate
+  allocates, and passes payloads that run out of memory. Since the vault
+  invariants apply to every signer but an Owner, a session without actions
+  and an Admin allocate the `192t` copy too, which the guard also leaves out:
+  by the sum, one inner instruction naming 128 writable vault token accounts
+  (an address lookup table can supply them) needs 34,984 bytes beside such a
+  signer, and passes the guard. Beside a
   passkey Delegate with sixteen actions and 49 vault token accounts, a listed
   transfer and twelve System transfers of 32 accounts come to 32,728 bytes by
   the guard and need 32,968 (twelve of 31 need 32,392 and run;
   `policy_passkey_delegate_past_a_check_without_the_policy_terms`). The guard
-  should compute the exact sum, the policy terms included, for the build the
-  cluster runs.
+  should compute the exact sum, the policy terms and `192t` included, for the
+  build the cluster runs.
 
 **Config.**
 

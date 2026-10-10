@@ -1,9 +1,11 @@
 use crate::{
     auth::{secp256r1::Secp256r1Authenticator, traits::Authenticator},
     error::AuthError,
+    processor::authority::manage::RANK_OWNER,
     state::{
-        authority::AuthorityAccountHeader, deferred::DeferredExecAccount, AccountDiscriminator,
-        CURRENT_ACCOUNT_VERSION,
+        authority::AuthorityAccountHeader,
+        deferred::{DeferredExecAccount, DEFERRED_FLAG_OWNER},
+        AccountDiscriminator, CURRENT_ACCOUNT_VERSION,
     },
     utils::initialize_pda_account,
 };
@@ -186,12 +188,20 @@ pub fn process(
         pda_seeds,
     )?;
 
-    // Write DeferredExec data
+    // Write DeferredExec data. Who authorized it is recorded, because
+    // ExecuteDeferred has no authority account to read: an Admin's deferred
+    // execution is held to the same vault invariants as its Execute.
+    let flags = if authority_header.role == RANK_OWNER {
+        DEFERRED_FLAG_OWNER
+    } else {
+        0
+    };
     let deferred = DeferredExecAccount {
         discriminator: AccountDiscriminator::DeferredExec as u8,
         version: CURRENT_ACCOUNT_VERSION,
         bump,
-        _padding: [0u8; 5],
+        flags,
+        _padding: [0u8; 4],
         instructions_hash,
         accounts_hash,
         wallet: *wallet_pda.key(),

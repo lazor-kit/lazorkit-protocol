@@ -1,6 +1,7 @@
 use crate::{
     compact::{compute_accounts_hash, max_inner_accounts, parse_compact_instructions_ref_with_len},
     error::AuthError,
+    processor::execute::actions::VaultGuard,
     state::deferred::DeferredExecAccount,
     utils::get_stack_height,
 };
@@ -18,6 +19,10 @@ use pinocchio::{
 ///
 /// Verifies the compact instructions against the stored hash, executes them
 /// via CPI with vault PDA signing, then closes the DeferredExec account.
+///
+/// An execution an Admin authorized is held to the vault invariants every
+/// non-Owner signer is held to in `Execute` (see [`VaultGuard`]); one an Owner
+/// authorized is not. `Authorize` records which in the account's `flags`.
 ///
 /// # Accounts:
 /// 1. `[signer, writable]` Payer
@@ -134,6 +139,12 @@ pub fn process(
     let close_data = unsafe { deferred_pda.borrow_mut_data_unchecked() };
     close_data.fill(0);
 
+    // Read from the copy taken above, not from the account just zeroed. Any
+    // value but the Owner bit — including the zero every DeferredExec written
+    // before the flag existed holds — means the vault is guarded.
+    let guard =
+        (!deferred.authorized_by_owner()).then(|| VaultGuard::snapshot(vault_pda, accounts));
+
     // Reuse Vecs across inner CPI iterations — allocated once, cleared +
     // repushed each iteration. Same optimisation as execute::immediate, and
     // sized the same way: to the widest inner instruction, because a Vec that
@@ -206,6 +217,12 @@ pub fn process(
         unsafe {
             invoke_signed_unchecked(&ix, &cpi_accounts, &[signer]);
         }
+    }
+
+    // The vault and its token accounts end as they began but for balances,
+    // unless an Owner authorized this execution.
+    if let Some(guard) = &guard {
+        guard.verify(vault_pda, accounts)?;
     }
 
     // Close: read both balances only now. An inner instruction may have

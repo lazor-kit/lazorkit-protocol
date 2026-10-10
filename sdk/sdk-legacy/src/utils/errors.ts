@@ -35,7 +35,7 @@ export const ERROR_NAMES: Record<number, string> = {
   3027: 'ActionTokenRecurringLimitExceeded',
   3028: 'ActionWhitelistBlacklistConflict',
   3029: 'ActionTokenMaxPerTxExceeded',
-  // Vault + token-account invariants for a signer that carries a policy
+  // Vault + token-account invariants for every signer but an Owner
   // (defense against System::Assign / SetAuthority escapes)
   3030: 'SessionVaultOwnerChanged',
   3031: 'SessionVaultDataLenChanged',

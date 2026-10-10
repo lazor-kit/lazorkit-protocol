@@ -1,7 +1,9 @@
 //! Policy evaluation for the Execute instruction.
 //!
 //! Provides pre-CPI and post-CPI checks for an Execute whose signer carries a
-//! policy: a session with actions, or a Delegate authority.
+//! policy: a session with actions, or a Delegate authority. The vault
+//! invariants ([`VaultGuard`]) apply more widely: to every signer but an Owner,
+//! policy or not, in Execute and in ExecuteDeferred.
 //! Pre-CPI: program whitelist/blacklist enforcement.
 //! Post-CPI: spending limit enforcement with balance diffing, and the rule
 //! that an asset the policy does not name may not leave. The vault's net SOL,
@@ -69,6 +71,72 @@ impl MintFlow {
     /// What left the snapshotted accounts, net of what came back into them.
     pub fn outflow(&self) -> u64 {
         self.before.saturating_sub(self.after)
+    }
+}
+
+/// The vault as it stood before the CPI loop, for the invariants every signer
+/// but an Owner is held to.
+///
+/// An Owner may do anything the vault can sign for, including `System::Assign`
+/// of the vault and `SetAuthority` on its token accounts. Every other signer —
+/// a session of any kind (with actions or without), an Admin, a Delegate — may
+/// move what its policy allows (an Admin and a session without actions: any
+/// amount), but may not hand the vault, or a vault token account, to someone
+/// else. A grant like that would outlive the signer: it survives the session's
+/// expiry, `RevokeSession` and `RemoveAuthority`. So after the loop:
+///
+/// - I-0: the vault's owner and data length are unchanged (3030 / 3031);
+/// - I-2 / I-3: [`verify_vault_token_accounts`] (3032).
+///
+/// Spending and control are separate powers. A signer without a policy may
+/// spend without limit while it is live; only an Owner may change who
+/// controls the vault or its token accounts, since such a change outlives
+/// the signer that made it.
+pub struct VaultGuard {
+    owner: Pubkey,
+    data_len: usize,
+    /// Every writable vault-owned token account, copied whole. The policy
+    /// engine measures each mint's flow over these same accounts.
+    pub token_accounts: Vec<VaultTokenSnapshot>,
+}
+
+/// Whether an Execute is held to the vault invariants: whenever its signer
+/// carries a policy, and otherwise unless the signer is an Owner authority.
+///
+/// `signer_is_owner` is true only for an authority of rank Owner; a session is
+/// never an Owner, whoever created it. The policy term is redundant today —
+/// only a Delegate carries a policy — and kept so that no change to who may
+/// carry one can turn the invariants off for a bounded signer.
+#[inline]
+pub fn guards_vault(signer_is_owner: bool, has_policy: bool) -> bool {
+    has_policy || !signer_is_owner
+}
+
+impl VaultGuard {
+    /// Record the vault's owner and data length, and copy its token accounts.
+    /// Call before the first CPI.
+    pub fn snapshot(vault: &AccountInfo, accounts: &[AccountInfo]) -> Self {
+        Self {
+            owner: *vault.owner(),
+            data_len: unsafe { vault.borrow_data_unchecked().len() },
+            token_accounts: snapshot_vault_token_accounts(accounts, vault.key()),
+        }
+    }
+
+    /// Hold the vault and its token accounts to the snapshot. Call after the
+    /// last CPI, before any policy check that reads the token accounts.
+    pub fn verify(
+        &self,
+        vault: &AccountInfo,
+        accounts: &[AccountInfo],
+    ) -> Result<(), ProgramError> {
+        if *vault.owner() != self.owner {
+            return Err(AuthError::SessionVaultOwnerChanged.into());
+        }
+        if unsafe { vault.borrow_data_unchecked().len() } != self.data_len {
+            return Err(AuthError::SessionVaultDataLenChanged.into());
+        }
+        verify_vault_token_accounts(&self.token_accounts, accounts, vault.key())
     }
 }
 
@@ -155,10 +223,11 @@ fn names_program(
 
 /// Copy every writable, vault-owned token account in `accounts`, once per key.
 ///
-/// Called before the CPI loop when the signer carries a policy. After the loop,
-/// [`verify_vault_token_accounts`] holds each copy to everything but its
-/// balance, and [`mint_flows`] measures each mint's balance over exactly these
-/// accounts. Together they keep a policy-bound signer from doing either of two
+/// Called before the CPI loop for every signer but an Owner (through
+/// [`VaultGuard::snapshot`]). After the loop, [`verify_vault_token_accounts`]
+/// holds each copy to everything but its balance, and, when the signer carries
+/// a policy, [`mint_flows`] measures each mint's balance over exactly these
+/// accounts. Together they keep a non-Owner signer from doing either of two
 /// things the lamport and balance limits cannot see:
 ///
 /// - Reassigning control of a vault token account without moving a token:
@@ -2088,5 +2157,34 @@ mod tests {
     #[test]
     fn test_max_actions_constant_is_16() {
         assert_eq!(crate::state::action::MAX_ACTIONS, 16);
+    }
+
+    // ─── Who the vault invariants apply to ──────────────────────────────
+
+    #[test]
+    fn only_an_owner_without_a_policy_is_unguarded() {
+        use crate::processor::authority::manage::{RANK_ADMIN, RANK_DELEGATE, RANK_OWNER};
+
+        // Every rank byte an authority header could hold, with and without a
+        // policy. Only rank Owner, with no policy, runs unguarded.
+        for role in 0..=u8::MAX {
+            let is_owner = role == RANK_OWNER;
+            assert_eq!(
+                guards_vault(is_owner, false),
+                role != RANK_OWNER,
+                "role {role}"
+            );
+            assert!(guards_vault(is_owner, true), "role {role} with a policy");
+        }
+        assert!(guards_vault(RANK_ADMIN == RANK_OWNER, false), "Admin");
+        assert!(guards_vault(RANK_DELEGATE == RANK_OWNER, true), "Delegate");
+    }
+
+    #[test]
+    fn a_session_is_always_guarded() {
+        // The session branch never sets `signer_is_owner`: a session created by
+        // an Owner is still not one.
+        assert!(guards_vault(false, false), "session without actions");
+        assert!(guards_vault(false, true), "session with actions");
     }
 }

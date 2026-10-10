@@ -983,9 +983,9 @@ An authority that carries a policy itself may not add authorities at all.
 | 3015 | DeferredHashMismatch |
 | 3016 | InvalidExpiryWindow |
 | 3020–3029 | Action errors (buffer invalid, whitelist/blacklist, spending limits exceeded) |
-| 3030 | SessionVaultOwnerChanged (H1 fix) |
-| 3031 | SessionVaultDataLenChanged (H1 fix) |
-| 3032 | SessionTokenAuthorityChanged: a vault token account changed other than its balance, or one that became vault-owned during the Execute carries a delegate or close authority |
+| 3030 | SessionVaultOwnerChanged: the vault's owner changed during an Execute signed by anyone but an Owner |
+| 3031 | SessionVaultDataLenChanged: the vault's data length changed during an Execute signed by anyone but an Owner |
+| 3032 | SessionTokenAuthorityChanged: during an Execute signed by anyone but an Owner, a vault token account changed other than its balance, or one that became vault-owned carries a delegate or close authority |
 | 3033 | DelegateRequiresPolicy |
 | 3034 | PolicyBearingAuthorityCannotDelegate |
 | 3035 | PolicyRankMismatch |
