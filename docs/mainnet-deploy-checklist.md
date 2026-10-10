@@ -436,16 +436,25 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet runs the previous devnet artifact.** Devnet's v2 (`57bTNW…`) runs
-`d95e5c2b…` (D13 and the heap-capacity fix), not this branch's build, which
-also applies the vault invariants to every non-Owner signer and measures
-session and policy time in Unix seconds. Upgrading devnet to it expires every
-existing v2 session there (their expiries are slots, which read as long past),
-and needs SDKs that send Unix time. Devnet moved to `d95e5c2b…` on
-2026-10-04 in slot 507081509; before that it ran the D13 build `efea949f…` from 2026-10-03 (slot
-507022596). A smoke run on each passed the full lifecycle and every D13 case
-(3037, 3038, 3032), and lazor-kit #108's devnet run (S2) passed against
-`d95e5c2b…`.
+**Devnet runs this branch's devnet artifact.** Devnet's v2 (`57bTNW…`) runs
+`f2779b66…` (`develop` @dfae78e: the vault invariants for every non-Owner
+signer, and session and policy time in Unix seconds), upgraded on 2026-10-11
+in slot 509609649 (signature `QdXPuskx…`) after `@lazorkit/sdk-legacy` 2.0.0,
+`@lazorkit/sdk` 1.0.0-rc.7 and `@lazorkit/wallet` 4.0.0-next.0 were published;
+the dump's first 153752 bytes hash to the `devnet` line of
+`scripts/release-hashes.txt`. That upgrade expired every existing v2 session
+there (their expiries are slots, which read as long past), and wallet SDKs
+that send slots (`@lazorkit/wallet` 3.4.1 and earlier) can no longer create
+sessions there (3008). Earlier devnet builds, newest first: `30ac9bef…` (the
+non-Owner invariants) from slot 509521792; `d95e5c2b…` (D13 and the
+heap-capacity fix) from 2026-10-04, slot 507081509; the D13 build
+`efea949f…` from 2026-10-03, slot 507022596. A smoke run on `d95e5c2b…` and
+`efea949f…` passed the full lifecycle and every D13 case (3037, 3038, 3032),
+and lazor-kit #108's devnet run (S2) passed against `d95e5c2b…`. On
+`f2779b66…`, the local-stack smoke through portal-v2 #4 (typed requests) with
+`@lazorkit/wallet` 4.0.0-next.0 created a session with `expiresInSeconds` and
+spent with it, sponsored by the Railway devnet Kora; it did not get through
+every step, because the public devnet RPC rate-limited the portal's reads.
 
 Earlier runs, superseded by the one above, oldest first: on 2026-09-27 at the
 devnet ids (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain

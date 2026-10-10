@@ -124,6 +124,13 @@ byte-identical)
   sunset artifacts are byte-identical to the ones the 2026-10-04 rehearsal
   ran. The two-id rehearsal has not been re-run on the v2 artifacts; the
   deploy checklist says so.
+- Devnet runs it: `57bTNW…` was upgraded from `30ac9bef…` (slot 509,521,792)
+  to `f2779b66…` (`develop` @dfae78e) on 2026-10-11 in slot 509,609,649
+  (signature `QdXPuskx…`); the dump's first 153,752 bytes hash to the
+  `devnet` line of `scripts/release-hashes.txt`. Sessions created there with
+  `@lazorkit/wallet` 4.0.0-next.0 (`expiresInSeconds`) land and spend; wallet
+  SDKs that still send slots (`@lazorkit/wallet` 3.4.1 and earlier) are
+  refused with 3008.
 
 **SDKs** — breaking for both. `@lazorkit/sdk-legacy` is a stable line
 (1.4.0), so this is a new major (2.0.0); `@lazorkit/sdk` is a pre-release line
