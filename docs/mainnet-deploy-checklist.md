@@ -452,9 +452,11 @@ heap-capacity fix) from 2026-10-04, slot 507081509; the D13 build
 `efea949f…` passed the full lifecycle and every D13 case (3037, 3038, 3032),
 and lazor-kit #108's devnet run (S2) passed against `d95e5c2b…`. On
 `f2779b66…`, the local-stack smoke through portal-v2 #4 (typed requests) with
-`@lazorkit/wallet` 4.0.0-next.0 created a session with `expiresInSeconds` and
-spent with it, sponsored by the Railway devnet Kora; it did not get through
-every step, because the public devnet RPC rate-limited the portal's reads.
+`@lazorkit/wallet` 4.0.0-next.0 passed 10/10 on 2026-10-11, sponsored by the
+Railway devnet Kora: the decoded session screen, a session created with
+`expiresInSeconds` and spent with, 3023 over the per-payment cap, and 3037 for
+SOL from a token-only session; the playground (hook, Wallet Standard, adapter)
+and the 14 portal probes passed too.
 
 Earlier runs, superseded by the one above, oldest first: on 2026-09-27 at the
 devnet ids (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain
