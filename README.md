@@ -12,6 +12,14 @@ A high-performance smart wallet on Solana. Supports **passkey (WebAuthn/Secp256r
 - **Returning users, found safely** — `findOwnPasskeyWallet` finds a passkey user's own wallet from one assertion, with no `walletPda` stored: it adopts a wallet only if the passkey proves the key stored there, it is the one wallet the passkey has signed for, and nothing untrusted can spend from it; anything else goes to the user to confirm. (`findWalletsByAuthority` is a raw lookup by credential hash or public key — the hash is public, and anyone can plant a wallet that lists it.)
 - **Parallel execution** — different authorities on the same wallet never block each other.
 
+## Security & audit status
+
+This code has **not been externally audited**; an earlier codebase it was
+forked from was. What has been done instead (internal reviews, test suites,
+reproducible builds with recorded hashes, a two-id rollout rehearsal), how to
+report a vulnerability, and the program lifecycle commitment are in
+[SECURITY.md](SECURITY.md).
+
 ## Install
 
 ```bash
