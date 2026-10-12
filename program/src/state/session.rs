@@ -1,7 +1,7 @@
 use no_padding::NoPadding;
 use pinocchio::pubkey::Pubkey;
 
-/// Size of the fixed session header (excluding actions).
+/// Size of the fixed session header (excluding the rent payer and actions).
 pub const SESSION_HEADER_SIZE: usize = 80;
 
 #[repr(C, align(8))]
@@ -9,7 +9,9 @@ pub const SESSION_HEADER_SIZE: usize = 80;
 /// Ephemeral Session Account.
 ///
 /// Represents a temporary delegated authority with an expiration time.
-/// Optional actions may follow the 80-byte header as a flat byte buffer.
+/// Optional actions follow as a flat byte buffer: right after this 80-byte
+/// header in layout revision 1, after the header and the 32-byte rent payer
+/// from revision 2 (`state::rent_payer`). `PolicyLocation::of` says where.
 ///
 /// `expires_at` is Unix time in seconds (`Clock::unix_timestamp`). Builds
 /// before time-based expiry wrote a slot here. Read as a time, any slot a
@@ -43,23 +45,6 @@ pub fn is_live(expires_at: u64, now: u64) -> bool {
     now <= expires_at
 }
 
-/// Returns true if the session account data contains actions after the header.
-#[inline]
-pub fn has_actions(session_data: &[u8]) -> bool {
-    session_data.len() > SESSION_HEADER_SIZE
-}
-
-/// Returns the actions buffer slice (bytes after the 80-byte header).
-/// Returns empty slice if no actions.
-#[inline]
-pub fn actions_slice(session_data: &[u8]) -> &[u8] {
-    if session_data.len() > SESSION_HEADER_SIZE {
-        &session_data[SESSION_HEADER_SIZE..]
-    } else {
-        &[]
-    }
-}
-
 impl SessionAccount {
     /// Minimum byte length for this account to be readable.
     pub const MIN_LEN: usize = core::mem::size_of::<Self>();
@@ -74,6 +59,7 @@ impl SessionAccount {
             data,
             crate::state::AccountDiscriminator::Session,
             crate::state::version_offset::SESSION,
+            crate::state::layout_version::SESSION,
             Self::MIN_LEN,
         )
     }

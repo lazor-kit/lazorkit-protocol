@@ -17,6 +17,9 @@ use crate::{
     state::{
         action::validate_actions_buffer,
         authority::AuthorityAccountHeader,
+        layout_version,
+        policy::session_policy_offset,
+        rent_payer::write_payer,
         session::{SessionAccount, SESSION_HEADER_SIZE},
         AccountDiscriminator,
     },
@@ -136,7 +139,8 @@ pub fn check_session_expiry(expires_at: u64, now: u64) -> Result<(), ProgramErro
 /// 1. Verifies the authorizing authority (must be Owner or Admin).
 /// 2. Validates optional actions buffer.
 /// 3. Derives a fresh Session PDA from `["session", wallet, session_key]`.
-/// 4. Allocates and initializes the Session account with expiry and actions.
+/// 4. Allocates and initializes the Session account with expiry, the rent
+///    payer (layout revision 2) and actions.
 ///
 /// # Accounts:
 /// 1. `[signer, writable]` Payer: Pays for rent.
@@ -292,8 +296,11 @@ pub fn process(
     }
     check_zero_data(session_pda, ProgramError::AccountAlreadyInitialized)?;
 
-    // Create Session Account — variable size if actions are present
-    let space = SESSION_HEADER_SIZE + args.actions_bytes.len();
+    // Create Session Account, layout revision 2 (state::rent_payer):
+    // [header 80][rent payer 32][actions]
+    let actions_offset =
+        session_policy_offset(layout_version::SESSION).ok_or(ProgramError::InvalidAccountData)?;
+    let space = actions_offset + args.actions_bytes.len();
     let session_rent = rent.minimum_balance(space);
 
     let bump_arr = [bump];
@@ -319,7 +326,7 @@ pub fn process(
     let session = SessionAccount {
         discriminator: AccountDiscriminator::Session as u8,
         bump,
-        version: crate::state::CURRENT_ACCOUNT_VERSION,
+        version: layout_version::SESSION,
         _padding: [0; 5],
         wallet: *wallet_pda.key(),
         session_key: Pubkey::from(args.session_key),
@@ -335,9 +342,13 @@ pub fn process(
     };
     data[..SESSION_HEADER_SIZE].copy_from_slice(session_bytes);
 
+    // Who paid the rent: the only account RevokeSession and CloseExpiredSession
+    // will return it to.
+    write_payer(data, SESSION_HEADER_SIZE, payer.key())?;
+
     // Write actions buffer (if any)
     if !args.actions_bytes.is_empty() {
-        data[SESSION_HEADER_SIZE..SESSION_HEADER_SIZE + args.actions_bytes.len()]
+        data[actions_offset..actions_offset + args.actions_bytes.len()]
             .copy_from_slice(&args.actions_bytes);
     }
 

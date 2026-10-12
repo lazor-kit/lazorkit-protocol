@@ -440,8 +440,8 @@ The reads wait up to 30 s for it, so where finalization lags, a floor at a
 just-confirmed tx1 costs that lag before the passkey prompt. The challenge's
 slot is read at `finalized` too, so it is already that many slots old when the
 prompt appears, and the program accepts a challenge only until its slot is 150
-slots old (about a minute): a 31-slot lag leaves about 119 slots to approve,
-send and land it. It is not read at `confirmed` instead because the program
+slots old (about 33–34 s at today's slot times): a 31-slot lag leaves about
+119 slots to approve, send and land it. It is not read at `confirmed` instead because the program
 also refuses a slot newer than the one it runs in, so a relayer simulating at
 `finalized` would refuse the challenge. Unless you need finalized reads, keep
 the default: `confirmed` with the floor is enough to sign the right counter.

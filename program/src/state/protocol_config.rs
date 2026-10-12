@@ -83,6 +83,7 @@ impl ProtocolConfig {
             data,
             crate::state::AccountDiscriminator::ProtocolConfig,
             crate::state::version_offset::PROTOCOL_CONFIG,
+            crate::state::layout_version::PROTOCOL_CONFIG,
             Self::MIN_LEN,
         )
     }

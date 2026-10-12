@@ -80,6 +80,119 @@ pub fn get_stack_height() -> u64 {
     0
 }
 
+/// The marker the runtime appends when it derives a program address.
+const PDA_MARKER: &[u8; 21] = b"ProgramDerivedAddress";
+
+/// Most seeds [`is_program_address`] takes, the bump not counted.
+const MAX_CHECKED_SEEDS: usize = 3;
+
+/// Whether `address` is the program address of `seeds` and `bump` under
+/// `program_id`: `sha256(seeds ‖ bump ‖ program_id ‖ "ProgramDerivedAddress")`.
+///
+/// This is the runtime's `create_program_address` without its last step, the
+/// check that the hash is not a point on the curve, and costs one `sol_sha256`
+/// (about 150 CU here) where `create_program_address` costs 1,500 and
+/// `find_program_address` 1,500 for every bump it tries.
+///
+/// Dropping the curve check is sound only for a bump this program stored after
+/// `find_program_address` returned it for these same seeds: that hash is a
+/// valid program address by construction, so equality with it is exactly
+/// "`address` is the canonical PDA". The callers keep to that:
+///
+/// - the vault bump comes from the wallet account, written by `CreateWallet`
+///   from its own search over `[VAULT, wallet]`;
+/// - the config, shard and fee-record bumps come from the account being
+///   checked, which this program owns and wrote from its own search.
+///
+/// In the fee record's case the stored bump was found for the record's own
+/// payer; hashed with any other payer it matches the address only through a
+/// SHA-256 collision, so a record cannot be passed off as another payer's.
+///
+/// Never call this with a bump that came from instruction data.
+#[inline]
+pub fn is_program_address(
+    seeds: &[&[u8]],
+    bump: u8,
+    program_id: &Pubkey,
+    address: &Pubkey,
+) -> bool {
+    if seeds.len() > MAX_CHECKED_SEEDS {
+        return false;
+    }
+    let bump = [bump];
+    let mut vals: [&[u8]; MAX_CHECKED_SEEDS + 3] = [&[]; MAX_CHECKED_SEEDS + 3];
+    vals[..seeds.len()].copy_from_slice(seeds);
+    vals[seeds.len()] = &bump;
+    vals[seeds.len() + 1] = program_id.as_ref();
+    vals[seeds.len() + 2] = PDA_MARKER;
+    let vals = &vals[..seeds.len() + 3];
+
+    #[cfg(target_os = "solana")]
+    {
+        let mut hash = [0u8; 32];
+        unsafe {
+            pinocchio::syscalls::sol_sha256(
+                vals.as_ptr() as *const u8,
+                vals.len() as u64,
+                hash.as_mut_ptr(),
+            );
+        }
+        &hash == address
+    }
+
+    #[cfg(all(not(target_os = "solana"), test))]
+    {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        for v in vals {
+            h.update(v);
+        }
+        let hash: [u8; 32] = h.finalize().into();
+        &hash == address
+    }
+
+    #[cfg(all(not(target_os = "solana"), not(test)))]
+    {
+        core::hint::black_box((vals, address));
+        panic!("is_program_address is only available on target `solana`")
+    }
+}
+
+/// The bump `Execute` and `ExecuteDeferred` sign for `vault_pda` with, after
+/// checking it is `wallet_pda`'s vault, `[VAULT, wallet]`.
+///
+/// A wallet that records its vault's bump (every wallet created from this
+/// build on) has the address checked with one hash ([`is_program_address`]);
+/// one that records none (byte 3 is 0) is searched for, as before.
+///
+/// `wallet_data` must have passed `WalletAccount::check`, and `wallet_pda` must
+/// be owned by this program: the stored bump is trusted because only this
+/// program writes it.
+#[inline]
+pub fn vault_signer_bump(
+    wallet_pda: &AccountInfo,
+    wallet_data: &[u8],
+    vault_pda: &AccountInfo,
+    program_id: &Pubkey,
+) -> Result<u8, ProgramError> {
+    let seeds: [&[u8]; 2] = [crate::seeds::VAULT, wallet_pda.key().as_ref()];
+    match crate::state::wallet::WalletAccount::vault_bump(wallet_data) {
+        Some(bump) => {
+            if !is_program_address(&seeds, bump, program_id, vault_pda.key()) {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            Ok(bump)
+        },
+        None => {
+            let (vault_key, bump) = pinocchio::pubkey::find_program_address(&seeds, program_id);
+            if vault_pda.key() != &vault_key {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            Ok(bump)
+        },
+    }
+}
+
 #[inline(always)]
 pub fn is_all_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| b == 0)
@@ -225,6 +338,65 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[31] = 1;
         assert!(!is_all_zero(&bytes));
+    }
+}
+
+#[cfg(test)]
+mod program_address_tests {
+    use super::is_program_address;
+    use solana_sdk::pubkey::Pubkey as SdkPubkey;
+
+    /// The hash matches the runtime's derivation for the canonical bump, and
+    /// nothing else: another bump, another seed or another program id.
+    #[test]
+    fn matches_find_program_address_for_the_canonical_bump_only() {
+        let program_id = SdkPubkey::new_unique();
+        for i in 0..64u8 {
+            let wallet = [i; 32];
+            let seeds: [&[u8]; 2] = [crate::seeds::VAULT, &wallet];
+            let (pda, bump) = SdkPubkey::find_program_address(&seeds, &program_id);
+            let pid = program_id.to_bytes();
+            let pda = pda.to_bytes();
+            assert!(is_program_address(&seeds, bump, &pid, &pda));
+            assert!(!is_program_address(
+                &seeds,
+                bump.wrapping_sub(1),
+                &pid,
+                &pda
+            ));
+            let other = [i ^ 0xFF; 32];
+            assert!(!is_program_address(
+                &[crate::seeds::VAULT, &other],
+                bump,
+                &pid,
+                &pda
+            ));
+            assert!(!is_program_address(
+                &seeds,
+                bump,
+                &SdkPubkey::new_unique().to_bytes(),
+                &pda
+            ));
+        }
+    }
+
+    #[test]
+    fn single_and_three_seed_derivations_match_too() {
+        let program_id = SdkPubkey::new_unique();
+        let pid = program_id.to_bytes();
+        let one: [&[u8]; 1] = [crate::seeds::PROTOCOL_CONFIG];
+        let (pda, bump) = SdkPubkey::find_program_address(&one, &program_id);
+        assert!(is_program_address(&one, bump, &pid, &pda.to_bytes()));
+        let three: [&[u8]; 3] = [crate::seeds::AUTHORITY, &[1; 32], &[2; 32]];
+        let (pda, bump) = SdkPubkey::find_program_address(&three, &program_id);
+        assert!(is_program_address(&three, bump, &pid, &pda.to_bytes()));
+    }
+
+    #[test]
+    fn more_seeds_than_it_takes_never_match() {
+        let pid = [9u8; 32];
+        let four: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];
+        assert!(!is_program_address(&four, 255, &pid, &[0u8; 32]));
     }
 }
 

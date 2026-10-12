@@ -142,7 +142,7 @@ allowed_programs = [
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # SPL Token
     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   # Token-2022 — a wallet holding one cannot migrate without it
     "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",  # Associated Token Account
-    "ComputeBudget111111111111111111111111111111",   # the compute-limit instruction the SDK prepends
+    "ComputeBudget111111111111111111111111111111",   # compute-budget instructions an app or wallet adds itself; the LazorKit SDKs add none
     # "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95", # Lighthouse — uncomment with [kora.lighthouse].enabled
 ]
 

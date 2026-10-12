@@ -10,7 +10,7 @@ use pinocchio::{
 
 use crate::{
     error::ProtocolError,
-    state::{integrator_record::FeeRecord, AccountDiscriminator, CURRENT_ACCOUNT_VERSION},
+    state::{integrator_record::FeeRecord, layout_version, AccountDiscriminator},
     utils::initialize_pda_account,
 };
 
@@ -93,7 +93,7 @@ pub fn process(
     let record = FeeRecord {
         discriminator: AccountDiscriminator::FeeRecord as u8,
         bump: record_bump,
-        version: CURRENT_ACCOUNT_VERSION,
+        version: layout_version::FEE_RECORD,
         _padding: [0; 5],
         total_fees_paid: 0,
         tx_count: 0,

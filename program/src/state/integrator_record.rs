@@ -41,6 +41,7 @@ impl FeeRecord {
             data,
             crate::state::AccountDiscriminator::FeeRecord,
             crate::state::version_offset::FEE_RECORD,
+            crate::state::layout_version::FEE_RECORD,
             Self::MIN_LEN,
         )
     }

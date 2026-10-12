@@ -5,7 +5,7 @@ use crate::{
     state::{
         authority::AuthorityAccountHeader,
         deferred::{DeferredExecAccount, DEFERRED_FLAG_OWNER},
-        AccountDiscriminator, CURRENT_ACCOUNT_VERSION,
+        layout_version, AccountDiscriminator,
     },
     utils::initialize_pda_account,
 };
@@ -198,7 +198,7 @@ pub fn process(
     };
     let deferred = DeferredExecAccount {
         discriminator: AccountDiscriminator::DeferredExec as u8,
-        version: CURRENT_ACCOUNT_VERSION,
+        version: layout_version::DEFERRED_EXEC,
         bump,
         flags,
         _padding: [0u8; 4],

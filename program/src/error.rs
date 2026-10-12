@@ -75,6 +75,13 @@ pub enum AuthError {
     /// Execute, fell and no `Token*` action names that mint. wSOL is a mint like
     /// any other; a SOL action does not name it.
     ActionUnlistedTokenOutflow = 3038,
+    /// An instruction that closes an authority or a session named a refund
+    /// destination other than the account that paid its rent. From layout
+    /// revision 2 both record that payer, and the rent goes back to it and
+    /// nowhere else, whoever signs the close. An account written before
+    /// revision 2 records no payer and keeps the old rule (see
+    /// `state::rent_payer`).
+    RefundDestinationMismatch = 3039,
 }
 
 impl From<AuthError> for ProgramError {

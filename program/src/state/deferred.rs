@@ -76,6 +76,7 @@ impl DeferredExecAccount {
             data,
             crate::state::AccountDiscriminator::DeferredExec,
             crate::state::version_offset::DEFERRED_EXEC,
+            crate::state::layout_version::DEFERRED_EXEC,
             Self::MIN_LEN,
         )
     }
