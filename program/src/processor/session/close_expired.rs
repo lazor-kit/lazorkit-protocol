@@ -47,7 +47,7 @@ use pinocchio::{
 use crate::{
     error::AuthError,
     state::{
-        rent_payer::check_refund_destination,
+        rent_payer::{refund_disposition, Refund},
         session::{SessionAccount, SESSION_HEADER_SIZE},
         AccountDiscriminator,
     },
@@ -117,10 +117,13 @@ pub fn process(
 
     // The rent goes back to whoever paid it (a v1 session, and a v2 one from
     // before layout revision 2, record nobody).
-    check_refund_destination(session_data, refund_dest)?;
+    let refund = refund_disposition(session_data, refund_dest)?;
 
     for byte in session_data.iter_mut() {
         *byte = 0;
+    }
+    if refund == Refund::Keep {
+        return Ok(());
     }
 
     let session_lamports = session_pda.lamports();

@@ -634,3 +634,236 @@ fn execute_deferred_refunds_only_its_stored_payer() {
         "ExecuteDeferred into another account",
     );
 }
+
+// ─── Closing never depends on the payer ──────────────────────────────────
+
+/// CreateSession paid for by `payer` (not the suite's payer), authorized by the
+/// wallet's Owner. Returns the session PDA.
+fn session_paid_by(context: &mut TestContext, wallet: &WalletFixture, payer: &Keypair) -> Pubkey {
+    let session = Keypair::new();
+    let pda = session_pda_for(context.program_id, wallet, &session);
+    let expires_at = unix_now(&context.svm) + 100_000;
+    let mut data = vec![5u8];
+    data.extend_from_slice(session.pubkey().as_ref());
+    data.extend_from_slice(&expires_at.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    let ix = Instruction {
+        program_id: context.program_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new_readonly(wallet.wallet_pda, false),
+            AccountMeta::new(wallet.owner_auth_pda, false),
+            AccountMeta::new(pda, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            AccountMeta::new_readonly(wallet.owner.pubkey(), true),
+        ],
+        data,
+    };
+    try_send(&mut context.svm, payer, &[ix], &[payer, &wallet.owner]).expect("CreateSession");
+    pda
+}
+
+/// Turn `key` into an executable account, as deploying a program at its
+/// address would (any ELF will do; this one is at hand).
+fn make_executable(context: &mut TestContext, key: Pubkey) {
+    context
+        .svm
+        .add_program_from_file(key, sbf_artifact_path())
+        .expect("load a program at the payer's address");
+    assert!(context.svm.get_account(&key).unwrap().executable);
+    advance(&mut context.svm);
+}
+
+/// A key that paid for a session cannot keep the Owner from revoking it by
+/// becoming an account the runtime may refuse to credit: the session closes
+/// and its rent stays in the dead account.
+#[test]
+fn a_payer_that_became_executable_cannot_block_a_revoke() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 0);
+    let insider = Keypair::new();
+    context
+        .svm
+        .airdrop(&insider.pubkey(), 1_000_000_000)
+        .unwrap();
+    let pda = session_paid_by(&mut context, &wallet, &insider);
+    assert_eq!(recorded_rent_payer(&context.svm, pda), insider.pubkey());
+    let rent = lamports(&context, &pda);
+    make_executable(&mut context, insider.pubkey());
+
+    let owner = funded_owner(&mut context, &wallet);
+    // Still only the recorded payer may be named.
+    let ix = revoke_ix(&context, &wallet, owner.pubkey(), pda, owner.pubkey());
+    assert_custom_error(
+        try_send(&mut context.svm, &owner, &[ix], &[&owner]),
+        ERR_REFUND_DESTINATION_MISMATCH,
+        "RevokeSession into the Owner",
+    );
+    advance(&mut context.svm);
+    let mut ix = revoke_ix(&context, &wallet, owner.pubkey(), pda, insider.pubkey());
+    // Read-only: a transaction may not even load an executable account writable.
+    ix.accounts[4].is_writable = false;
+    try_send(&mut context.svm, &owner, &[ix], &[&owner]).expect("the revoke lands");
+    let after = context.svm.get_account(&pda).unwrap();
+    assert!(after.data.iter().all(|&b| b == 0), "the session is dead");
+    assert_eq!(after.lamports, rent, "its rent stayed where it was");
+}
+
+#[test]
+fn a_payer_that_became_executable_cannot_block_a_removal() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 1_000_000_000);
+    let insider = Keypair::new();
+    context
+        .svm
+        .airdrop(&insider.pubkey(), 1_000_000_000)
+        .unwrap();
+    // The insider pays for a Delegate the Owner adds.
+    let delegate = Keypair::new();
+    let target = authority_pda_for(context.program_id, wallet.wallet_pda, &delegate.pubkey());
+    let policy = action_sol_limit(1_000_000);
+    let mut data = vec![1u8, 0, RANK_DELEGATE, 0, 0, 0, 0, 0, 0];
+    data.extend_from_slice(delegate.pubkey().as_ref());
+    data.extend_from_slice(&(policy.len() as u16).to_le_bytes());
+    data.extend_from_slice(&policy);
+    let add = Instruction {
+        program_id: context.program_id,
+        accounts: vec![
+            AccountMeta::new(insider.pubkey(), true),
+            AccountMeta::new(wallet.wallet_pda, false),
+            AccountMeta::new(wallet.owner_auth_pda, false),
+            AccountMeta::new(target, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            AccountMeta::new_readonly(wallet.owner.pubkey(), true),
+        ],
+        data,
+    };
+    try_send(
+        &mut context.svm,
+        &insider,
+        &[add],
+        &[&insider, &wallet.owner],
+    )
+    .expect("AddAuthority");
+    let rent = lamports(&context, &target);
+    make_executable(&mut context, insider.pubkey());
+
+    let owner = funded_owner(&mut context, &wallet);
+    let mut ix = remove_ix(&context, &wallet, owner.pubkey(), target, insider.pubkey());
+    ix.accounts[4].is_writable = false;
+    try_send(&mut context.svm, &owner, &[ix], &[&owner]).expect("the removal lands");
+    let after = context.svm.get_account(&target).unwrap();
+    assert!(after.data.iter().all(|&b| b == 0), "the Delegate is dead");
+    assert_eq!(after.lamports, rent);
+    // And it can no longer spend.
+    let payer = context.payer.insecure_clone();
+    let spend = execute_as(
+        &context,
+        &wallet,
+        target,
+        &delegate,
+        Pubkey::new_unique(),
+        1,
+    );
+    assert!(try_send(&mut context.svm, &payer, &[spend], &[&payer, &delegate]).is_err());
+}
+
+/// Only an ordinary system account may be recorded as a rent payer. A PDA
+/// someone pre-funded skips the System transfer, so without this a
+/// program-owned or executable signer could be recorded.
+#[test]
+fn a_payer_that_is_not_a_system_account_is_refused_at_creation() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 0);
+    let odd = Keypair::new();
+    context
+        .svm
+        .set_account(
+            odd.pubkey(),
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: Pubkey::new_unique(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    // Pre-fund the session PDA, so no System transfer from `odd` is needed.
+    let session = Keypair::new();
+    let pda = session_pda_for(context.program_id, &wallet, &session);
+    context.svm.airdrop(&pda, 10_000_000).unwrap();
+    let expires_at = unix_now(&context.svm) + 100_000;
+    let mut data = vec![5u8];
+    data.extend_from_slice(session.pubkey().as_ref());
+    data.extend_from_slice(&expires_at.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    let ix = Instruction {
+        program_id: context.program_id,
+        accounts: vec![
+            AccountMeta::new(odd.pubkey(), true),
+            AccountMeta::new_readonly(wallet.wallet_pda, false),
+            AccountMeta::new(wallet.owner_auth_pda, false),
+            AccountMeta::new(pda, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(solana_sdk::sysvar::rent::id(), false),
+            AccountMeta::new_readonly(wallet.owner.pubkey(), true),
+        ],
+        data,
+    };
+    let payer = context.payer.insecure_clone();
+    let result = try_send(
+        &mut context.svm,
+        &payer,
+        &[ix],
+        &[&payer, &odd, &wallet.owner],
+    );
+    match result {
+        Err(failed) => assert_eq!(
+            failed.err,
+            solana_sdk::transaction::TransactionError::InstructionError(
+                0,
+                solana_sdk::instruction::InstructionError::IllegalOwner
+            ),
+            "{}",
+            failed.meta.pretty_logs()
+        ),
+        Ok(_) => panic!("a program-owned payer was recorded"),
+    }
+}
+
+#[test]
+fn a_payer_that_became_executable_cannot_block_closing_an_expired_session() {
+    let mut context = setup_test();
+    let wallet = create_ed25519_wallet(&mut context, 0);
+    let insider = Keypair::new();
+    context
+        .svm
+        .airdrop(&insider.pubkey(), 1_000_000_000)
+        .unwrap();
+    let pda = session_paid_by(&mut context, &wallet, &insider);
+    let rent = lamports(&context, &pda);
+    make_executable(&mut context, insider.pubkey());
+    let now = unix_now(&context.svm);
+    set_unix_time(&mut context.svm, now + 100_001);
+
+    let stranger = Keypair::new();
+    context
+        .svm
+        .airdrop(&stranger.pubkey(), 1_000_000_000)
+        .unwrap();
+    for writable in [true, false] {
+        let mut ix = close_expired_ix(&context, stranger.pubkey(), pda, insider.pubkey());
+        ix.accounts[2].is_writable = writable;
+        if try_send(&mut context.svm, &stranger, &[ix], &[&stranger]).is_ok() {
+            break;
+        }
+        assert!(writable, "the read-only form must land");
+        advance(&mut context.svm);
+    }
+    let after = context.svm.get_account(&pda).unwrap();
+    assert!(after.data.iter().all(|&b| b == 0));
+    assert_eq!(after.lamports, rent);
+}

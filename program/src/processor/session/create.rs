@@ -19,7 +19,7 @@ use crate::{
         authority::AuthorityAccountHeader,
         layout_version,
         policy::session_policy_offset,
-        rent_payer::write_payer,
+        rent_payer::{check_new_payer, write_payer},
         session::{SessionAccount, SESSION_HEADER_SIZE},
         AccountDiscriminator,
     },
@@ -310,6 +310,10 @@ pub fn process(
         Seed::from(&args.session_key),
         Seed::from(&bump_arr),
     ];
+
+    // The session records `payer` as its rent payer: an ordinary account only
+    // (state::rent_payer::check_new_payer).
+    check_new_payer(payer)?;
 
     crate::utils::initialize_pda_account(
         payer,

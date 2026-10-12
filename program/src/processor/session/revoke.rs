@@ -4,7 +4,8 @@ use crate::{
     },
     error::AuthError,
     state::{
-        authority::AuthorityAccountHeader, rent_payer::check_refund_destination,
+        authority::AuthorityAccountHeader,
+        rent_payer::{refund_disposition, Refund},
         session::SessionAccount,
     },
 };
@@ -131,10 +132,13 @@ pub fn process(
 
     // The rent goes back to whoever paid it, recorded at creation; a session
     // from before layout revision 2 records nobody (state::rent_payer).
-    check_refund_destination(session_data, refund_dest)?;
+    let refund = refund_disposition(session_data, refund_dest)?;
 
     // Close the session account — zero data and drain lamports
     session_data.fill(0);
+    if refund == Refund::Keep {
+        return Ok(());
+    }
 
     let session_lamports = session_pda.lamports();
     let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };

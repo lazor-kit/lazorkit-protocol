@@ -38,6 +38,13 @@
 //!   its payer, so a revision-1 account is closed at most once and never
 //!   recreated in that shape: the set of accounts under the old rule only
 //!   shrinks.
+//!
+//! # Closing never depends on the payer
+//!
+//! A recorded payer that has since become executable cannot be relied on to
+//! accept lamports, so the close goes ahead and the rent stays in the dead
+//! account ([`Refund::Keep`]). Revoking a session or removing an authority must
+//! not be something the account that paid for it can block.
 
 use pinocchio::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
 
@@ -113,19 +120,53 @@ pub fn write_payer(data: &mut [u8], offset: usize, payer: &Pubkey) -> Result<(),
     Ok(())
 }
 
-/// Refuse to close `data`'s account into anything but the payer it records.
-/// An account that records none (see the module note) may close anywhere.
-#[inline]
-pub fn check_refund_destination(
-    data: &[u8],
-    refund_dest: &AccountInfo,
-) -> Result<(), ProgramError> {
+/// What a close does with the rent, once [`refund_disposition`] has allowed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refund {
+    /// Move the lamports to the refund destination.
+    Credit,
+    /// The recorded payer is an executable account, which the runtime may
+    /// refuse to credit: close the account's data and leave its lamports where
+    /// they are. See [`refund_disposition`].
+    Keep,
+}
+
+/// Where closing `data`'s account may send its rent.
+///
+/// - It records no payer (see the module note): anywhere, [`Refund::Credit`].
+/// - It records one and `refund_dest` is another account:
+///   `RefundDestinationMismatch` (3039).
+/// - It records one and `refund_dest` is it: [`Refund::Credit`] — unless that
+///   account is executable now. A cluster without SIMD-0162 refuses to change
+///   an executable account's lamports, so crediting it would fail the whole
+///   instruction, and a key that paid the rent could then make the account
+///   unclosable by deploying a program at its own address: an Admin or a
+///   second Owner who paid for a Delegate or a session that way would keep it
+///   past the Owner's `RemoveAuthority` or `RevokeSession`. Closing must never
+///   depend on the payer, so the close still happens and the lamports stay in
+///   the dead account, where nobody can reach them. Only the payer's own key
+///   can make it executable, so nobody else can choose this path for it.
+pub fn refund_disposition(data: &[u8], refund_dest: &AccountInfo) -> Result<Refund, ProgramError> {
     match recorded_payer(data)? {
         Some(payer) if refund_dest.key() != &payer => {
             Err(AuthError::RefundDestinationMismatch.into())
         },
-        _ => Ok(()),
+        Some(_) if refund_dest.executable() => Ok(Refund::Keep),
+        _ => Ok(Refund::Credit),
     }
+}
+
+/// The account funding a new authority or session, about to be recorded as
+/// its rent payer, must be an ordinary system account. A legitimate payer
+/// always is (the System Program's transfer requires it); refusing anything
+/// else keeps a pre-funded PDA from recording an executable or program-owned
+/// account as its payer.
+#[inline]
+pub fn check_new_payer(payer: &AccountInfo) -> Result<(), ProgramError> {
+    if payer.owner() != &crate::utils::SYSTEM_PROGRAM_ID || payer.executable() {
+        return Err(ProgramError::IllegalOwner);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

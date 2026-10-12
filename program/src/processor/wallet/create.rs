@@ -15,7 +15,7 @@ use crate::{
         authority::AuthorityAccountHeader,
         layout_version,
         policy::authority_key_end,
-        rent_payer::{write_payer, RENT_PAYER_LEN},
+        rent_payer::{check_new_payer, write_payer, RENT_PAYER_LEN},
         wallet::WalletAccount,
         AccountDiscriminator,
     },
@@ -248,6 +248,10 @@ pub fn process(
         Seed::from(id_seed),
         Seed::from(&auth_bump_arr),
     ];
+
+    // The Owner records `payer` as its rent payer: an ordinary account only
+    // (state::rent_payer::check_new_payer).
+    check_new_payer(payer)?;
 
     crate::utils::initialize_pda_account(
         payer,

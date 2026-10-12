@@ -77,7 +77,7 @@ use crate::{
         authority::AuthorityAccountHeader,
         layout_version,
         policy::{authority_key_end, authority_policy_offset},
-        rent_payer::{check_refund_destination, write_payer},
+        rent_payer::{check_new_payer, refund_disposition, write_payer, Refund},
         AccountDiscriminator,
     },
     utils::is_all_zero,
@@ -388,6 +388,10 @@ pub fn process_add_authority(
         Seed::from(&bump_arr),
     ];
 
+    // The new authority records `payer` as its rent payer: an ordinary account
+    // only (state::rent_payer::check_new_payer).
+    check_new_payer(payer)?;
+
     crate::utils::initialize_pda_account(
         payer,
         new_auth_pda,
@@ -620,7 +624,7 @@ pub fn process_remove_authority(
 
     // The rent goes back to whoever paid it, recorded at creation; an
     // authority from before revision 2 records nobody (state::rent_payer).
-    check_refund_destination(target_data, refund_dest)?;
+    let refund = refund_disposition(target_data, refund_dest)?;
 
     if target_header.role == RANK_OWNER {
         let wallet_data = unsafe { wallet_pda.borrow_mut_data_unchecked() };
@@ -632,13 +636,15 @@ pub fn process_remove_authority(
         crate::state::wallet::WalletAccount::set_owner_count(wallet_data, next);
     }
 
-    let target_lamports = unsafe { *target_auth_pda.borrow_mut_lamports_unchecked() };
-    let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
-    unsafe {
-        *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
-            .checked_add(target_lamports)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-        *target_auth_pda.borrow_mut_lamports_unchecked() = 0;
+    if refund == Refund::Credit {
+        let target_lamports = unsafe { *target_auth_pda.borrow_mut_lamports_unchecked() };
+        let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
+        unsafe {
+            *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
+                .checked_add(target_lamports)
+                .ok_or(ProgramError::ArithmeticOverflow)?;
+            *target_auth_pda.borrow_mut_lamports_unchecked() = 0;
+        }
     }
     let target_data = unsafe { target_auth_pda.borrow_mut_data_unchecked() };
     target_data.fill(0);

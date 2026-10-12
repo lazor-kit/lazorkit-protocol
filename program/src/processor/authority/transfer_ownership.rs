@@ -18,7 +18,7 @@ use crate::{
         authority::AuthorityAccountHeader,
         layout_version,
         policy::authority_key_end,
-        rent_payer::{check_refund_destination, write_payer, RENT_PAYER_LEN},
+        rent_payer::{check_new_payer, refund_disposition, write_payer, Refund, RENT_PAYER_LEN},
         AccountDiscriminator,
     },
     utils::is_all_zero,
@@ -179,7 +179,7 @@ pub fn process(
     }
 
     // Scope to borrow current owner data
-    {
+    let refund = {
         let data = unsafe { current_owner.borrow_mut_data_unchecked() };
         if (data.as_ptr() as usize) % 8 != 0 {
             return Err(ProgramError::InvalidAccountData);
@@ -204,7 +204,7 @@ pub fn process(
         // The current Owner's rent goes back to whoever paid it, recorded at
         // creation; an Owner from before layout revision 2 records nobody
         // (state::rent_payer).
-        check_refund_destination(data, refund_dest)?;
+        let refund = refund_disposition(data, refund_dest)?;
 
         // Authenticate Current Owner.
         // Sign over payer + new_owner + refund_dest to prevent substitution attacks.
@@ -247,7 +247,8 @@ pub fn process(
             },
             _ => return Err(AuthError::InvalidAuthenticationKind.into()),
         }
-    }
+        refund
+    };
 
     let (new_key, bump) = find_program_address(
         &[crate::seeds::AUTHORITY, wallet_pda.key().as_ref(), id_seed],
@@ -273,6 +274,9 @@ pub fn process(
         Seed::from(id_seed),
         Seed::from(&bump_arr),
     ];
+
+    // The new Owner records `payer` as its rent payer: an ordinary account only.
+    check_new_payer(payer)?;
 
     crate::utils::initialize_pda_account(
         payer,
@@ -341,13 +345,15 @@ pub fn process(
     // or TransferOwnership will return it to.
     write_payer(data, key_end, payer.key())?;
 
-    let current_lamports = unsafe { *current_owner.borrow_mut_lamports_unchecked() };
-    let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
-    unsafe {
-        *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
-            .checked_add(current_lamports)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-        *current_owner.borrow_mut_lamports_unchecked() = 0;
+    if refund == Refund::Credit {
+        let current_lamports = unsafe { *current_owner.borrow_mut_lamports_unchecked() };
+        let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
+        unsafe {
+            *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
+                .checked_add(current_lamports)
+                .ok_or(ProgramError::ArithmeticOverflow)?;
+            *current_owner.borrow_mut_lamports_unchecked() = 0;
+        }
     }
     let current_data = unsafe { current_owner.borrow_mut_data_unchecked() };
     current_data.fill(0);
