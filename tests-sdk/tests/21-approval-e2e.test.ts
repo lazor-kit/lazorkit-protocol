@@ -33,6 +33,7 @@ import {
 import * as A from '../../sdk/sdk-legacy/src/approval';
 import {
   LazorKitClient,
+  RefundDestinationMismatchError,
   ROLE_ADMIN,
   ROLE_OWNER,
   ROLE_SPENDER,
@@ -372,28 +373,47 @@ describe('typed approval requests on chain', () => {
 
   // ── revokeSession ──
 
-  it(`revokeSession: ${CASES} random typed requests land; the session closes and its rent reaches the refund`, async () => {
+  it(`revokeSession: ${CASES} random typed requests land; the session closes and its rent reaches its payer`, async () => {
+    // Every session here was paid for by ctx.payer, which records it as the
+    // rent payer (layout revision 2): the refund goes back to it whoever pays
+    // for the revoke, and another refund is refused before anything is signed.
     expect(sessions.length).toBeGreaterThanOrEqual(CASES);
     for (let i = 0; i < CASES; i++) {
       const sessionPda = sessions.shift()!;
-      const refund = rng.bool() ? ctx.payer.publicKey : Keypair.generate().publicKey;
-      const before = await ctx.connection.getBalance(refund, 'confirmed');
+      const txPayer = rng.bool() ? ctx.payer : otherPayer;
+      await expect(
+        client.prepareRevokeSession({
+          payer: txPayer.publicKey,
+          walletPda,
+          secp256r1: secp(),
+          sessionPda,
+          refundDestination: Keypair.generate().publicKey,
+        }),
+      ).rejects.toBeInstanceOf(RefundDestinationMismatchError);
+      const before = await ctx.connection.getBalance(ctx.payer.publicKey, 'confirmed');
       const rent = await ctx.connection.getBalance(sessionPda, 'confirmed');
       const prepared = await client.prepareRevokeSession({
-        payer: ctx.payer.publicKey,
+        payer: txPayer.publicKey,
         walletPda,
         secp256r1: secp(),
         sessionPda,
-        refundDestination: refund,
+        ...(rng.bool() ? { refundDestination: ctx.payer.publicKey } : {}),
       });
       const { req, description, binding } = await portalApprove(prepared);
-      expect(description).toMatchObject({ kind: 'revokeSession', refundIsPayer: refund.equals(ctx.payer.publicKey) });
+      expect(description).toMatchObject({
+        kind: 'revokeSession',
+        refund: ctx.payer.publicKey.toBase58(),
+        rentPayer: ctx.payer.publicKey.toBase58(),
+        refundIsPayer: txPayer === ctx.payer,
+      });
       const { response } = await signAndVerify(req, binding);
-      await send(client.finalizeRevokeSession(prepared, response, binding).instructions);
+      await send(client.finalizeRevokeSession(prepared, response, binding).instructions, txPayer === ctx.payer ? [] : [txPayer]);
       expect(await ctx.connection.getAccountInfo(sessionPda, 'confirmed')).toBeNull();
-      if (!refund.equals(ctx.payer.publicKey)) {
-        expect(await ctx.connection.getBalance(refund, 'confirmed')).toBe(before + rent);
-      }
+      // ctx.payer paid the fee (three signatures at most, the precompile's
+      // included) and got the rent.
+      const gained = (await ctx.connection.getBalance(ctx.payer.publicKey, 'confirmed')) - before;
+      expect(gained).toBeGreaterThanOrEqual(rent - 15_000);
+      expect(gained).toBeLessThanOrEqual(rent);
     }
   }, 600_000);
 
@@ -439,17 +459,24 @@ describe('typed approval requests on chain', () => {
     }
     for (let i = 0; i < CASES; i++) {
       const target = authorities.shift()!;
+      const txPayer = rng.bool() ? ctx.payer : otherPayer;
       const prepared = await client.prepareRemoveAuthority({
-        payer: ctx.payer.publicKey,
+        payer: txPayer.publicKey,
         walletPda,
         secp256r1: secp(),
         targetAuthorityPda: target,
-        refundDestination: rng.bool() ? ctx.payer.publicKey : Keypair.generate().publicKey,
+        ...(rng.bool() ? { refundDestination: ctx.payer.publicKey } : {}),
       });
       const { req, description, binding } = await portalApprove(prepared);
-      expect(description).toMatchObject({ kind: 'removeAuthority', targetType: 'ed25519', targetRole: ['owner', 'admin', 'delegate'][i % 3] });
+      expect(description).toMatchObject({
+        kind: 'removeAuthority',
+        targetType: 'ed25519',
+        targetRole: ['owner', 'admin', 'delegate'][i % 3],
+        refund: ctx.payer.publicKey.toBase58(),
+        rentPayer: ctx.payer.publicKey.toBase58(),
+      });
       const { response } = await signAndVerify(req, binding);
-      await send(client.finalizeRemoveAuthority(prepared, response, binding).instructions);
+      await send(client.finalizeRemoveAuthority(prepared, response, binding).instructions, txPayer === ctx.payer ? [] : [txPayer]);
       expect(await ctx.connection.getAccountInfo(target, 'confirmed')).toBeNull();
     }
   }, 900_000);

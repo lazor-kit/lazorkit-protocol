@@ -538,11 +538,39 @@ pub fn session_pda_for(program_id: Pubkey, wallet: &WalletFixture, session: &Key
     .0
 }
 
-/// Read the raw action buffer stored after the 80-byte session header.
+/// Where an account's policy (a session's actions, an authority's policy)
+/// starts, written out independently of the program's own `PolicyLocation`:
+///
+/// - session (0x23): after the 80-byte header in layout revision 1, after the
+///   header and the 32-byte rent payer from revision 2;
+/// - authority (0x22): after the key material (80 Ed25519, 145 Secp256r1) in
+///   revision 1, after the key material and the rent payer from revision 2.
+pub fn policy_offset(data: &[u8]) -> usize {
+    match (data[0], data[1], data[2], data[4]) {
+        (0x23, _, 1, _) => 80,
+        (0x23, _, 2, _) => 112,
+        (0x22, 0, _, 1) => 80,
+        (0x22, 0, _, 2) => 112,
+        (0x22, 1, _, 1) => 145,
+        (0x22, 1, _, 2) => 177,
+        other => panic!("no policy offset for (disc, type, session rev, authority rev) {other:?}"),
+    }
+}
+
+/// The rent payer an authority or a session records (layout revision 2), at
+/// the offset its policy would otherwise start at minus 32.
+pub fn recorded_rent_payer(svm: &LiteSVM, account: Pubkey) -> Pubkey {
+    let data = svm.get_account(&account).expect("account exists").data;
+    let at = policy_offset(&data) - 32;
+    Pubkey::try_from(&data[at..at + 32]).unwrap()
+}
+
+/// Read the raw action buffer of a session, or the policy of an authority.
 pub fn session_actions(svm: &LiteSVM, session_pda: Pubkey) -> Vec<u8> {
     let data = svm.get_account(&session_pda).expect("session exists").data;
-    if data.len() > 80 {
-        data[80..].to_vec()
+    let start = policy_offset(&data);
+    if data.len() > start {
+        data[start..].to_vec()
     } else {
         Vec::new()
     }
@@ -620,8 +648,8 @@ pub fn action_program_blacklist(program: Pubkey) -> Vec<u8> {
     action(11, program.as_ref())
 }
 
-/// A `u64` field of action `action_idx` in a policy buffer stored from byte 80:
-/// a session's actions, or an Ed25519 authority's policy. `field_off` is
+/// A `u64` field of action `action_idx` in a policy buffer: a session's
+/// actions, or an authority's policy (see [`policy_offset`]). `field_off` is
 /// relative to the action's data (`SolLimit.remaining` is 0,
 /// `TokenLimit.remaining` 32).
 pub fn session_action_u64(
@@ -1412,7 +1440,8 @@ pub fn remove_authority_ix(
             AccountMeta::new(wallet.wallet_pda, false),
             AccountMeta::new(authorizer_pda, false),
             AccountMeta::new(target_pda, false),
-            AccountMeta::new(Pubkey::new_unique(), false), // refund destination
+            // Refund destination: whoever the target records as its rent payer.
+            AccountMeta::new(recorded_rent_payer(&context.svm, target_pda), false),
             AccountMeta::new_readonly(authorizer_key.pubkey(), true),
         ],
         data: vec![2u8], // RemoveAuthority, empty Ed25519 payload

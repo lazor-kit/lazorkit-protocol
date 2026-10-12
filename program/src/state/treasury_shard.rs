@@ -33,6 +33,7 @@ impl TreasuryShard {
             data,
             crate::state::AccountDiscriminator::TreasuryShard,
             crate::state::version_offset::TREASURY_SHARD,
+            crate::state::layout_version::FIRST,
             Self::MIN_LEN,
         )
     }

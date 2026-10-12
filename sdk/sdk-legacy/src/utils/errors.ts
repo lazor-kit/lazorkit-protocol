@@ -1,7 +1,7 @@
 /**
  * Error code map for LazorKit program errors.
  */
-import type { Commitment } from '@solana/web3.js';
+import type { Commitment, PublicKey } from '@solana/web3.js';
 
 /** Map of error code → human-readable name */
 export const ERROR_NAMES: Record<number, string> = {
@@ -48,6 +48,8 @@ export const ERROR_NAMES: Record<number, string> = {
   // Assets a policy does not name (v2): SOL with no Sol* action, a mint with no Token* action
   3037: 'ActionUnlistedSolOutflow',
   3038: 'ActionUnlistedTokenOutflow',
+  // A closed account's rent goes back to the account that paid it (layout revision 2)
+  3039: 'RefundDestinationMismatch',
   // Protocol errors (fees, the protocol config, and the deployment itself)
   4001: 'ProtocolAlreadyInitialized',
   4002: 'InvalidProtocolAdmin',
@@ -160,5 +162,34 @@ export class MinContextSlotNotReachedError extends Error {
     this.waitedMs = waitedMs;
     if (commitment !== undefined) this.commitment = commitment;
     if (params.cause !== undefined) (this as { cause?: unknown }).cause = params.cause;
+  }
+}
+
+/**
+ * A close was asked to refund rent somewhere other than the account that paid
+ * it. From layout revision 2 an authority and a session record that account,
+ * and the program refuses any other destination with RefundDestinationMismatch
+ * (3039), so the SDK refuses it first. Leave `refundDestination` out and the
+ * SDK fills in the recorded payer.
+ */
+export class RefundDestinationMismatchError extends Error {
+  /** The account being closed. */
+  readonly account: PublicKey;
+  /** The rent payer it records: the only destination the program accepts. */
+  readonly rentPayer: PublicKey;
+  /** The destination that was asked for. */
+  readonly requested: PublicKey;
+
+  constructor(params: { account: PublicKey; rentPayer: PublicKey; requested: PublicKey }) {
+    super(
+      `${params.account.toBase58()} records ${params.rentPayer.toBase58()} as the account that ` +
+        `paid its rent, and the program refunds only to it (RefundDestinationMismatch, 3039); ` +
+        `refundDestination was ${params.requested.toBase58()}. Leave refundDestination out to ` +
+        `use the recorded payer.`,
+    );
+    this.name = 'RefundDestinationMismatchError';
+    this.account = params.account;
+    this.rentPayer = params.rentPayer;
+    this.requested = params.requested;
   }
 }

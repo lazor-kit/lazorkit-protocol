@@ -185,13 +185,14 @@ const { instructions, sessionPda } = await client.createSession({
 
 ## Cost
 
-Measured on devnet (November 2025):
+Measured with litesvm (October 2026; one System transfer, with the protocol
+fee and its accounts; `program/tests/execute_compute_tests.rs`):
 
 | Operation | Compute Units | Transaction fee |
 |---|---|---|
-| Execute via session key | ~4,100 | 0.000005 SOL |
-| Execute with Ed25519 authority | ~5,900 | 0.000005 SOL |
-| Execute with passkey (Secp256r1) | ~9,440 | 0.000005 SOL |
+| Execute via session key | ~5,760 | 0.000005 SOL |
+| Execute with Ed25519 authority | ~5,300 | 0.000005 SOL |
+| Execute with passkey (Secp256r1) | ~10,900 | 0.00001 SOL (precompile signature) |
 | CreateWallet | ~15,000–20,000 | 0.000005 SOL + rent |
 
 All paths fit comfortably within Solana's 200,000 CU default budget. The ~2,300 CU precompile verification is the largest fixed cost on the passkey path.
@@ -201,16 +202,21 @@ All paths fit comfortably within Solana's 200,000 CU default budget. The ~2,300 
 | Account | Size | Rent |
 |---|---|---|
 | Wallet PDA | 8 bytes | 0.000947 SOL |
-| Authority (Ed25519) | 80 bytes + policy (0–2048) | 0.001448+ SOL |
-| Authority (Secp256r1) | 145 bytes + policy (0–2048) | 0.001900+ SOL |
-| Session | 80 bytes + actions (0–2048) | 0.001448+ SOL |
+| Authority (Ed25519) | 112 bytes + policy (0–2048) | 0.001670+ SOL |
+| Authority (Secp256r1) | 177 bytes + policy (0–2048) | 0.002123+ SOL |
+| Session | 112 bytes + actions (0–2048) | 0.001670+ SOL |
+
+An authority's or a session's rent goes back to the account that paid it — on a
+sponsored flow, the relayer — whoever closes it: each records its rent payer
+(32 of the bytes above), and the program refuses any other refund destination
+(3039).
 
 A policy costs the same rent per byte as a session's action buffer, and buys the
 same limits. The choice between a policy-bearing authority and a session is about
 lifetime and key custody, not cost: a session key is ephemeral and held by
 software, an authority is durable and can be a passkey.
 
-**Total wallet creation cost**: ~0.0024 SOL (Ed25519) or ~0.0028 SOL (Secp256r1) — roughly $0.40 USD at $150/SOL.
+**Total wallet creation cost**: ~0.0026 SOL (Ed25519) or ~0.0031 SOL (Secp256r1) — roughly $0.40–0.46 USD at $150/SOL.
 
 ## Parallel execution
 

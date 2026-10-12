@@ -81,7 +81,7 @@ pub fn process(
         return Err(AuthError::UnauthorizedReclaim.into());
     }
     if refund_dest.key() != &stored_payer {
-        return Err(AuthError::UnauthorizedReclaim.into());
+        return Err(AuthError::RefundDestinationMismatch.into());
     }
 
     // Can only reclaim after expiry

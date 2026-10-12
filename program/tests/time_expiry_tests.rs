@@ -334,7 +334,7 @@ fn legacy_a_slot_valued_last_reset_opens_one_fresh_window() {
 
     // As a slot-based build left it: the allowance spent at a recent slot.
     let mut account = context.svm.get_account(&pda).unwrap();
-    let data = 80 + 11; // policy start + action header
+    let data = policy_offset(&account.data) + 11; // policy start + action header
     account.data[data + 8..data + 16].copy_from_slice(&1_000_000u64.to_le_bytes());
     account.data[data + 24..data + 32].copy_from_slice(&DEVNET_SLOT.to_le_bytes());
     context.svm.set_account(pda, account).unwrap();

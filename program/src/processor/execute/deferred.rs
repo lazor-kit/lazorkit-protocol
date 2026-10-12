@@ -10,7 +10,7 @@ use pinocchio::{
     instruction::{Account, AccountMeta, Instruction, Seed, Signer},
     program::invoke_signed_unchecked,
     program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
+    pubkey::Pubkey,
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
@@ -86,9 +86,9 @@ pub fn process(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // Verify refund destination matches stored payer
+    // The rent goes back to the payer that funded Authorize, and nowhere else.
     if deferred.payer != *refund_dest.key() {
-        return Err(ProgramError::InvalidAccountData);
+        return Err(AuthError::RefundDestinationMismatch.into());
     }
 
     // Check expiry
@@ -115,15 +115,10 @@ pub fn process(
         return Err(AuthError::DeferredHashMismatch.into());
     }
 
-    // Derive vault PDA and verify
-    let (vault_key, vault_bump) = find_program_address(
-        &[crate::seeds::VAULT, wallet_pda.key().as_ref()],
-        program_id,
-    );
-
-    if vault_pda.key() != &vault_key {
-        return Err(ProgramError::InvalidSeeds);
-    }
+    // Verify the vault PDA and get the bump to sign for it with: the bump the
+    // wallet stores, checked with one hash, or for a revision-1 wallet a search.
+    let vault_bump =
+        crate::utils::vault_signer_bump(wallet_pda, wallet_data, vault_pda, program_id)?;
 
     // Consume the authorization before any CPI runs: with its data zeroed it no
     // longer passes `DeferredExecAccount::check`, so nothing reached from the

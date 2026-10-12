@@ -17,7 +17,7 @@ Which version you need depends on which protocol version your target cluster run
 | npm | protocol | where it works |
 |---|---|---|
 | `0.3.x` (`latest`) | v1 | mainnet today |
-| `1.x` (`next`) | v2 | devnet staging today, mainnet after the upgrade |
+| `2.x` (`next`) | v2 | devnet today, mainnet after the upgrade |
 
 The two are not wire-compatible: v2 namespaces every PDA seed, so the same
 `userSeed` derives a different wallet address. See
@@ -27,7 +27,7 @@ existing user's funds across.
 
 ```bash
 npm install @lazorkit/sdk-legacy          # 0.3.x, talks to mainnet today
-npm install @lazorkit/sdk-legacy@next     # 1.x, protocol v2
+npm install @lazorkit/sdk-legacy@next     # 2.x, protocol v2
 ```
 
 ### Browser and React Native
@@ -549,7 +549,7 @@ const prepared = await client.prepareExecute({
 
 The same two options go on a signer config for the one-shot methods (`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet`, and on `readCounter`. They apply to all three reads a challenge is built from: the counter, the key and the slot. A node that has not reached `minContextSlot` answers -32016; the SDK retries with a short backoff for up to 10 s, then throws `MinContextSlotNotReachedError` (its `commitment` says which bank was behind). If one of the three reads fails for another reason (or, in `prepareExecute`, the protocol-fee read beside them), the call rejects with that error at once and the challenge reads stop retrying.
 
-With `commitment: 'finalized'`, `minContextSlot` is a slot the node must have *finalized*. How long after its confirmation that happens depends on the cluster: 31 slots (16.5 s) on a local test validator (Agave 4.2.2), and no time at all on devnet on 2026-09-30, where the finalized slot was the confirmed one. The reads wait up to 30 s for it, so where finalization lags, a floor at a just-confirmed tx1 costs that lag before the passkey prompt. The challenge's slot is read at `finalized` too, so it is already that many slots old when the prompt appears, and the program accepts a challenge only until its slot is 150 slots old (about a minute): a 31-slot lag leaves about 119 slots to approve, send and land it. It is not read at `confirmed` instead because the program also refuses a slot newer than the one it runs in, so a relayer simulating at `finalized` would refuse the challenge. Unless you need finalized reads, keep the default: `confirmed` with the floor is enough to sign the right counter.
+With `commitment: 'finalized'`, `minContextSlot` is a slot the node must have *finalized*. How long after its confirmation that happens depends on the cluster: 31 slots (16.5 s) on a local test validator (Agave 4.2.2), and no time at all on devnet on 2026-09-30, where the finalized slot was the confirmed one. The reads wait up to 30 s for it, so where finalization lags, a floor at a just-confirmed tx1 costs that lag before the passkey prompt. The challenge's slot is read at `finalized` too, so it is already that many slots old when the prompt appears, and the program accepts a challenge only until its slot is 150 slots old (about 33–34 s at today's slot times): a 31-slot lag leaves about 119 slots to approve, send and land it. It is not read at `confirmed` instead because the program also refuses a slot newer than the one it runs in, so a relayer simulating at `finalized` would refuse the challenge. Unless you need finalized reads, keep the default: `confirmed` with the floor is enough to sign the right counter.
 
 Without `minContextSlot` the reads are at `confirmed`, or at `processed` when the Connection itself is at `processed` (never staler than the Connection, as in 1.2.0). That is enough only when the node that answers the reads has itself executed the previous transaction. Behind a load-balanced RPC endpoint the confirmation and the next reads can reach different nodes, and the one that answers may still be behind: pass the floor even after confirming.
 
@@ -724,6 +724,25 @@ client.transferSol({ payer, walletPda, signer, recipient, lamports });
 client.addAuthority({ payer, walletPda, adminSigner, newAuthority, role });
 client.removeAuthority({ payer, walletPda, adminSigner, targetAuthorityPda });
 client.transferOwnership({ payer, walletPda, ownerSigner, newOwner });
+```
+
+**Where a closed account's rent goes.** An authority's or a session's rent
+goes back to the account that paid it — on a sponsored flow, the relayer.
+From layout revision 2 each records that account (`rentPayer` on
+`AuthorityAccount` / `SessionAccount`, `recordedRentPayer(data)` on raw bytes),
+and `RemoveAuthority`, `TransferOwnership` (for the Owner it replaces),
+`RevokeSession` and `CloseExpiredSession` refuse any other refund destination
+(3039 `RefundDestinationMismatch`), whoever signs or pays for the close. Leave
+`refundDestination` out and these methods (and their `prepare*` halves) read the
+account and fill it in; another destination throws
+`RefundDestinationMismatchError` before anything is built.
+`rentRefundDestination(account, fallback)` answers the same question for a
+hand-built close. An account from before revision 2 records none and closes
+where you say (`refundDestination`, by default `payer`).
+
+```typescript
+// Anyone may close an expired session; the rent goes to whoever paid for it.
+client.closeExpiredSession({ caller, sessionPda });
 ```
 
 ### Protocol fees & auto-registration
@@ -1063,6 +1082,7 @@ An authority that carries a policy itself may not add authorities at all.
 | 3036 | SessionNotExpired |
 | 3037 | ActionUnlistedSolOutflow: the vault's SOL fell and the policy has no `Sol*` action (rent the vault pays for a new account counts) |
 | 3038 | ActionUnlistedTokenOutflow: the vault's balance of a mint fell and no `Token*` action names it (wSOL is a mint) |
+| 3039 | RefundDestinationMismatch: a close named a refund destination other than the account that paid the rent (an authority's or session's recorded payer, a DeferredExec's stored payer) |
 | 4001–4007 | Protocol fee errors (4003 retired) |
 | 4008–4011 | Fee suffix errors: FeeAccountsRequired, ProtocolNotInitialized, InvalidTreasuryShard, InvalidFeeRecord (4012 retired) |
 | 4013 | AccountVersionMismatch |

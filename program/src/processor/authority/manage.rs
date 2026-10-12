@@ -73,8 +73,12 @@ use crate::{
     },
     error::AuthError,
     state::{
-        action::validate_actions_buffer, authority::AuthorityAccountHeader,
-        policy::authority_fixed_len, AccountDiscriminator,
+        action::validate_actions_buffer,
+        authority::AuthorityAccountHeader,
+        layout_version,
+        policy::{authority_key_end, authority_policy_offset},
+        rent_payer::{check_new_payer, refund_disposition, write_payer, Refund},
+        AccountDiscriminator,
     },
     utils::is_all_zero,
 };
@@ -365,11 +369,14 @@ pub fn process_add_authority(
     }
     check_zero_data(new_auth_pda, ProgramError::AccountAlreadyInitialized)?;
 
-    // Fixed sizes per auth type (see wallet/create.rs for layout).
+    // Layout revision 2 (see wallet/create.rs and state::rent_payer): key
+    // material, the rent payer, then the policy.
     let header_size = std::mem::size_of::<AuthorityAccountHeader>();
-    let fixed_len =
-        authority_fixed_len(args.authority_type).ok_or(AuthError::InvalidAuthenticationKind)?;
-    let space = fixed_len + policy.len();
+    let key_end =
+        authority_key_end(args.authority_type).ok_or(AuthError::InvalidAuthenticationKind)?;
+    let policy_offset = authority_policy_offset(args.authority_type, layout_version::AUTHORITY)
+        .ok_or(AuthError::InvalidAuthenticationKind)?;
+    let space = policy_offset + policy.len();
     let rent_lamports = rent.minimum_balance(space);
 
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
@@ -380,6 +387,10 @@ pub fn process_add_authority(
         Seed::from(id_seed),
         Seed::from(&bump_arr),
     ];
+
+    // The new authority records `payer` as its rent payer: an ordinary account
+    // only (state::rent_payer::check_new_payer).
+    check_new_payer(payer)?;
 
     crate::utils::initialize_pda_account(
         payer,
@@ -408,7 +419,7 @@ pub fn process_add_authority(
         authority_type: args.authority_type,
         role: args.new_role,
         bump,
-        version: crate::state::CURRENT_ACCOUNT_VERSION,
+        version: layout_version::AUTHORITY,
         _padding1: [0; 3],
         counter: 0,
         policy_len: policy.len() as u16,
@@ -453,10 +464,15 @@ pub fn process_add_authority(
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
 
-    // The policy trails the key material, at the offset PolicyLocation derives
-    // from this account's own discriminator and authority type.
+    // Who paid the rent: the only account RemoveAuthority and TransferOwnership
+    // will return it to.
+    write_payer(data, key_end, payer.key())?;
+
+    // The policy trails the key material and the payer, at the offset
+    // PolicyLocation derives from this account's own discriminator, authority
+    // type and layout revision.
     if !policy.is_empty() {
-        data[fixed_len..fixed_len + policy.len()].copy_from_slice(policy);
+        data[policy_offset..policy_offset + policy.len()].copy_from_slice(policy);
     }
 
     Ok(())
@@ -464,7 +480,10 @@ pub fn process_add_authority(
 
 /// Processes the `RemoveAuthority` instruction.
 ///
-/// Removes an existing authority and refunds rent to the destination.
+/// Removes an existing authority and refunds its rent to the account that paid
+/// it (`RefundDestinationMismatch` for any other destination; an authority
+/// written before layout revision 2 records no payer and may refund anywhere —
+/// see `state::rent_payer`).
 ///
 /// # Logic:
 /// 1. **Authentication**: Verifies the `admin_authority`.
@@ -478,7 +497,7 @@ pub fn process_add_authority(
 /// 2. `[]` Wallet PDA.
 /// 3. `[signer]` Admin Authority.
 /// 4. `[writable]` Target Authority: PDA to verify and close.
-/// 5. `[writable]` Refund Destination.
+/// 5. `[writable]` Refund Destination: the target's recorded rent payer.
 pub fn process_remove_authority(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -603,6 +622,10 @@ pub fn process_remove_authority(
         return Err(ProgramError::InvalidAccountData);
     }
 
+    // The rent goes back to whoever paid it, recorded at creation; an
+    // authority from before revision 2 records nobody (state::rent_payer).
+    let refund = refund_disposition(target_data, refund_dest)?;
+
     if target_header.role == RANK_OWNER {
         let wallet_data = unsafe { wallet_pda.borrow_mut_data_unchecked() };
         // `can_remove` already refused a count of 1, so this cannot wrap. The
@@ -613,13 +636,15 @@ pub fn process_remove_authority(
         crate::state::wallet::WalletAccount::set_owner_count(wallet_data, next);
     }
 
-    let target_lamports = unsafe { *target_auth_pda.borrow_mut_lamports_unchecked() };
-    let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
-    unsafe {
-        *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
-            .checked_add(target_lamports)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-        *target_auth_pda.borrow_mut_lamports_unchecked() = 0;
+    if refund == Refund::Credit {
+        let target_lamports = unsafe { *target_auth_pda.borrow_mut_lamports_unchecked() };
+        let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
+        unsafe {
+            *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
+                .checked_add(target_lamports)
+                .ok_or(ProgramError::ArithmeticOverflow)?;
+            *target_auth_pda.borrow_mut_lamports_unchecked() = 0;
+        }
     }
     let target_data = unsafe { target_auth_pda.borrow_mut_data_unchecked() };
     target_data.fill(0);

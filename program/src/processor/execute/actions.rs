@@ -809,6 +809,8 @@ mod tests {
     fn build_session_data(actions: &[u8]) -> Vec<u8> {
         let mut data = vec![0u8; SESSION_HEADER_SIZE];
         data[0] = crate::state::AccountDiscriminator::Session as u8;
+
+        data[2] = 1; // layout revision 1: actions right after the header
         data.extend_from_slice(actions);
         data
     }
@@ -841,6 +843,8 @@ mod tests {
     fn test_no_actions_passthrough() {
         let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
         session_data[0] = crate::state::AccountDiscriminator::Session as u8;
+
+        session_data[2] = 1; // layout revision 1: actions right after the header
         let result = eval_post(&mut session_data, 10_000_000, 0, &[], 100);
         assert!(result.is_ok());
     }
@@ -2144,6 +2148,8 @@ mod tests {
     fn test_pre_actions_no_actions_passthrough() {
         let mut session_data = vec![0u8; SESSION_HEADER_SIZE];
         session_data[0] = crate::state::AccountDiscriminator::Session as u8;
+
+        session_data[2] = 1; // layout revision 1: actions right after the header
 
         let loc = PolicyLocation::of(&session_data).expect("session data resolves");
         let result = evaluate_pre_actions(&session_data, loc, &[], &[], 100);

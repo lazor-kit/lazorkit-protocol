@@ -365,8 +365,8 @@ fn h2_c_a_delegate_is_bounded_by_its_policy() {
     assert!(policy_len > 0, "policy_len recorded in the header");
     assert_eq!(
         stored.len(),
-        80 + policy_len,
-        "an Ed25519 authority is 80 bytes plus its policy"
+        80 + 32 + policy_len,
+        "an Ed25519 authority is 80 bytes, its rent payer, then its policy"
     );
 
     let recipient = Pubkey::new_unique();

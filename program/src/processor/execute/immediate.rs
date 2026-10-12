@@ -18,7 +18,7 @@ use pinocchio::{
     instruction::{Account, AccountMeta, Instruction, Seed, Signer},
     program::invoke_signed_unchecked,
     program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
+    pubkey::Pubkey,
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
@@ -203,9 +203,11 @@ pub fn process(
                 return Err(AuthError::PermissionDenied.into());
             }
 
-            if authority_data.len() < std::mem::size_of::<crate::state::session::SessionAccount>() {
-                return Err(ProgramError::InvalidAccountData);
-            }
+            // Length, discriminator and layout revision. The revision decides
+            // where the session's actions start (`PolicyLocation::of`), so one
+            // this binary does not know is refused here rather than read as a
+            // session without actions.
+            crate::state::session::SessionAccount::check(authority_data)?;
 
             let session = unsafe {
                 std::ptr::read_unaligned(
@@ -249,16 +251,10 @@ pub fn process(
         evaluate_pre_actions(authority_data, loc, &compact_instructions, accounts, now)?;
     }
 
-    // Get vault bump for signing
-    let (vault_key, vault_bump) = find_program_address(
-        &[crate::seeds::VAULT, wallet_pda.key().as_ref()],
-        program_id,
-    );
-
-    // Verify vault PDA.
-    if vault_pda.key() != &vault_key {
-        return Err(ProgramError::InvalidSeeds);
-    }
+    // Verify the vault PDA and get the bump to sign for it with: the bump the
+    // wallet stores, checked with one hash, or for a revision-1 wallet a search.
+    let vault_bump =
+        crate::utils::vault_signer_bump(wallet_pda, wallet_data, vault_pda, program_id)?;
 
     // Snapshot balances before CPI, for policy enforcement afterwards.
     let vault_lamports_before = if policy.is_some() {

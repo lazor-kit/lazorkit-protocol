@@ -3,13 +3,15 @@
 //! Before expiry only the wallet's Owner or Admin may end a session. After it,
 //! the account authorises nothing (`execute` refuses past `expires_at`) and the
 //! only key that could free the rent belongs to a user with no reason to return
-//! — so anyone may close it and keep the rent.
+//! — so anyone may close it.
 //!
 //! What these tests pin: a stranger can do it, only after expiry, on a v1
-//! session as well as a v2 one, and the rent lands where the caller said. A
-//! v2 session's expiry is Unix time; a v1 session's is the slot v1 wrote, and
-//! is still read as one. A v2 session written before time-based expiry, which
-//! holds a slot, is expired.
+//! session as well as a v2 one. A v2 session records who paid its rent (layout
+//! revision 2) and the rent goes back there and nowhere else, whoever calls; a
+//! v1 session, and a v2 one from before revision 2, record no payer, and their
+//! rent lands where the caller said. A v2 session's expiry is Unix time; a v1
+//! session's is the slot v1 wrote, and is still read as one. A v2 session
+//! written before time-based expiry, which holds a slot, is expired.
 mod common;
 
 use common::*;
@@ -28,6 +30,8 @@ const DISC_CREATE_SESSION: u8 = 5;
 /// v1's Session tag. v2 uses 0x23; the instruction takes either.
 const V1_DISC_SESSION: u8 = 3;
 const ERR_SESSION_NOT_EXPIRED: u32 = 3036;
+const ERR_REFUND_DESTINATION_MISMATCH: u32 = 3039;
+const ERR_ACCOUNT_VERSION_MISMATCH: u32 = 4013;
 
 fn close_ix(program_id: Pubkey, session: Pubkey, caller: Pubkey, refund: Pubkey) -> Instruction {
     Instruction {
@@ -138,11 +142,13 @@ fn set_v1_session(context: &mut TestContext, expires_at: u64) -> (Pubkey, u64) {
 }
 
 #[test]
-fn a_stranger_closes_an_expired_session_and_keeps_the_rent() {
+fn a_stranger_closes_an_expired_session_and_the_rent_goes_to_its_payer() {
     let mut context = setup_test();
     let program_id = context.program_id;
     let (session_pda, expires_at) = create_v2_session(&mut context);
     let rent = context.svm.get_account(&session_pda).unwrap().lamports;
+    let payer = context.payer.pubkey();
+    assert_eq!(recorded_rent_payer(&context.svm, session_pda), payer);
 
     // Nobody who has ever touched this wallet.
     let stranger = Keypair::new();
@@ -150,13 +156,77 @@ fn a_stranger_closes_an_expired_session_and_keeps_the_rent() {
         .svm
         .airdrop(&stranger.pubkey(), 1_000_000_000)
         .unwrap();
+    set_unix_time(&mut context.svm, expires_at + 1);
+
+    // Naming itself is refused: the rent is the payer's.
+    let result = send(
+        &mut context,
+        close_ix(
+            program_id,
+            session_pda,
+            stranger.pubkey(),
+            stranger.pubkey(),
+        ),
+        &stranger,
+    );
+    assert_custom_error(
+        result,
+        ERR_REFUND_DESTINATION_MISMATCH,
+        "an expired session's rent to the caller",
+    );
+    assert_eq!(
+        context.svm.get_account(&session_pda).unwrap().lamports,
+        rent,
+        "the refused close leaves the session as it was"
+    );
+
+    let before = context.svm.get_account(&payer).unwrap().lamports;
+    advance(&mut context.svm);
+    send(
+        &mut context,
+        close_ix(program_id, session_pda, stranger.pubkey(), payer),
+        &stranger,
+    )
+    .expect("a stranger may close an expired session into its payer");
+
+    assert!(
+        context
+            .svm
+            .get_account(&session_pda)
+            .is_none_or(|a| a.lamports == 0),
+        "the session account should be drained",
+    );
+    assert_eq!(
+        context.svm.get_account(&payer).unwrap().lamports,
+        before + rent,
+        "the payer gets the whole rent back, and the stranger paid the fee"
+    );
+}
+
+/// A v2 session written before layout revision 2 records no payer: it closes
+/// where the caller says, as every session did before.
+#[test]
+fn a_revision_1_session_still_closes_where_the_caller_says() {
+    let mut context = setup_test();
+    let program_id = context.program_id;
+    let (session_pda, expires_at) = create_v2_session(&mut context);
+    let mut account = context.svm.get_account(&session_pda).unwrap();
+    account.data.truncate(80);
+    account.data[2] = 1;
+    let rent = account.lamports;
+    context.svm.set_account(session_pda, account).unwrap();
+
+    let stranger = Keypair::new();
+    context
+        .svm
+        .airdrop(&stranger.pubkey(), 1_000_000_000)
+        .unwrap();
+    set_unix_time(&mut context.svm, expires_at + 1);
     let before = context
         .svm
         .get_account(&stranger.pubkey())
         .unwrap()
         .lamports;
-
-    set_unix_time(&mut context.svm, expires_at + 1);
     send(
         &mut context,
         close_ix(
@@ -167,24 +237,42 @@ fn a_stranger_closes_an_expired_session_and_keeps_the_rent() {
         ),
         &stranger,
     )
-    .expect("a stranger may close an expired session");
-
-    assert!(
-        context
-            .svm
-            .get_account(&session_pda)
-            .is_none_or(|a| a.lamports == 0),
-        "the session account should be drained",
-    );
+    .expect("a revision-1 session closes to the caller's choice");
     let after = context
         .svm
         .get_account(&stranger.pubkey())
         .unwrap()
         .lamports;
-    assert!(
-        after > before && after - before <= rent,
-        "the caller keeps the session's rent",
+    assert!(after > before && after - before <= rent);
+}
+
+/// A layout revision this binary does not know is refused, not guessed at.
+#[test]
+fn a_session_of_an_unknown_revision_is_refused() {
+    let mut context = setup_test();
+    let program_id = context.program_id;
+    let (session_pda, expires_at) = create_v2_session(&mut context);
+    let mut account = context.svm.get_account(&session_pda).unwrap();
+    account.data[2] = 3;
+    context.svm.set_account(session_pda, account).unwrap();
+    set_unix_time(&mut context.svm, expires_at + 1);
+
+    let stranger = Keypair::new();
+    context
+        .svm
+        .airdrop(&stranger.pubkey(), 1_000_000_000)
+        .unwrap();
+    let result = send(
+        &mut context,
+        close_ix(
+            program_id,
+            session_pda,
+            stranger.pubkey(),
+            stranger.pubkey(),
+        ),
+        &stranger,
     );
+    assert_custom_error(result, ERR_ACCOUNT_VERSION_MISMATCH, "revision 3");
 }
 
 #[test]
@@ -364,7 +452,8 @@ fn an_account_that_is_not_a_session_is_refused() {
 
 /// A v2 session written before time-based expiry: `expires_at` holds a slot,
 /// here devnet's on 2026-10-04 plus the longest session the old rule allowed.
-/// As a time that is 1986, so the session is expired — closable by anyone, and
+/// As a time that is 1986, so the session is expired — closable by anyone (into
+/// its payer), and
 /// refused by Execute (`time_tests::a_slot_valued_session_is_refused`).
 #[test]
 fn a_v2_session_with_a_slot_for_an_expiry_is_closable() {
@@ -385,14 +474,10 @@ fn a_v2_session_with_a_slot_for_an_expiry_is_closable() {
         .svm
         .airdrop(&stranger.pubkey(), 1_000_000_000)
         .unwrap();
+    let payer = context.payer.pubkey();
     send(
         &mut context,
-        close_ix(
-            program_id,
-            session_pda,
-            stranger.pubkey(),
-            stranger.pubkey(),
-        ),
+        close_ix(program_id, session_pda, stranger.pubkey(), payer),
         &stranger,
     )
     .expect("a slot-valued v2 session is expired");

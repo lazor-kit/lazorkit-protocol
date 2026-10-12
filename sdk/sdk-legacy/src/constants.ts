@@ -109,8 +109,24 @@ export const ACCOUNT_DISCRIMINATOR = {
   TREASURY_SHARD: 0x27,
 } as const;
 
-/** Account layout revision within the current protocol version. */
+/**
+ * The first account layout revision within the current protocol version, and
+ * still the one wallets, deferred executions, the protocol config and fee
+ * records are written at.
+ */
 export const CURRENT_ACCOUNT_VERSION = 1;
+
+/**
+ * The layout revision from which an authority or a session records the
+ * account that paid its rent: 32 bytes after its fixed part (an authority's
+ * key material, a session's 80-byte header) and before its policy. Every
+ * instruction that closes one refunds only to that account (error 3039
+ * otherwise). Mirrors program/src/state/rent_payer.rs.
+ */
+export const RENT_PAYER_LAYOUT_VERSION = 2;
+
+/** Bytes a recorded rent payer takes. */
+export const RENT_PAYER_LEN = 32;
 
 /** Protocol major version. Mirrors PROTOCOL_VERSION in program/src/state/mod.rs. */
 export const PROTOCOL_VERSION = 2;

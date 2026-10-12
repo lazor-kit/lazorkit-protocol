@@ -3,7 +3,11 @@ use crate::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
     error::AuthError,
-    state::{authority::AuthorityAccountHeader, session::SessionAccount},
+    state::{
+        authority::AuthorityAccountHeader,
+        rent_payer::{refund_disposition, Refund},
+        session::SessionAccount,
+    },
 };
 use pinocchio::{
     account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
@@ -11,15 +15,20 @@ use pinocchio::{
 
 /// Process the RevokeSession instruction.
 ///
-/// Closes a session account early (before expiry), refunding rent to a specified destination.
-/// Only Owner or Admin can revoke.
+/// Closes a session account early (before expiry), refunding its rent to the
+/// account that paid it. Only Owner or Admin can revoke.
+///
+/// From layout revision 2 a session records its rent payer, and any other
+/// refund destination is refused with `RefundDestinationMismatch`; a session
+/// written before then records none and refunds where the signer says (see
+/// `state::rent_payer`).
 ///
 /// # Accounts:
 /// 1. `[signer]` Payer
 /// 2. `[]` Wallet PDA
 /// 3. `[writable]` Admin/Owner Authority PDA (counter incremented for Secp256r1)
 /// 4. `[writable]` Session PDA (closed)
-/// 5. `[writable]` Refund destination
+/// 5. `[writable]` Refund destination: the session's recorded rent payer
 /// 6. `[optional]` Auth extra (Ed25519: signer keypair | Secp256r1: sysvar_instructions)
 ///
 /// # Instruction Data (after discriminator):
@@ -121,8 +130,15 @@ pub fn process(
         return Err(ProgramError::InvalidAccountData);
     }
 
+    // The rent goes back to whoever paid it, recorded at creation; a session
+    // from before layout revision 2 records nobody (state::rent_payer).
+    let refund = refund_disposition(session_data, refund_dest)?;
+
     // Close the session account — zero data and drain lamports
     session_data.fill(0);
+    if refund == Refund::Keep {
+        return Ok(());
+    }
 
     let session_lamports = session_pda.lamports();
     let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };

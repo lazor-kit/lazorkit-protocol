@@ -11,8 +11,9 @@ use pinocchio::{
 use crate::{
     error::ProtocolError,
     state::{
+        layout_version,
         protocol_config::{ProtocolConfig, MAX_PROTOCOL_FEE_LAMPORTS, PROTOCOL_INIT_AUTHORITY},
-        AccountDiscriminator, CURRENT_ACCOUNT_VERSION,
+        AccountDiscriminator,
     },
     utils::initialize_pda_account,
 };
@@ -122,7 +123,7 @@ pub fn process(
     // Write config data
     let config = ProtocolConfig {
         discriminator: AccountDiscriminator::ProtocolConfig as u8,
-        version: CURRENT_ACCOUNT_VERSION,
+        version: layout_version::PROTOCOL_CONFIG,
         bump: config_bump,
         enabled: 1,
         num_shards,

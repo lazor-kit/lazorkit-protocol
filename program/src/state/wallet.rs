@@ -5,14 +5,23 @@ use no_padding::NoPadding;
 #[repr(C, align(8))]
 #[derive(NoPadding)]
 pub struct WalletAccount {
-    /// Account discriminator (must be `1` for Wallet).
+    /// Account discriminator (`AccountDiscriminator::Wallet`).
     pub discriminator: u8,
     /// Bump seed for this PDA.
     pub bump: u8,
-    /// Account Version.
+    /// Layout revision (`state::layout_version`).
     pub version: u8,
-    /// Padding for alignment.
-    pub _padding: [u8; 1],
+    /// The canonical bump of this wallet's vault PDA, `[VAULT, wallet]`, or 0
+    /// when the wallet does not record it. This byte was padding, so every
+    /// wallet created before it was used holds 0; read it only through
+    /// [`Self::vault_bump`].
+    ///
+    /// `Execute` and `ExecuteDeferred` sign for the vault with this bump and
+    /// check the vault's address with one hash of the seeds, rather than
+    /// searching for the bump on every call (1,500 CU per bump tried). 0 falls
+    /// back to the search, which is also right for the one wallet in 2^255
+    /// whose canonical bump really is 0: no layout revision is needed.
+    pub vault_bump: u8,
     /// How many authorities on this wallet hold rank Owner.
     ///
     /// A wallet is born with one. Owners may add and remove Owners, and this
@@ -33,6 +42,21 @@ impl WalletAccount {
 
     /// Byte offset of [`Self::owner_count`] within the account.
     pub const OWNER_COUNT_OFFSET: usize = 4;
+
+    /// Byte offset of [`Self::vault_bump`] within the account.
+    pub const VAULT_BUMP_OFFSET: usize = 3;
+
+    /// The vault's canonical bump, when this wallet records it; `None` for a
+    /// wallet created before the byte was used (it holds 0). A nonzero value
+    /// was written only by `CreateWallet`, from its own bump search, so it is
+    /// the canonical bump. Call [`Self::check`] first.
+    #[inline]
+    pub fn vault_bump(data: &[u8]) -> Option<u8> {
+        match data[Self::VAULT_BUMP_OFFSET] {
+            0 => None,
+            bump => Some(bump),
+        }
+    }
 
     /// Read the owner count out of raw account data.
     ///
@@ -63,6 +87,7 @@ impl WalletAccount {
             data,
             crate::state::AccountDiscriminator::Wallet,
             crate::state::version_offset::WALLET,
+            crate::state::layout_version::WALLET,
             Self::MIN_LEN,
         )
     }

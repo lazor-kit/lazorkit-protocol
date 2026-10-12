@@ -20,7 +20,10 @@ use self::webauthn::{base64url_encode_no_pad, extract_top_level_string_field, Au
 use crate::auth::traits::Authenticator;
 use crate::utils::get_stack_height;
 
-/// Maximum age (in slots) for a Secp256r1 signature to be considered valid (~60 seconds).
+/// Maximum age (in slots) for a Secp256r1 signature to be considered valid: the
+/// same 150-slot horizon as a recent blockhash. Slot time is the cluster's, not
+/// a constant: about 33–34 s on devnet and mainnet as of 2026-10, not the 60 s
+/// that 400 ms slots would give.
 const MAX_SLOT_AGE: u64 = 150;
 
 /// Authenticator implementation for Secp256r1 (WebAuthn).
@@ -101,16 +104,18 @@ impl Authenticator for Secp256r1Authenticator {
         // wallet has no monotonic counter of its own to fold into the challenge.
         //
         // What bounds it is the slot check above. A replayed signature must
-        // still be inside MAX_SLOT_AGE, so the attacker has ~60 seconds to
-        // remove and re-add the authority — and removing one already requires
-        // Owner or Admin rank, which is enough privilege to do worse directly.
+        // still be inside MAX_SLOT_AGE, so the attacker has about 33–34 seconds
+        // (150 slots at today's slot times) to remove and re-add the authority
+        // — and removing one already requires Owner or Admin rank, which is
+        // enough privilege to do worse directly.
         let expected_counter = next_counter(header.counter)?;
         if submitted_counter != expected_counter {
             return Err(AuthError::SignatureReused.into());
         }
 
-        // Secp256r1 on-chain data layout (fixed 145 bytes total):
+        // Secp256r1 on-chain data layout (key material, the first 145 bytes):
         //   [Header(48)] [credential_id_hash(32)] [Pubkey(33)] [rpIdHash(32)]
+        // then, from layout revision 2, the rent payer (32), then any policy.
         let pubkey_offset = header_size + 32; // 80
         let rp_id_hash_offset = pubkey_offset + 33; // 113
         if auth_data.len() < rp_id_hash_offset + 32 {

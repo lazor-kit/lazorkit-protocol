@@ -26,7 +26,7 @@
 mod common;
 
 use common::*;
-use lazorkit_program::state::{AccountDiscriminator, CURRENT_ACCOUNT_VERSION, PROTOCOL_VERSION};
+use lazorkit_program::state::{layout_version, AccountDiscriminator, PROTOCOL_VERSION};
 use solana_sdk::{account::Account, instruction::Instruction, pubkey::Pubkey};
 
 /// `ProtocolError::AccountVersionMismatch`
@@ -173,12 +173,13 @@ fn a_future_layout_version_is_rejected_with_its_own_error() {
         "precondition: wallet carries the v2 discriminator"
     );
     assert_eq!(
-        data[2], CURRENT_ACCOUNT_VERSION,
+        data[2],
+        layout_version::WALLET,
         "precondition: wallet is at the current layout revision"
     );
 
     // Same discriminator, layout revision this binary does not implement.
-    data[2] = CURRENT_ACCOUNT_VERSION + 1;
+    data[2] = layout_version::WALLET + 1;
 
     context
         .svm
@@ -215,18 +216,20 @@ fn accounts_are_created_at_the_current_version() {
     let mut context = setup_test();
     let wallet = create_ed25519_wallet(&mut context, 0);
 
-    for (name, key, disc, version_offset) in [
+    for (name, key, disc, version_offset, version) in [
         (
             "wallet",
             wallet.wallet_pda,
             AccountDiscriminator::Wallet as u8,
             Some(2usize),
+            layout_version::WALLET,
         ),
         (
             "authority",
             wallet.owner_auth_pda,
             AccountDiscriminator::Authority as u8,
             Some(4),
+            layout_version::AUTHORITY,
         ),
     ] {
         let data = context
@@ -237,7 +240,7 @@ fn accounts_are_created_at_the_current_version() {
         assert_eq!(data[0], disc, "{name} has the wrong discriminator");
         if let Some(offset) = version_offset {
             assert_eq!(
-                data[offset], CURRENT_ACCOUNT_VERSION,
+                data[offset], version,
                 "{name} was created at the wrong layout revision"
             );
         }
@@ -254,7 +257,7 @@ fn accounts_are_created_at_the_current_version() {
         .expect("ProtocolConfig missing")
         .data;
     assert_eq!(config[0], AccountDiscriminator::ProtocolConfig as u8);
-    assert_eq!(config[1], CURRENT_ACCOUNT_VERSION);
+    assert_eq!(config[1], layout_version::PROTOCOL_CONFIG);
 }
 
 fn lamports_of(context: &TestContext, key: &Pubkey) -> u64 {

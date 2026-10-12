@@ -6,6 +6,132 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — a closed account's rent goes back to whoever paid it (program and SDKs; layout revision 2; needs a review before the mainnet deploy)
+
+**Program** (both v2 artifacts change: devnet `f2779b66…` → `e7930c8b…`,
+mainnet `142aad9e…` → `b242e187…`, 153752 → 158096 bytes; both sunset
+artifacts change too: mainnet-v1 `7a86c87c…` → `353dfee3…`, devnet-v1
+`a84a234e…` → `2f0fae7e…`, 45936 → 46872 bytes. The devnet programdata needs an
+extend before the upgrade.)
+
+- Every account the program creates is funded by the instruction's `payer` —
+  on a sponsored flow the relayer — but `RevokeSession`, `CloseExpiredSession`,
+  `RemoveAuthority` and `TransferOwnership` refunded the rent to a destination
+  the caller chose. An authority and a session now record the account that
+  paid their rent, and those four refund only to it: any other destination is
+  refused with the new **3039 `RefundDestinationMismatch`**, whoever signs or
+  pays for the close. `CloseExpiredSession` stays permissionless; its rent goes
+  to the recorded payer, not to the caller.
+- **Layout revision 2** (`version` 2) for authorities and sessions: the 32-byte
+  rent payer sits after the fixed part (an authority's key material, a
+  session's 80-byte header) and before the policy, so no field an existing
+  reader uses moves but the policy's start: 80 → 112 (Ed25519), 145 → 177
+  (Secp256r1), 80 → 112 (session). `check_header` now accepts every revision
+  from 1 to a type's newest (`state::layout_version`); `PolicyLocation::of`,
+  `Execute`'s session branch (which now checks the session's header) and
+  `CloseExpiredSession` read the revision, and refuse one they do not know
+  (4013). New `state::rent_payer`.
+- **Closing never depends on the payer.** If the recorded payer has become
+  executable (its key holder deployed a program at it), a cluster without
+  SIMD-0162 refuses to credit it, which would let whoever paid for a Delegate
+  or a session keep it past the Owner's `RemoveAuthority` or `RevokeSession`.
+  In that case the close goes ahead and the rent stays in the dead account.
+  Creation records only an ordinary system account as the payer
+  (`IllegalOwner` otherwise; a pre-funded PDA skips the System transfer that
+  would require it). Found in the review of this change.
+- **Accounts from before revision 2** (devnet's today, and v1 accounts in the
+  sunset binary) record no payer and keep the old rule — the destination the
+  instruction names. Closing must stay possible (it is how a lost key is cut
+  off), a refund to the vault would reach the owner just the same, and they
+  cannot be recreated in that shape. Mainnet v2 has none.
+- `ExecuteDeferred` and `ReclaimDeferred` already refunded only to the
+  DeferredExec's stored payer; a wrong destination is now reported as 3039
+  (was `InvalidAccountData` and 3017). `ReclaimDeferred` signed by anyone but
+  the stored payer is still 3017.
+- Rent per authority and session grows by 32 bytes (222,720 lamports),
+  returned on close.
+- Tests: `program/tests/rent_refund_tests.rs` (every close path: the recorded
+  payer refunded in full, any other destination refused with the account
+  intact, revision-1 accounts closing anywhere, revision-1 policies still
+  binding, an unknown revision refused, a payer turned executable unable to
+  block a revoke, a removal or a close, a program-owned payer refused), `close_expired_session_tests.rs`
+  updated (a stranger closes into the payer, not into itself), and
+  `state::rent_payer` / `state::policy` unit tests.
+
+**SDKs** (`@lazorkit/sdk-legacy` 2.1.0, `@lazorkit/sdk` 1.0.0-rc.8; additive)
+
+- `revokeSession`, `removeAuthority`, `transferOwnership` and their
+  `prepare*` halves read the account being closed and use its recorded payer
+  when `refundDestination` is left out (before: `payer`), and throw
+  `RefundDestinationMismatchError` for another destination. New
+  `rentRefundDestination(account, fallback, requested?, opts?)` and
+  `closeExpiredSession({ caller, sessionPda, refundDestination? })` on both
+  clients. A passkey flow reads the payer at its challenge reads' commitment
+  and floor, so `transferOwnership` reads the signer's own authority twice.
+- Decoders: `rentPayer` and `policyOffset` on authorities, `rentPayer` and
+  `actions` on sessions (`AuthorityAccount`/`SessionAccount` in sdk-legacy,
+  `decodeAuthorityAccount`/`decodeSessionAccount` in the kit SDK);
+  `recordedRentPayer`, `authorityPolicyOffset`, `sessionActionsOffset`,
+  `authorityKeyEnd`; `RENT_PAYER_LAYOUT_VERSION`, `RENT_PAYER_LEN`.
+  `findAuthoritiesByWallet` reads a revision-2 policy where it now starts.
+- `@lazorkit/sdk-legacy/approval`: the account decoders accept revision 2
+  (`rentPayer` on `AuthorityFacts`/`SessionFacts`), and `describeApproval`
+  refuses a `revokeSession` or `removeAuthority` request whose refund is not
+  the recorded payer (`request-invalid` / `refund-not-rent-payer`, a new
+  member of `ApprovalInvalidReason`); descriptions carry `rentPayer`.
+- 3039 in sdk-legacy's `ERROR_NAMES`.
+- **An SDK from before this release** still builds every instruction the same
+  way, and defaults the refund to `payer`, which is right whenever the account
+  was created by the same payer (a relayer closing what it sponsored). It does
+  not know revision 2: it reads a revision-2 Delegate's policy and a session's
+  actions 32 bytes early, and the approval decoders of sdk-legacy 2.0.0 return
+  `null` for revision-2 authorities and sessions, so a portal on 2.0.0 refuses
+  every typed request from a wallet created after the upgrade. Upgrade the
+  SDKs and the portal with the program.
+- Tests: `sdk/sdk-kit/tests/rent-refund.test.ts`,
+  `tests-sdk/tests/22-rent-refund-unit.test.ts` (no validator),
+  `tests-sdk/tests/23-rent-refund.test.ts` and
+  `tests-sdk-kit/tests/19-revoke-session.test.ts` (validator; the latter is
+  the kit SDK's first `revokeSession` test), decoder parity for revision 2 in
+  `sdk/sdk-kit/tests/accounts.test.ts`, and approval cases in
+  `20-approval-unit.test.ts`. `21-approval-e2e.test.ts` no longer refunds to
+  random accounts: its revokes and removals refund to the recorded payer while
+  the transaction payer varies, and a random refund is refused by the SDK.
+- `scripts/rehearse/close-expired-sessions.cjs` sends a recording session's
+  rent to its payer (`PAID_BY` limits a run to one payer's sessions).
+
+### Changed — Execute checks its PDAs with stored bumps (program; needs a review before the mainnet deploy)
+
+- `Execute` and `ExecuteDeferred` ran up to four `find_program_address`
+  searches (the protocol config, the treasury shard, the payer's fee record,
+  the vault), 1,500 CU for every bump tried. Each address is now checked with
+  one `sol_sha256` of its seeds and the bump the program stored when it created
+  the account (`utils::is_program_address`; the runtime's on-curve check is
+  left out, which is sound only for a bump the program's own search found for
+  the same seeds, and the stored bumps are exactly that). A wallet now records
+  its vault's bump in what was a padding byte; 0 there (every wallet created
+  before) falls back to the search, so the wallet stays at layout revision 1.
+  A system-owned config (before `InitializeProtocol`), a config this binary
+  cannot read, and a first-time payer's fee record still search.
+- Measured over 24 fixed wallets and payers (litesvm, one System transfer, fee
+  charged), mean (min–max) before → after: Ed25519 Owner Execute 17,809
+  (14,997–26,997) → 5,302; with fees disabled 8,929 → 3,325; session 18,243 →
+  5,757; passkey 24,106 → 10,907; ExecuteDeferred 18,848 → 5,620. The spread
+  across wallets is gone. `program/tests/execute_compute_tests.rs` pins each
+  mean; `program/tests/stored_bump_tests.rs` tries another wallet's vault, a
+  corrupted vault bump, another payer's fee record and look-alike config and
+  shard accounts.
+
+### Fixed — docs and comments
+
+- The Secp256r1 signature window, 150 slots, is about 33–34 s on today's
+  clusters, not 60 (`auth/secp256r1/mod.rs`, both SDK READMEs). The constant
+  is unchanged.
+- `deploy/kora/kora.{mainnet,devnet}.toml`: `ComputeBudget` is allowed for the
+  compute-budget instructions an app or wallet adds; the SDKs add none.
+- `sdk/sdk-kit/README.md` was still at rc.1 and listed `revokeSession` as
+  untested.
+
 ### Added — typed approval requests: `@lazorkit/sdk-legacy/approval` (SDK only; the program is unchanged)
 
 Ships in the same `@lazorkit/sdk-legacy` 2.0.0 as the time-based expiry

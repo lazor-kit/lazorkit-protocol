@@ -1153,6 +1153,63 @@ describe('describeApproval', () => {
       expect(A.describeApproval(remove(), view({ target: null }), opts)).toMatchObject({ reason: 'target-missing' });
     });
   });
+
+  describe('a rent payer recorded at layout revision 2', () => {
+    const session = addr(new Uint8Array(32).fill(0x44));
+    const target = addr(new Uint8Array(32).fill(0x77));
+    const sponsor = addr(new Uint8Array(32).fill(0x99));
+    /** The same account at revision 2: the payer after the fixed part, then the policy. */
+    const recording = (a: A.AccountSnapshot, rentPayer: string): A.AccountSnapshot => {
+      const d = Buffer.from(a.data);
+      const isSession = d[0] === 0x23;
+      const fixed = isSession ? 80 : d[1] === 0 ? 80 : 145;
+      const out = Buffer.concat([d.subarray(0, fixed), Buffer.from(new PublicKey(rentPayer).toBytes()), d.subarray(fixed)]);
+      out[isSession ? 2 : 4] = 2;
+      return snap(a.owner, out, a.lamports);
+    };
+    const revokeTo = (refund: string): A.RevokeSessionRequest => ({ ...base, kind: 'revokeSession', args: { session, refund } });
+    const removeTo = (refund: string): A.RemoveAuthorityRequest => ({ ...base, kind: 'removeAuthority', args: { target, refund } });
+
+    it('decodes it, and reads the actions and the policy after it', () => {
+      const s = A.decodeSessionAccount(recording(sessionSnap(wallet, NOW, solLimit(5n)), sponsor), PID)!;
+      expect(s.rentPayer).toBe(sponsor);
+      expect(Buffer.from(s.actions)).toEqual(Buffer.from(solLimit(5n)));
+      const t = A.decodeAuthorityAccount(recording(authoritySnap({ wallet, passkey: false, role: 2, policy: solLimit(5n) }), sponsor), PID)!;
+      expect(t.rentPayer).toBe(sponsor);
+      expect(Buffer.from(t.policy)).toEqual(Buffer.from(solLimit(5n)));
+      const p = A.decodeAuthorityAccount(recording(authoritySnap({ wallet, credHash }), sponsor), PID)!;
+      expect(p.rentPayer).toBe(sponsor);
+      expect(p.policy).toHaveLength(0);
+      // Revision 1 records none; an unknown revision is not decoded at all.
+      expect(A.decodeSessionAccount(sessionSnap(wallet, NOW), PID)!.rentPayer).toBeNull();
+      const future = recording(sessionSnap(wallet, NOW), sponsor);
+      future.data[2] = 3;
+      expect(A.decodeSessionAccount(future, PID)).toBeNull();
+    });
+
+    it('revokeSession: the refund must be the recorded payer', () => {
+      const live = recording(sessionSnap(wallet, NOW + 600n), sponsor);
+      const d = ok(A.describeApproval(revokeTo(sponsor), view({ session: live }), opts)) as A.RevokeSessionDescription;
+      expect(d).toMatchObject({ rentPayer: sponsor, refund: sponsor, refundIsPayer: false });
+      expect(A.describeApproval(revokeTo(payer), view({ session: live }), opts)).toMatchObject({ reason: 'refund-not-rent-payer' });
+      // Revision 1: anywhere but a program account, as before.
+      const legacy = ok(A.describeApproval(revokeTo(payer), view({ session: sessionSnap(wallet, NOW + 600n) }), opts)) as A.RevokeSessionDescription;
+      expect(legacy.rentPayer).toBeNull();
+    });
+
+    it('removeAuthority: the refund must be the recorded payer', () => {
+      const t = recording(authoritySnap({ wallet, passkey: false, role: 2, policy: solLimit(5n) }), sponsor);
+      const d = ok(A.describeApproval(removeTo(sponsor), view({ target: t }), opts)) as A.RemoveAuthorityDescription;
+      expect(d).toMatchObject({ rentPayer: sponsor, refund: sponsor });
+      expect(d.targetPolicy!.assets[0].lifetime!.amount).toBe(5n);
+      expect(A.describeApproval(removeTo(payer), view({ target: t }), opts)).toMatchObject({ reason: 'refund-not-rent-payer' });
+    });
+
+    it('a recording signer authority still signs', () => {
+      const d = ok(A.describeApproval(revokeTo(sponsor), view({ authority: recording(authoritySnap({ wallet, credHash }), sponsor), session: recording(sessionSnap(wallet, NOW + 600n), sponsor) }), opts));
+      expect(d.kind).toBe('revokeSession');
+    });
+  });
 });
 
 // ─── 5. Bundle ────────────────────────────────────────────────────
