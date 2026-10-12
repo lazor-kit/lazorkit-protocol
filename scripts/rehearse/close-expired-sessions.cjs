@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-// Close expired sessions and collect their rent.
+// Close expired sessions and return their rent.
 //
 // `CloseExpiredSession` (instruction 18) is permissionless once a session is
-// past `expires_at`, and the caller names the refund destination — so this is a
-// keeper, not an admin tool. Anyone can run it; the first to arrive keeps the
-// rent. Run it yourself if you would rather that be you.
+// past `expires_at`, so this is a keeper, not an admin tool. A v2 session at
+// layout revision 2 records the account that paid its rent, and the program
+// sends the rent there and nowhere else (3039 otherwise): a relayer runs this
+// to sweep the sessions it sponsored (`PAID_BY` limits the run to them). A
+// session that records no payer — v1, or v2 before revision 2 — goes to
+// whoever arrives first with a destination of their choice (`REFUND`).
 //
 // It closes **v1** sessions as well as v2 ones. That is where the money is
 // today: the upgrade leaves v1 sessions that no v1 instruction can reach any
@@ -16,8 +19,11 @@
 // Env:
 //   RPC_URL     default https://api.devnet.solana.com
 //   PROGRAM_ID  the upgraded (v2) program — instruction 18 only exists there
-//   KEEPER      keypair file; signs, pays the fees, and receives the rent
-//   REFUND      where the rent goes (default: the keeper)
+//   KEEPER      keypair file; signs and pays the fees
+//   REFUND      where the rent of a session that records no payer goes
+//               (default: the keeper); a recording session's rent always goes
+//               to its recorded payer
+//   PAID_BY     only close sessions whose recorded payer is this key
 //   BATCH       sessions per transaction (default 12)
 'use strict';
 const fs = require('fs');
@@ -45,6 +51,16 @@ const DISC_SESSION_V2 = 0x23;
 const FILTER_BYTES = { [DISC_SESSION_V1]: '4', [DISC_SESSION_V2]: 'c' };
 const OFF_EXPIRES_AT = 72;
 const SESSION_HEADER = 80;
+// Layout revision 2 records the rent payer at 80..112 (program/src/state/rent_payer.rs).
+const OFF_VERSION = 2;
+const RENT_PAYER_REVISION = 2;
+
+/** The rent payer a v2 session records, or null (v1, or v2 revision 1). */
+function recordedPayer(disc, data) {
+  if (disc !== DISC_SESSION_V2 || data[OFF_VERSION] < RENT_PAYER_REVISION) return null;
+  if (data.length < SESSION_HEADER + 32) return null;
+  return new PublicKey(data.subarray(SESSION_HEADER, SESSION_HEADER + 32));
+}
 
 const sol = (lamports) => (lamports / 1e9).toFixed(6);
 
@@ -66,10 +82,12 @@ function closeIx(caller, session, refund) {
     Uint8Array.from(JSON.parse(fs.readFileSync(process.env.KEEPER, 'utf8'))),
   );
   const refund = process.env.REFUND ? new PublicKey(process.env.REFUND) : keeper.publicKey;
+  const paidBy = process.env.PAID_BY ? new PublicKey(process.env.PAID_BY) : null;
 
   console.log(`program   ${PROGRAM_ID.toBase58()}`);
   console.log(`keeper    ${keeper.publicKey.toBase58()}`);
-  console.log(`refund    ${refund.toBase58()}`);
+  console.log(`refund    ${refund.toBase58()} (sessions that record no payer)`);
+  if (paidBy) console.log(`paid by   ${paidBy.toBase58()} only`);
 
   // The program compares a v2 session's expiry with the clock's Unix time and a
   // v1 session's (a slot, as v1 wrote it) with its slot; read both from one
@@ -98,7 +116,14 @@ function closeIx(caller, session, refund) {
         live++;
         continue;
       }
-      found.push({ pubkey, lamports: account.lamports, version: disc === DISC_SESSION_V1 ? 1 : 2 });
+      const payer = recordedPayer(disc, account.data);
+      if (paidBy && !(payer && payer.equals(paidBy))) continue;
+      found.push({
+        pubkey,
+        lamports: account.lamports,
+        version: disc === DISC_SESSION_V1 ? 1 : 2,
+        refund: payer ?? refund,
+      });
     }
   }
 
@@ -113,18 +138,17 @@ function closeIx(caller, session, refund) {
   if (!EXECUTE) {
     console.log(`\ndry run — pass --execute to collect ${sol(sum(found))} SOL.`);
     for (const s of found.slice(0, 10)) {
-      console.log(`  ${s.pubkey.toBase58()}  v${s.version}  ${sol(s.lamports)} SOL`);
+      console.log(`  ${s.pubkey.toBase58()}  v${s.version}  ${sol(s.lamports)} SOL  → ${s.refund.toBase58()}`);
     }
     if (found.length > 10) console.log(`  … and ${found.length - 10} more`);
     return;
   }
 
-  const before = await connection.getBalance(refund);
   let closed = 0;
   for (let i = 0; i < found.length; i += BATCH) {
     const batch = found.slice(i, i + BATCH);
     const tx = new Transaction();
-    for (const s of batch) tx.add(closeIx(keeper.publicKey, s.pubkey, refund));
+    for (const s of batch) tx.add(closeIx(keeper.publicKey, s.pubkey, s.refund));
     try {
       const signature = await sendAndConfirmTransaction(connection, tx, [keeper], {
         commitment: 'confirmed',
@@ -138,10 +162,7 @@ function closeIx(caller, session, refund) {
     }
   }
 
-  const after = await connection.getBalance(refund);
-  console.log(
-    `\nclosed ${closed}/${found.length} session(s); ${refund.toBase58()} ${sol(before)} → ${sol(after)} SOL`,
-  );
+  console.log(`\nclosed ${closed}/${found.length} session(s)`);
 })().catch((e) => {
   console.error(e.message ?? e);
   process.exit(1);

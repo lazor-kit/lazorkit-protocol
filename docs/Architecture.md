@@ -53,6 +53,7 @@ erDiagram
     WALLET {
         bytes32 user_seed PK
         u8 bump
+        u8 vault_bump "0 = not recorded"
     }
     VAULT {
         pubkey wallet PK
@@ -65,11 +66,13 @@ erDiagram
         u8 role "rank: 0=Owner | 1=Admin | 2=Delegate"
         u16 policy_len "spending policy bytes, 0 = unbounded"
         u32 counter "Secp256r1 odometer"
+        pubkey rent_payer "rent refund target (layout revision 2)"
     }
     SESSION {
         pubkey wallet PK
         pubkey session_key PK
         u64 expires_at "Unix seconds"
+        pubkey rent_payer "rent refund target (layout revision 2)"
         bytes actions "optional spending limits"
     }
     DEFERRED_EXEC {
@@ -211,11 +214,19 @@ Seeds: `["lk2:wallet", user_seed]`
 pub struct WalletAccount {
     pub discriminator: u8,   // 0x21
     pub bump: u8,
-    pub version: u8,
-    pub _padding: [u8; 1],
+    pub version: u8,         // layout revision: 1
+    pub vault_bump: u8,      // the vault's canonical bump; 0 = not recorded
     pub owner_count: u32,    // authorities on this wallet holding rank Owner
 }
 ```
+
+`vault_bump` was padding. `CreateWallet` now writes the bump its own search
+found for `["lk2:vault", wallet]`, and `Execute` and `ExecuteDeferred` check the
+vault's address with one hash of the seeds and that bump instead of searching
+for it on every call (see [Stored bumps](#stored-bumps)). A wallet created
+before holds 0 there and is searched for, as before; 0 is also what the one
+wallet in 2^255 whose canonical bump really is 0 would hold, and the search is
+right for it too. So the wallet's layout revision stays 1.
 
 `owner_count` is what refuses the removal of the last Owner. A wallet with no
 Owner is not frozen — its Admins and Delegates keep spending — but nothing can
@@ -225,7 +236,8 @@ ever be added or revoked again, so a lost device would stay valid forever.
 
 Seeds: `["lk2:authority", wallet_pubkey, id_hash]`
 
-48-byte fixed header + auth-type-specific data + an optional policy:
+48-byte fixed header + auth-type-specific data + (from layout revision 2) the
+rent payer + an optional policy:
 
 ```rust
 #[repr(C, align(8))]
@@ -245,9 +257,15 @@ pub struct AuthorityAccountHeader {
 
 Variable data after header:
 
-- **Ed25519**: `[pubkey(32)]` — 80 bytes, plus `policy_len` bytes of policy.
+- **Ed25519**: `[pubkey(32)]` — 80 bytes of fixed part.
 - **Secp256r1**: `[credential_id_hash(32)][compressed_pubkey(33)][rpIdHash(32)]` —
-  145 bytes, plus `policy_len` bytes of policy.
+  145 bytes of fixed part.
+
+Then, from layout revision 2 (`version` 2, every authority created from this
+build on), the 32-byte **rent payer**: the account that paid the authority's
+rent. Then `policy_len` bytes of policy. So an Ed25519 authority is 112 bytes
+plus its policy, a Secp256r1 one 177 (80 and 145 in revision 1). See
+[Rent refunds](#rent-refunds).
 
 `role` is a **rank**: what this authority may *manage*. The policy is what it may
 *spend*. They are independent, and conflating them is what made "Spender" a name
@@ -268,7 +286,7 @@ authority seed.
 
 `rpIdHash` is pre-computed at authority creation (SHA-256 of the rpId string) and stored directly, eliminating one `sol_sha256` syscall per Execute.
 
-### Session PDA — 80+ bytes
+### Session PDA — 80+ bytes (112+ from layout revision 2)
 
 Seeds: `["lk2:session", wallet_pubkey, session_key]`
 
@@ -294,7 +312,12 @@ decades past, so such a session is expired: refused by `Execute`, closable by
 anyone through `CloseExpiredSession`. A v1 session, which `CloseExpiredSession`
 also accepts, stores a slot and is still read as one.
 
-Optional **actions** buffer appended after the header (variable length, max 2048 bytes). Each action: 11-byte header `[type(1)][data_len(2 LE)][expires_at(8 LE)]` + type-specific data; an action's `expires_at` is Unix seconds, 0 for none of its own. Max 16 actions per session or policy, whitelist and blacklist entries included; naming a mint takes one.
+From layout revision 2 the 32-byte **rent payer** follows the header (80..112),
+the account that paid the session's rent ([Rent refunds](#rent-refunds)).
+
+Optional **actions** buffer appended after the header and the rent payer
+(variable length, max 2048 bytes; at 80 in a revision-1 session, at 112 from
+revision 2). Each action: 11-byte header `[type(1)][data_len(2 LE)][expires_at(8 LE)]` + type-specific data; an action's `expires_at` is Unix seconds, 0 for none of its own. Max 16 actions per session or policy, whitelist and blacklist entries included; naming a mint takes one.
 
 | Type | ID | Data | Description |
 |---|---|---|---|
@@ -413,6 +436,42 @@ paths that move funds out of a vault: a single admin write froze every user's
 funds, and nothing in the protocol could undo it. Skipping is safe because the
 config PDA address is pinned first, so "not configured" cannot be spoofed by
 passing a different account.
+
+### Rent refunds
+
+Every account the program creates is funded by the instruction's `payer`,
+which on a sponsored flow is the relayer, not the wallet's owner. From layout
+revision 2 an **authority** and a **session** record that account (32 bytes
+after the fixed part, before the policy), and every instruction that closes
+one refunds only to it, whoever signs or pays for the close; any other
+destination fails with **3039 `RefundDestinationMismatch`**:
+
+| Closes | Instruction | Refunds to |
+|---|---|---|
+| a session | `RevokeSession` (9), `CloseExpiredSession` (18, anyone may call it) | the session's recorded payer |
+| an authority | `RemoveAuthority` (2), `TransferOwnership` (3, the Owner it replaces) | the authority's recorded payer |
+| a DeferredExec | `ExecuteDeferred` (7), `ReclaimDeferred` (8) | its stored payer, as it always did (now reported as 3039 too) |
+| v1 wallet + authority | `MigrateWallet` (17, sunset binary) | the destination the v1 Owner signs |
+
+A wallet, a `FeeRecord` (the payer's own), the `ProtocolConfig` and the
+treasury shards are never closed.
+
+The signed payloads are unchanged — `RevokeSession` and `RemoveAuthority` still
+sign `account ‖ refund`, `TransferOwnership` `… ‖ payer ‖ refund` — so a
+client names the recorded payer as the refund and the passkey signs that. Both
+SDKs read it from the account and fill it in (`rentRefundDestination`), and
+refuse another destination before building anything.
+
+**Accounts written before revision 2** — revision-1 authorities and sessions
+(devnet's, today), and v1 accounts in the sunset binary — record no payer and
+keep the old rule: the destination the closing instruction names (for
+`CloseExpiredSession`, the caller's choice). Nothing on chain says who paid
+them; a refund to the vault would reach the wallet's owner just the same; and
+refusing to close them would make a lost key unrevocable. They cannot be
+recreated in that shape, so the set under the old rule only shrinks.
+
+Revision 2 costs 32 bytes of rent per authority and session (222,720
+lamports), returned on close like the rest.
 
 ## Auth payload layout (Secp256r1)
 
@@ -754,14 +813,15 @@ Wallet operations:
 |---|---|---|
 | 0 | CreateWallet | Create wallet + vault + first authority |
 | 1 | AddAuthority | Add Ed25519/Secp256r1 authority at a rank, with an optional policy. **Wallet account writable** |
-| 2 | RemoveAuthority | Remove authority; refund rent. **Wallet account writable** |
-| 3 | TransferOwnership | Atomic owner swap |
+| 2 | RemoveAuthority | Remove authority; refund its rent to its recorded payer. **Wallet account writable** |
+| 3 | TransferOwnership | Atomic owner swap; the old Owner's rent goes to its recorded payer |
 | 4 | Execute | Execute compact instructions via CPI with vault signing |
 | 5 | CreateSession | Create session key (optional actions) |
 | 6 | Authorize | Deferred TX1 — store instruction/account hashes |
 | 7 | ExecuteDeferred | Deferred TX2 — execute and close |
-| 8 | ReclaimDeferred | Close an expired DeferredExec, refund rent |
-| 9 | RevokeSession | Close a session early, refund rent |
+| 8 | ReclaimDeferred | Close an expired DeferredExec, refund rent to its stored payer |
+| 9 | RevokeSession | Close a session early, refund its rent to its recorded payer |
+| 18 | CloseExpiredSession | Anyone closes an expired session; its rent goes to its recorded payer |
 
 Protocol admin instructions (admin-only):
 
@@ -1133,33 +1193,48 @@ fail the transaction:
 
 ## Compute cost
 
-See `docs/` for benchmarks. Top-line numbers on hot paths:
+Measured with litesvm over 24 fixed wallets and payers, whole transaction, one
+inner System transfer, the fee suffix and the protocol fee charged
+(`program/tests/execute_compute_tests.rs`, which pins each mean):
 
-| Path | CU | Notes |
+| Path | develop `f2779b66…`: mean (min–max) | stored bumps |
 |---|---|---|
-| Normal SOL Transfer (baseline) | 150 | Solana runtime minimum |
-| Execute (Session key) | ~4,100 | No precompile, no auth payload |
-| Execute (Secp256r1 passkey) | ~9,440 | Includes ~2,300 CU Secp256r1 precompile |
-| Execute (Ed25519 authority) | ~5,900 | No precompile |
-| CreateWallet (Ed25519 or Secp256r1) | ~15-20K | One-time |
+| Execute, Ed25519 Owner, fee charged | 17,809 (14,997–26,997) | 5,302 |
+| Execute, Ed25519 Owner, fees disabled | 8,929 (7,429–16,429) | 3,325 |
+| Execute, session (no actions) | 18,243 (15,431–27,431) | 5,757 |
+| Execute, passkey Owner | 24,106 (20,606–32,606) | 10,907 |
+| ExecuteDeferred (passkey Owner) | 18,848 (15,348–27,348) | 5,620 |
+| CreateWallet (Ed25519 or Secp256r1) | ~15–20K | unchanged: creation still searches |
 
-All paths fit comfortably within Solana's 200K CU default budget.
+All paths fit comfortably within Solana's 200K CU default budget. A normal SOL
+transfer costs 150. The passkey path carries the Secp256r1 precompile and the
+challenge and clientDataJSON work on top.
 
-The precompile alone is a 2,300 CU floor on Secp256r1 Execute; the remaining
-~7,100 CU covers account validation, odometer counter, challenge hashing,
-clientDataJSON validation, accounts_hash computation, inner CPI, and state
-bookkeeping.
+### Stored bumps
 
-Two v2 changes move these numbers and are not yet reflected above:
+Before, every Execute searched for up to four bumps with
+`find_program_address` (the protocol config, the treasury shard, the payer's
+fee record, the vault), 1,500 CU for every bump it tried, so a wallet's cost
+depended on where its bumps fell (the spread above). Each address is now
+checked with one `sol_sha256` of `seeds ‖ bump ‖ program_id ‖
+"ProgramDerivedAddress"` and the bump the program stored when it created the
+account (`utils::is_program_address`), and compared with the account passed:
 
-- An authority carrying a policy now runs the same pre/post action engine a
-  session does. Expect a policy-bearing Execute to cost roughly what a session
-  Execute costs on top of its own authentication, rather than the
-  unbounded-authority number.
-- The accounts hash preimage grew one byte per referenced account. Negligible
-  against the syscall itself, but the numbers above predate it.
+- the config, the shard and the fee record store their own bump, written from
+  the search their creating instruction ran;
+- a wallet stores its vault's (`vault_bump` above); a wallet created before
+  holds 0 and is searched for.
 
-Re-benchmark before quoting these in anything that matters.
+Leaving out the runtime's on-curve check is sound only for a bump found by that
+search for the same seeds, and that is the only kind used: the bumps come from
+program-written accounts, never from instruction data. The fee record's bump
+was found for its own payer, so hashed with another payer it matches the
+address only through a SHA-256 collision. A system-owned config (before
+`InitializeProtocol`) and a config this binary cannot read are still pinned by
+a search; a first-time payer's fee record is still created by one.
+`program/tests/stored_bump_tests.rs` tries the substitutions: another wallet's
+vault, a corrupted vault bump, another payer's fee record, copies of the config
+and the shard at other addresses.
 
 **A policy-bound Execute, measured** (litesvm, whole transaction including the
 inner SPL Token or System call, the fee suffix and the protocol fee;
@@ -1173,6 +1248,9 @@ vault-owned token accounts in the Execute:
 | `TokenLimit`, one listed transfer, t = 1 | 30,083 | 29,072 |
 | the same, t = 8 | 32,974 | 32,836 |
 | the same, t = 24 | 41,195 | 45,861 |
+
+With stored bumps (above) the same four measure 6,660, 11,942, 15,706 and
+28,731 (develop `f2779b66…`: about 17.5k more each, the four bump searches).
 
 D13 copies each vault token account once and reads it back by position, where
 develop scanned the whole account list once per listed mint before the loop and

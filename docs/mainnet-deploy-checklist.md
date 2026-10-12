@@ -336,8 +336,10 @@ still a breaking change for whoever is left on v1, so announce it.
 - [ ] Turn on the migration banner in each integrator app (`migrateV1Wallet`
       with the default pairing: executes at the v1 id, delivers to the v2 id).
 - [ ] Run the session keeper after the upgrade
-      (`scripts/rehearse/close-expired-sessions.cjs`); the rent goes to whoever
-      runs it first.
+      (`scripts/rehearse/close-expired-sessions.cjs`). A v1 session records no
+      rent payer, so its rent goes to whoever closes it first; a v2 session
+      records one and its rent goes back to it, whoever runs the keeper
+      (`PAID_BY=<relayer>` limits a run to the sessions a relayer sponsored).
 
 ## 6. Post-deploy
 
@@ -353,7 +355,33 @@ still a breaking change for whoever is left on v1, so announce it.
 The rollout this checklist describes, run end to end by
 `scripts/rehearse/two-id-rehearsal.mjs`.
 
-**Latest: 2026-10-04, on `3979196`** (develop after #42), at both pairs of
+**Latest: 2026-10-12, on the rent-refund and stored-bump branch** (develop
+`6e856fd` plus the program commit `6b6a42e`), at both pairs of ids, **18/18**
+each. Same procedure as the 2026-10-04 run below — the §2 build of all four
+(`OUT=<dir> ./scripts/check-release-hashes.sh`, all four the hashes now in
+`scripts/release-hashes.txt`), `v1-live.so` dumped again from mainnet that day
+(137904 bytes, still `8ad5abf5…`), solana-test-validator 4.2.2 with SIMD-0500
+deactivated on other ports with a scratch ledger, `@lazorkit/sdk` 1.0.0-rc.8
+and `@lazorkit/sdk-legacy` 2.1.0 built from the branch — and after the run the
+v1 id's programdata began with the mainnet-v1 sunset's exact bytes
+(`1fe65139…`). The phase B rollback was not repeated: it upgrades the v1 id back
+to the unchanged `v1-live.so`.
+
+| artifact | id | size | SHA-256 |
+|---|---|---|---|
+| v1 — `solana program dump` of the live program | `LazorjRF…`, `4h3XoNRe…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
+| sunset — `--features mainnet-v1` | `LazorjRF…` | 46704 | `1fe65139241c8e6d74c02f693293b8884eca8495157851bbd315d90f20742709` |
+| v2 — `--features mainnet` | `LazorFroi…` | 157416 | `45b17f6766b9817424ca2d9469cc497695e66ea387f536ace671afb45bafbe59` |
+| sunset — `--features devnet-v1` | `4h3XoNRe…` | 46704 | `47a48821290d0292752b2e54d7d7e67cc74205ff966568713aeeec18c0814067` |
+| v2 — `--features devnet` | `57bTNWqt…` | 157416 | `5aa27cc905786634772853c98a38570be3e70e5ae060178f7eacdd79ecd6e681` |
+
+The v2 artifacts grew by 3664 bytes. Mainnet v2 deploys fresh, so that only
+sizes the deploy; **devnet's `57bTNW…` needs its programdata extended before the
+upgrade** (the devnet loader refuses an extend under 10240 bytes:
+`solana program extend 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv 10240`).
+The sunset artifacts (46704 bytes) still fit v1's 137904-byte programdata.
+
+**Previous: 2026-10-04, on `3979196`** (develop after #42), at both pairs of
 ids, **18/18** each, then the phase B rollback at the mainnet ids. These
 artifacts carry D13 (#48), pinocchio 0.9.3 and the heap-capacity fix (#42), so
 the sunset binary that ran both migrations is the one with 0.9.3's entrypoint
@@ -379,8 +407,8 @@ the sunset binary that ran both migrations is the one with 0.9.3's entrypoint
   on the default pairing, so a v1 passkey wallet migrating through the sunset
   binary is covered end to end.
 
-The table records the artifacts this rehearsal ran on. **The v2 rows are no
-longer this branch's build:** applying the vault invariants to every signer but
+The table records the artifacts the 2026-10-04 rehearsal ran on. **None of
+them is the current build** (see the table above for that). Then: applying the vault invariants to every signer but
 an Owner, and then time-based session expiry, moved both v2 artifacts
 (`scripts/release-hashes.txt` has the current ones; the sunset artifacts did
 not change, since the sunset binary still reads every session expiry as a
@@ -436,7 +464,11 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet runs this branch's devnet artifact.** Devnet's v2 (`57bTNW…`) runs
+**Devnet does not run the current devnet artifact yet.** `5aa27cc9…` (rent
+refunds to the recorded payer, stored bumps) needs the extend above and ships
+with `@lazorkit/sdk-legacy` 2.1.0 and `@lazorkit/sdk` 1.0.0-rc.8: a portal or
+wallet on sdk-legacy 2.0.0 cannot decode the authorities and sessions it writes
+(layout revision 2). Until then devnet's v2 (`57bTNW…`) runs
 `f2779b66…` (`develop` @dfae78e: the vault invariants for every non-Owner
 signer, and session and policy time in Unix seconds), upgraded on 2026-10-11
 in slot 509609649 (signature `QdXPuskx…`) after `@lazorkit/sdk-legacy` 2.0.0,
@@ -651,6 +683,14 @@ change, and cleanup pays for itself — and the instruction accepts v1 sessions 
 well as v2 ones. `CloseExpiredSession` is instruction **18**; a session that is
 still live is refused with **3036**.
 
+**Revised 2026-10-12 for v2 sessions:** the "no header change" half no
+longer holds. v2 has not shipped, so the `rent_payer` the paragraph above
+calls free to add went in (layout revision 2, after the 80-byte header), and a
+v2 session's rent now goes back to its payer whoever closes it: a sponsor's
+rent stays the sponsor's (`state::rent_payer`, error 3039). A v1 session, and
+a v2 one from before revision 2, records no payer and still goes to the
+closer, as below.
+
 This flips the 0.290408 SOL of v1 sessions from *burned by the upgrade* to
 *recoverable after it, by anyone*. So there is no rush to sweep sessions before
 the window — the opposite of the DeferredExec accounts, which really do have to
@@ -676,8 +716,11 @@ KEEPER=<keypair.json> node scripts/rehearse/close-expired-sessions.cjs
 Run it after the upgrade, and do not count on being first: the rent goes to
 whoever gets there, which is the point of making it permissionless.
 
-Seven litesvm tests cover the instruction itself: a stranger closes an expired session and keeps the
-rent; a live one is refused; the session's **final second still belongs to it**
+Nine litesvm tests cover the instruction itself (`close_expired_session_tests.rs`):
+a stranger closes an expired v2 session and the rent goes to its recorded payer,
+not to the stranger (3039 if it names itself); a v2 session from before layout
+revision 2 still closes to the caller's choice; one at a revision the binary
+does not know is refused (4013); a live one is refused; the session's **final second still belongs to it**
 (the close uses the same comparison as `execute`, so a keeper cannot end it
 early); a v1-shaped session closes by its slot; a live v1 one does not; a v2
 session holding a slot, written before time-based expiry, closes; and an
