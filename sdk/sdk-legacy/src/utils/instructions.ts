@@ -241,7 +241,8 @@ export function createRemoveAuthorityIx(params: {
  *   1: wallet_pda
  *   2: current_owner (writable)
  *   3: new_owner (writable)
- *   4: refund_dest (writable) — receives current_owner rent
+ *   4: refund_dest (writable) — receives current_owner rent; its recorded
+ *      rent payer from layout revision 2
  *   5: system_program
  *   6: rent_sysvar
  *   7: (optional) authorizerSigner or SYSVAR_INSTRUCTIONS
@@ -251,7 +252,10 @@ export function createTransferOwnershipIx(params: {
   walletPda: PublicKey;
   currentOwnerAuthorityPda: PublicKey;
   newOwnerAuthorityPda: PublicKey;
-  /** Where the current owner account's rent goes. Defaults to payer if omitted. */
+  /**
+   * Where the current owner account's rent goes: the rent payer it records
+   * (layout revision 2), or any account for one that records none.
+   */
   refundDestination: PublicKey;
   newType: number;
   /** Ed25519: 32-byte pubkey. Secp256r1: 32-byte credential_id_hash */
@@ -856,21 +860,27 @@ export function createMigrateWalletIx(params: {
 // ─── CloseExpiredSession ────────────────────────────────────────────
 
 /**
- * Close a session whose `expires_at` has passed, and keep its rent.
+ * Close a session whose `expires_at` has passed.
  *
  * Permissionless on purpose. Before expiry a session ends only through
  * `RevokeSession`, signed by the wallet's Owner or Admin; afterwards the
  * account authorises nothing — `Execute` refuses a session past its expiry —
  * and the only key that could free the rent belongs to a user with no reason to
- * come back. So anyone may close it, and `refundDestination` is whoever they
- * say, usually themselves.
+ * come back. So anyone may close it.
+ *
+ * The rent goes back to the account that paid it: a session at layout
+ * revision 2 records that account ({@link recordedRentPayer}), and
+ * `refundDestination` must be it (RefundDestinationMismatch, 3039, otherwise).
+ * A session that records none (a v1 one, or a v2 one from before revision 2)
+ * refunds wherever the caller says. `LazorKitClient.closeExpiredSession` fills
+ * this in.
  *
  * It accepts a **v1** session as well as a v2 one: the headers are identical
  * apart from the discriminator, and the sessions stranded by the upgrade have
  * no other way home.
  */
 export function createCloseExpiredSessionIx(params: {
-  /** Any signer. Pays the fee and, by convention, receives the rent. */
+  /** Any signer. Pays the fee; need not be the rent payer. */
   caller: PublicKey;
   sessionPda: PublicKey;
   refundDestination: PublicKey;

@@ -6,10 +6,12 @@ This is the tree-shakable counterpart to [`@lazorkit/sdk-legacy`](../sdk-legacy/
 
 ## Status
 
-**Release candidate** (`1.0.0-rc.1`), published under the `next` dist-tag. The
+**Release candidate** (`1.0.0-rc.8`), published under the `next` dist-tag. The
 surface is complete for protocol v2 and covered by unit tests plus a
-local-validator suite, with three public paths still untested
-(`revokeSession`, the one-shot `transferOwnership`, `signWithSecp256r1`).
+local-validator suite (`revokeSession` and `closeExpiredSession` in
+`tests-sdk-kit/tests/19-revoke-session.test.ts`, the one-shot
+`transferOwnership` in `17-ownership`), with one public path still untested:
+`signWithSecp256r1`.
 
 **For mainnet today, use [`@lazorkit/sdk-legacy`](https://www.npmjs.com/package/@lazorkit/sdk-legacy) 0.3.x.** Mainnet
 still runs protocol v1, and everything in this package targets v2.
@@ -69,6 +71,16 @@ This SDK targets protocol v2, which is **not wire-compatible with v1**:
   Delegate policy is checked too.
   A deferred execution's `expiryOffset` is still a slot count.
 - `AddAuthority`/`RemoveAuthority` need the wallet account **writable**.
+- An authority's or a session's rent goes back to the account that paid it.
+  From layout revision 2 each records that account (`rentPayer` on the
+  decoded account), and `RevokeSession`, `CloseExpiredSession`,
+  `RemoveAuthority` and `TransferOwnership` refuse any other refund destination
+  (3039). `revokeSession`, `removeAuthority`, `transferOwnership` and
+  `closeExpiredSession` read it and fill it in when `refundDestination` is left
+  out, and throw `RefundDestinationMismatchError` for another one;
+  `rentRefundDestination(account, fallback)` answers the same question for a
+  hand-built close. An account from before revision 2 records none and closes
+  where you say (`refundDestination`, by default `payer`).
 - Serialized `DeferredPayload`s carry a version and are rejected across the
   boundary — re-authorize rather than replaying one.
 

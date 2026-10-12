@@ -17,7 +17,7 @@ Which version you need depends on which protocol version your target cluster run
 | npm | protocol | where it works |
 |---|---|---|
 | `0.3.x` (`latest`) | v1 | mainnet today |
-| `1.x` (`next`) | v2 | devnet staging today, mainnet after the upgrade |
+| `2.x` (`next`) | v2 | devnet today, mainnet after the upgrade |
 
 The two are not wire-compatible: v2 namespaces every PDA seed, so the same
 `userSeed` derives a different wallet address. See
@@ -27,7 +27,7 @@ existing user's funds across.
 
 ```bash
 npm install @lazorkit/sdk-legacy          # 0.3.x, talks to mainnet today
-npm install @lazorkit/sdk-legacy@next     # 1.x, protocol v2
+npm install @lazorkit/sdk-legacy@next     # 2.x, protocol v2
 ```
 
 ### Browser and React Native
@@ -726,6 +726,25 @@ client.removeAuthority({ payer, walletPda, adminSigner, targetAuthorityPda });
 client.transferOwnership({ payer, walletPda, ownerSigner, newOwner });
 ```
 
+**Where a closed account's rent goes.** An authority's or a session's rent
+goes back to the account that paid it — on a sponsored flow, the relayer.
+From layout revision 2 each records that account (`rentPayer` on
+`AuthorityAccount` / `SessionAccount`, `recordedRentPayer(data)` on raw bytes),
+and `RemoveAuthority`, `TransferOwnership` (for the Owner it replaces),
+`RevokeSession` and `CloseExpiredSession` refuse any other refund destination
+(3039 `RefundDestinationMismatch`), whoever signs or pays for the close. Leave
+`refundDestination` out and these methods (and their `prepare*` halves) read the
+account and fill it in; another destination throws
+`RefundDestinationMismatchError` before anything is built.
+`rentRefundDestination(account, fallback)` answers the same question for a
+hand-built close. An account from before revision 2 records none and closes
+where you say (`refundDestination`, by default `payer`).
+
+```typescript
+// Anyone may close an expired session; the rent goes to whoever paid for it.
+client.closeExpiredSession({ caller, sessionPda });
+```
+
 ### Protocol fees & auto-registration
 
 When the protocol is initialized and enabled (admin-only operation), the SDK transparently appends the four fee accounts (`protocol_config`, `fee_record`, `treasury_shard`, `system_program`) to every fee-eligible instruction (`createWallet`, `execute`, `executeDeferred`). The on-chain entrypoint transfers the fee from the payer to a randomly-chosen treasury shard, then strips the accounts before dispatching to the processor.
@@ -1063,6 +1082,7 @@ An authority that carries a policy itself may not add authorities at all.
 | 3036 | SessionNotExpired |
 | 3037 | ActionUnlistedSolOutflow: the vault's SOL fell and the policy has no `Sol*` action (rent the vault pays for a new account counts) |
 | 3038 | ActionUnlistedTokenOutflow: the vault's balance of a mint fell and no `Token*` action names it (wSOL is a mint) |
+| 3039 | RefundDestinationMismatch: a close named a refund destination other than the account that paid the rent (an authority's or session's recorded payer, a DeferredExec's stored payer) |
 | 4001–4007 | Protocol fee errors (4003 retired) |
 | 4008–4011 | Fee suffix errors: FeeAccountsRequired, ProtocolNotInitialized, InvalidTreasuryShard, InvalidFeeRecord (4012 retired) |
 | 4013 | AccountVersionMismatch |

@@ -7,6 +7,7 @@
 import { base58Encode, readI64LE, readU16LE, readU32LE, readU64LE } from './bytes';
 import {
   ACCOUNT_LAYOUT_VERSION,
+  RENT_PAYER_LAYOUT_VERSION,
   DISC_AUTHORITY_ACCOUNT,
   DISC_SESSION_ACCOUNT,
   DISC_WALLET_ACCOUNT,
@@ -63,48 +64,59 @@ export interface AuthorityFacts {
   rpIdHash?: Uint8Array;
   /** The policy buffer; empty when it has none. */
   policy: Uint8Array;
+  /**
+   * The account that paid its rent, base58: RemoveAuthority refunds only to
+   * it. Null for an authority from before layout revision 2, which records
+   * none.
+   */
+  rentPayer: string | null;
+}
+
+/** Revision 1 or 2: the bytes of rent payer after the fixed part. */
+function payerBytes(version: number): number | null {
+  if (version === ACCOUNT_LAYOUT_VERSION) return 0;
+  if (version === RENT_PAYER_LAYOUT_VERSION) return 32;
+  return null;
 }
 
 /**
  * An authority account: header (48: disc, type, role, bump, version, pad,
  * counter u32 at 8, policy_len u16 at 12, pad, wallet at 16), then for
  * Ed25519 the key (32), for a passkey credential hash (32) + compressed key
- * (33) + rpIdHash (32), then `policy_len` policy bytes.
+ * (33) + rpIdHash (32), then from layout revision 2 the rent payer (32), then
+ * `policy_len` policy bytes.
  */
 export function decodeAuthorityAccount(acc: AccountSnapshot | null | undefined, programId: string): AuthorityFacts | null {
   if (!acc || acc.owner !== programId) return null;
   const d = acc.data;
-  if (d.length < 48 || d[0] !== DISC_AUTHORITY_ACCOUNT || d[4] !== ACCOUNT_LAYOUT_VERSION) return null;
+  if (d.length < 48 || d[0] !== DISC_AUTHORITY_ACCOUNT) return null;
+  const payer = payerBytes(d[4]);
+  if (payer === null) return null;
   const role = ROLES[d[2]];
   if (!role) return null;
   const policyLen = readU16LE(d, 12);
   const wallet = base58Encode(d.subarray(16, 48));
   const counter = readU32LE(d, 8);
+  const keyEnd = d[1] === 0 ? 80 : d[1] === 1 ? 145 : null;
+  if (keyEnd === null) return null;
+  const policyAt = keyEnd + payer;
+  if (d.length < policyAt + policyLen) return null;
+  const rentPayer = payer ? base58Encode(d.subarray(keyEnd, policyAt)) : null;
+  const policy = d.slice(policyAt, policyAt + policyLen);
   if (d[1] === 0) {
-    if (d.length < 80 + policyLen) return null;
-    return {
-      type: 'ed25519',
-      role,
-      counter,
-      wallet,
-      publicKey: d.slice(48, 80),
-      policy: d.slice(80, 80 + policyLen),
-    };
+    return { type: 'ed25519', role, counter, wallet, publicKey: d.slice(48, 80), policy, rentPayer };
   }
-  if (d[1] === 1) {
-    if (d.length < 145 + policyLen) return null;
-    return {
-      type: 'passkey',
-      role,
-      counter,
-      wallet,
-      credentialIdHash: d.slice(48, 80),
-      publicKey: d.slice(80, 113),
-      rpIdHash: d.slice(113, 145),
-      policy: d.slice(145, 145 + policyLen),
-    };
-  }
-  return null;
+  return {
+    type: 'passkey',
+    role,
+    counter,
+    wallet,
+    credentialIdHash: d.slice(48, 80),
+    publicKey: d.slice(80, 113),
+    rpIdHash: d.slice(113, 145),
+    policy,
+    rentPayer,
+  };
 }
 
 export interface SessionFacts {
@@ -113,18 +125,31 @@ export interface SessionFacts {
   /** As stored: Unix seconds on a time-expiry binary; a slot if written before it. */
   expiresAt: bigint;
   actions: Uint8Array;
+  /**
+   * The account that paid its rent, base58: RevokeSession and
+   * CloseExpiredSession refund only to it. Null for a session from before
+   * layout revision 2, which records none.
+   */
+  rentPayer: string | null;
 }
 
-/** A session account: header (80: disc, bump, version, pad, wallet, session_key, expires_at u64 at 72), then actions. */
+/**
+ * A session account: header (80: disc, bump, version, pad, wallet,
+ * session_key, expires_at u64 at 72), then from layout revision 2 the rent
+ * payer (32), then actions.
+ */
 export function decodeSessionAccount(acc: AccountSnapshot | null | undefined, programId: string): SessionFacts | null {
   if (!acc || acc.owner !== programId) return null;
   const d = acc.data;
-  if (d.length < 80 || d[0] !== DISC_SESSION_ACCOUNT || d[2] !== ACCOUNT_LAYOUT_VERSION) return null;
+  if (d.length < 80 || d[0] !== DISC_SESSION_ACCOUNT) return null;
+  const payer = payerBytes(d[2]);
+  if (payer === null || d.length < 80 + payer) return null;
   return {
     wallet: base58Encode(d.subarray(8, 40)),
     sessionKey: base58Encode(d.subarray(40, 72)),
     expiresAt: readU64LE(d, 72),
-    actions: d.slice(80),
+    actions: d.slice(80 + payer),
+    rentPayer: payer ? base58Encode(d.subarray(80, 112)) : null,
   };
 }
 

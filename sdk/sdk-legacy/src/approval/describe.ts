@@ -144,6 +144,7 @@ export type ApprovalInvalidReason =
   | 'last-owner'
   | 'payer-is-program-account'
   | 'refund-is-program-account'
+  | 'refund-not-rent-payer'
   | 'mint-decimals-mismatch';
 
 export type ApprovalCheck =
@@ -274,6 +275,12 @@ export interface RevokeSessionDescription extends DescriptionBase {
   ended?: boolean;
   refund: string;
   refundIsPayer: boolean;
+  /**
+   * The account that paid the session's rent, which the refund must be (the
+   * request is refused otherwise); null for a session from before layout
+   * revision 2, which records none and refunds where the request says.
+   */
+  rentPayer: string | null;
   /** What it may still spend; null when the stored actions do not parse. */
   policy: PolicyDescription | null;
   unrestricted: boolean;
@@ -292,6 +299,12 @@ export interface RemoveAuthorityDescription extends DescriptionBase {
   ownersAfter: number;
   refund: string;
   refundIsPayer: boolean;
+  /**
+   * The account that paid the target's rent, which the refund must be (the
+   * request is refused otherwise); null for an authority from before layout
+   * revision 2, which records none and refunds where the request says.
+   */
+  rentPayer: string | null;
 }
 
 export type ApprovalDescription = CreateSessionDescription | RevokeSessionDescription | RemoveAuthorityDescription;
@@ -497,6 +510,8 @@ export function describeApproval(
       const s = decodeSessionAccount(view.session, req.programId);
       if (!s) return invalid('session-missing');
       if (s.wallet !== req.wallet) return invalid('session-wrong-wallet');
+      // The program refunds a recording session only to its rent payer.
+      if (s.rentPayer !== null && req.args.refund !== s.rentPayer) return invalid('refund-not-rent-payer');
       // The program reads the session's expiry and its actions' times in one
       // unit: Unix seconds on a time-expiry binary (where a slot an earlier
       // build stored reads as long ended), slots before it.
@@ -521,6 +536,7 @@ export function describeApproval(
           ended: time.now === undefined ? undefined : time.now > s.expiresAt,
           refund: req.args.refund,
           refundIsPayer: req.args.refund === req.payer,
+          rentPayer: s.rentPayer,
           policy,
           unrestricted: s.actions.length === 0,
         },
@@ -534,6 +550,8 @@ export function describeApproval(
       const t = decodeAuthorityAccount(view.target, req.programId);
       if (!t) return invalid('target-missing');
       if (t.wallet !== req.wallet) return invalid('target-wrong-wallet');
+      // The program refunds a recording authority only to its rent payer.
+      if (t.rentPayer !== null && req.args.refund !== t.rentPayer) return invalid('refund-not-rent-payer');
       if (req.args.target === req.authority) return invalid('target-is-signer');
       if (signer.role === 'owner' && t.role === 'owner' && wallet.ownerCount <= 1) return invalid('last-owner');
       const removable = signer.role === 'owner' || (signer.role === 'admin' && t.role === 'delegate');
@@ -563,6 +581,7 @@ export function describeApproval(
           ownersAfter: wallet.ownerCount - (t.role === 'owner' ? 1 : 0),
           refund: req.args.refund,
           refundIsPayer: req.args.refund === req.payer,
+          rentPayer: t.rentPayer,
         },
       };
     }

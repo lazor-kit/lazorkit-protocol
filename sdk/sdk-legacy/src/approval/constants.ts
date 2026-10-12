@@ -104,7 +104,14 @@ export const SEED_VAULT = 'lk2:vault';
 export const DISC_WALLET_ACCOUNT = 0x21;
 export const DISC_AUTHORITY_ACCOUNT = 0x22;
 export const DISC_SESSION_ACCOUNT = 0x23;
+/** The first layout revision, and still a wallet's. */
 export const ACCOUNT_LAYOUT_VERSION = 1;
+/**
+ * The layout revision from which an authority or a session records the
+ * account that paid its rent (32 bytes after its fixed part, before its
+ * policy), and the newest of either (program/src/state/rent_payer.rs).
+ */
+export const RENT_PAYER_LAYOUT_VERSION = 2;
 
 /**
  * Program features a portal configures per cluster and confirms against the

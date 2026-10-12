@@ -47,6 +47,7 @@ import {
   legacyProgramIdFor,
 } from './constants.js';
 import { serializeActions, type SessionAction } from './codecs/actions.js';
+import { RefundDestinationMismatchError, recordedRentPayer } from './codecs/accounts.js';
 import { MIN_UNIX_SECONDS } from './time.js';
 import {
   AUTH_TYPE_ED25519,
@@ -74,6 +75,7 @@ import {
   createRegisterPayerIx,
   createRemoveAuthorityIx,
   createRevokeSessionIx,
+  createCloseExpiredSessionIx,
   createTransferOwnershipIx,
   createUpdateProtocolIx,
   createWithdrawTreasuryIx,
@@ -137,7 +139,12 @@ import {
   readAuthorityCounter,
   type ChallengeReadOptions,
 } from './secp256r1/secp256r1.js';
-import { ChallengeReadGroup, readChallengeInputs } from './secp256r1/challengeReads.js';
+import {
+  ChallengeReadGroup,
+  atOrAfterContextSlot,
+  challengeReadConfig,
+  readChallengeInputs,
+} from './secp256r1/challengeReads.js';
 import {
   buildCompactLayout,
   computeAccountsHash,
@@ -2000,11 +2007,15 @@ export class LazorKit {
     targetAuthorityPda: Address;
     refundDestination?: Address;
   }): Promise<{ instructions: Instruction[] }> {
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.adminSigner;
 
     if (s.type === 'ed25519') {
       const adminAuthorityPda = await this.resolveEd25519AuthorityPda(s, params.walletPda);
+      const refundDest = await this.rentRefundDestination(
+        params.targetAuthorityPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createRemoveAuthorityIx({
         payer: params.payer,
         walletPda: params.walletPda,
@@ -2035,7 +2046,12 @@ export class LazorKit {
     targetAuthorityPda: Address;
     refundDestination?: Address;
   }): Promise<PreparedRemoveAuthority> {
-    const refundDest = params.refundDestination ?? params.payer;
+    const refundDest = await this.rentRefundDestination(
+      params.targetAuthorityPda,
+      params.payer,
+      params.refundDestination,
+      params.secp256r1,
+    );
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
@@ -2102,11 +2118,15 @@ export class LazorKit {
       params.newOwner,
     );
     const [newOwnerAuthorityPda] = await this.findAuthority(params.walletPda, credentialOrPubkey);
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.ownerSigner;
 
     if (s.type === 'ed25519') {
       const currentOwnerAuthorityPda = await this.resolveEd25519AuthorityPda(s, params.walletPda);
+      const refundDest = await this.rentRefundDestination(
+        currentOwnerAuthorityPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createTransferOwnershipIx({
         payer: params.payer,
         walletPda: params.walletPda,
@@ -2145,9 +2165,14 @@ export class LazorKit {
       params.newOwner,
     );
     const [newOwnerAuthorityPda] = await this.findAuthority(params.walletPda, credentialOrPubkey);
-    const refundDest = params.refundDestination ?? params.payer;
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
+      params.secp256r1,
+    );
+    const refundDest = await this.rentRefundDestination(
+      authorityPda,
+      params.payer,
+      params.refundDestination,
       params.secp256r1,
     );
 
@@ -2360,6 +2385,71 @@ export class LazorKit {
     return { instructions: [precompileIx, ix], sessionPda: i.sessionPda };
   }
 
+  // ─── Rent refunds ────────────────────────────────────────────────
+
+  /**
+   * Where closing `account` (an authority or a session) must send its rent.
+   *
+   * From layout revision 2 both record the account that paid their rent, and
+   * every instruction that closes one refunds only to it (error 3039 for any
+   * other destination), whoever signs or pays for the close. This reads the
+   * account and returns that payer. For an account that records none (written
+   * before revision 2, or not found) it returns `requested ?? fallback`, as
+   * before. Read at `opts`' commitment and floor (default `'confirmed'`): an
+   * account created by a transaction a lagging node has not seen reads as
+   * not found.
+   *
+   * @throws {RefundDestinationMismatchError} `requested` is not the recorded
+   *   payer: the program would refuse the transaction.
+   */
+  async rentRefundDestination(
+    account: Address,
+    fallback: Address,
+    requested?: Address,
+    /** The read's commitment and floor; a passkey flow passes its own. */
+    opts?: ChallengeReadOptions,
+  ): Promise<Address> {
+    const config = challengeReadConfig(opts);
+    const { value } = await atOrAfterContextSlot(
+      () => this.rpc.getAccountInfo(account, { encoding: 'base64', ...config }).send(),
+      config,
+      `the rent payer of ${account}`,
+    );
+    const rentPayer = value
+      ? recordedRentPayer(new Uint8Array(base64Encoder.encode(value.data[0])))
+      : null;
+    if (!rentPayer) return requested ?? fallback;
+    if (requested && requested !== rentPayer) {
+      throw new RefundDestinationMismatchError({ account, rentPayer, requested });
+    }
+    return rentPayer;
+  }
+
+  /**
+   * Close a session past its expiry. Anyone may: `caller` signs and pays the
+   * fee. The rent goes to the session's recorded rent payer (layout revision
+   * 2); for a session that records none, to `refundDestination`, by default
+   * `caller`.
+   */
+  async closeExpiredSession(params: {
+    caller: Address;
+    sessionPda: Address;
+    refundDestination?: Address;
+  }): Promise<{ instructions: Instruction[] }> {
+    const refundDestination = await this.rentRefundDestination(
+      params.sessionPda,
+      params.caller,
+      params.refundDestination,
+    );
+    const ix = createCloseExpiredSessionIx({
+      caller: params.caller,
+      sessionPda: params.sessionPda,
+      refundDestination,
+      programId: this.programId,
+    });
+    return { instructions: [ix] };
+  }
+
   // ─── RevokeSession (unified) ─────────────────────────────────────
 
   async revokeSession(params: {
@@ -2369,11 +2459,15 @@ export class LazorKit {
     sessionPda: Address;
     refundDestination?: Address;
   }): Promise<{ instructions: Instruction[] }> {
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.adminSigner;
 
     if (s.type === 'ed25519') {
       const adminAuthorityPda = await this.resolveEd25519AuthorityPda(s, params.walletPda);
+      const refundDest = await this.rentRefundDestination(
+        params.sessionPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createRevokeSessionIx({
         payer: params.payer,
         walletPda: params.walletPda,
@@ -2404,7 +2498,12 @@ export class LazorKit {
     sessionPda: Address;
     refundDestination?: Address;
   }): Promise<PreparedRevokeSession> {
-    const refundDest = params.refundDestination ?? params.payer;
+    const refundDest = await this.rentRefundDestination(
+      params.sessionPda,
+      params.payer,
+      params.refundDestination,
+      params.secp256r1,
+    );
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,

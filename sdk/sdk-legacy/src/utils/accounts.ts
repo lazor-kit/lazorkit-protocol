@@ -4,6 +4,54 @@ import { Buffer } from 'buffer';
  * Replaces Solita-generated account classes.
  */
 import { Connection, PublicKey } from '@solana/web3.js';
+import { ACCOUNT_DISCRIMINATOR, RENT_PAYER_LAYOUT_VERSION, RENT_PAYER_LEN } from '../constants';
+
+// ─── Layout revisions ────────────────────────────────────────────────
+
+/** Where an authority's key material ends: 80 for Ed25519, 145 for a passkey. */
+export function authorityKeyEnd(authorityType: number): number | null {
+  if (authorityType === 0) return 80;
+  if (authorityType === 1) return 145;
+  return null;
+}
+
+/**
+ * Where an authority's policy starts: after its key material in layout
+ * revision 1, after the key material and the 32-byte rent payer from
+ * revision 2. `null` for an unknown type or revision.
+ */
+export function authorityPolicyOffset(authorityType: number, version: number): number | null {
+  const keyEnd = authorityKeyEnd(authorityType);
+  if (keyEnd === null) return null;
+  if (version === 1) return keyEnd;
+  if (version === RENT_PAYER_LAYOUT_VERSION) return keyEnd + RENT_PAYER_LEN;
+  return null;
+}
+
+/** Where a session's actions start: 80 in layout revision 1, 112 from revision 2. */
+export function sessionActionsOffset(version: number): number | null {
+  if (version === 1) return 80;
+  if (version === RENT_PAYER_LAYOUT_VERSION) return 80 + RENT_PAYER_LEN;
+  return null;
+}
+
+/**
+ * The account that paid an authority's or a session's rent, as it records it
+ * (layout revision 2), or `null` for an account that records none: revision
+ * 1, a v1 account, or any other type. Closing a recording account refunds
+ * only to this key; one that records none closes wherever its closer says.
+ */
+export function recordedRentPayer(data: Uint8Array): PublicKey | null {
+  if (data.length < 5) return null;
+  let at: number | null = null;
+  if (data[0] === ACCOUNT_DISCRIMINATOR.SESSION && data[2] === RENT_PAYER_LAYOUT_VERSION) {
+    at = 80;
+  } else if (data[0] === ACCOUNT_DISCRIMINATOR.AUTHORITY && data[4] === RENT_PAYER_LAYOUT_VERSION) {
+    at = authorityKeyEnd(data[1]);
+  }
+  if (at === null || data.length < at + RENT_PAYER_LEN) return null;
+  return new PublicKey(data.subarray(at, at + RENT_PAYER_LEN));
+}
 
 // ─── Authority Account ───────────────────────────────────────────────
 
@@ -34,6 +82,13 @@ export class AuthorityAccount implements AuthorityAccountData {
     public readonly wallet: PublicKey,
     /** Bytes of spending policy after the key material. 0 = unbounded. */
     public readonly policyLen: number = 0,
+    /**
+     * The account that paid this authority's rent, which RemoveAuthority and
+     * TransferOwnership refund to (layout revision 2); `null` before it.
+     */
+    public readonly rentPayer: PublicKey | null = null,
+    /** Where the policy starts in the account data (`null`: unknown layout). */
+    public readonly policyOffset: number | null = null,
   ) {}
 
   /** Does this authority carry a spending policy? Rank says what it may
@@ -63,6 +118,8 @@ export class AuthorityAccount implements AuthorityAccountData {
       counter,
       wallet,
       policyLen,
+      recordedRentPayer(data),
+      authorityPolicyOffset(authorityType, version),
     );
   }
 
@@ -79,9 +136,11 @@ export class AuthorityAccount implements AuthorityAccountData {
 // ─── Session Account ─────────────────────────────────────────────────
 
 /**
- * SessionAccount layout (80 bytes fixed header + optional actions):
+ * SessionAccount layout (80 bytes fixed header, then from layout revision 2
+ * the 32-byte rent payer, then optional actions):
  * [discriminator: u8][bump: u8][version: u8][padding: 5 bytes]
  * [wallet: Pubkey(32)][sessionKey: Pubkey(32)][expiresAt: u64 LE]
+ * [rentPayer: Pubkey(32), revision 2][actions...]
  *
  * `expiresAt` is Unix time in seconds; the program refuses the session once
  * the cluster clock is past it. A session written before time-based expiry
@@ -104,6 +163,13 @@ export class SessionAccount implements SessionAccountData {
     public readonly wallet: PublicKey,
     public readonly sessionKey: PublicKey,
     public readonly expiresAt: bigint,
+    /**
+     * The account that paid this session's rent, which RevokeSession and
+     * CloseExpiredSession refund to (layout revision 2); `null` before it.
+     */
+    public readonly rentPayer: PublicKey | null = null,
+    /** The session's action buffer; empty when unrestricted. */
+    public readonly actions: Uint8Array = new Uint8Array(),
   ) {}
 
   static fromBuffer(data: Buffer): SessionAccount {
@@ -114,7 +180,21 @@ export class SessionAccount implements SessionAccountData {
     const wallet = new PublicKey(data.subarray(8, 40));
     const sessionKey = new PublicKey(data.subarray(40, 72));
     const expiresAt = data.readBigUInt64LE(72);
-    return new SessionAccount(discriminator, bump, version, wallet, sessionKey, expiresAt);
+    const actionsAt = sessionActionsOffset(version);
+    const actions =
+      actionsAt !== null && data.length > actionsAt
+        ? new Uint8Array(data.subarray(actionsAt))
+        : new Uint8Array();
+    return new SessionAccount(
+      discriminator,
+      bump,
+      version,
+      wallet,
+      sessionKey,
+      expiresAt,
+      recordedRentPayer(data),
+      actions,
+    );
   }
 
   static async fromAccountAddress(
