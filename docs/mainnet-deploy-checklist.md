@@ -356,7 +356,7 @@ The rollout this checklist describes, run end to end by
 `scripts/rehearse/two-id-rehearsal.mjs`.
 
 **Latest: 2026-10-12, on the rent-refund and stored-bump branch** (develop
-`6e856fd` plus the program commit `6b6a42e`), at both pairs of ids, **18/18**
+`6e856fd` plus the program commits `6b6a42e` and `40852aa`), at both pairs of ids, **18/18**
 each. Same procedure as the 2026-10-04 run below — the §2 build of all four
 (`OUT=<dir> ./scripts/check-release-hashes.sh`, all four the hashes now in
 `scripts/release-hashes.txt`), `v1-live.so` dumped again from mainnet that day
@@ -364,22 +364,22 @@ each. Same procedure as the 2026-10-04 run below — the §2 build of all four
 deactivated on other ports with a scratch ledger, `@lazorkit/sdk` 1.0.0-rc.8
 and `@lazorkit/sdk-legacy` 2.1.0 built from the branch — and after the run the
 v1 id's programdata began with the mainnet-v1 sunset's exact bytes
-(`1fe65139…`). The phase B rollback was not repeated: it upgrades the v1 id back
+(`353dfee3…`). The phase B rollback was not repeated: it upgrades the v1 id back
 to the unchanged `v1-live.so`.
 
 | artifact | id | size | SHA-256 |
 |---|---|---|---|
 | v1 — `solana program dump` of the live program | `LazorjRF…`, `4h3XoNRe…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
-| sunset — `--features mainnet-v1` | `LazorjRF…` | 46704 | `1fe65139241c8e6d74c02f693293b8884eca8495157851bbd315d90f20742709` |
-| v2 — `--features mainnet` | `LazorFroi…` | 157416 | `45b17f6766b9817424ca2d9469cc497695e66ea387f536ace671afb45bafbe59` |
-| sunset — `--features devnet-v1` | `4h3XoNRe…` | 46704 | `47a48821290d0292752b2e54d7d7e67cc74205ff966568713aeeec18c0814067` |
-| v2 — `--features devnet` | `57bTNWqt…` | 157416 | `5aa27cc905786634772853c98a38570be3e70e5ae060178f7eacdd79ecd6e681` |
+| sunset — `--features mainnet-v1` | `LazorjRF…` | 46872 | `353dfee3fdccef241c7c996cbf2e3faaadc32c31c82cdb15d3b630d6591d2bcf` |
+| v2 — `--features mainnet` | `LazorFroi…` | 158096 | `b242e187e4f5b4a4200edea8946fbbe996255957e6835d5e416df3539518e9c7` |
+| sunset — `--features devnet-v1` | `4h3XoNRe…` | 46872 | `2f0fae7e609250d8d61c76146707f971b44cbd66aecf19a8ebac2ff9642e54bc` |
+| v2 — `--features devnet` | `57bTNWqt…` | 158096 | `e7930c8bf6df5964e7d25774ad2807c4ab24d1d97f9e59c076f0ff0bfb8c2d7b` |
 
-The v2 artifacts grew by 3664 bytes. Mainnet v2 deploys fresh, so that only
+The v2 artifacts grew by 4344 bytes. Mainnet v2 deploys fresh, so that only
 sizes the deploy; **devnet's `57bTNW…` needs its programdata extended before the
 upgrade** (the devnet loader refuses an extend under 10240 bytes:
 `solana program extend 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv 10240`).
-The sunset artifacts (46704 bytes) still fit v1's 137904-byte programdata.
+The sunset artifacts (46872 bytes) still fit v1's 137904-byte programdata.
 
 **Previous: 2026-10-04, on `3979196`** (develop after #42), at both pairs of
 ids, **18/18** each, then the phase B rollback at the mainnet ids. These
@@ -464,7 +464,7 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet does not run the current devnet artifact yet.** `5aa27cc9…` (rent
+**Devnet does not run the current devnet artifact yet.** `e7930c8b…` (rent
 refunds to the recorded payer, stored bumps) needs the extend above and ships
 with `@lazorkit/sdk-legacy` 2.1.0 and `@lazorkit/sdk` 1.0.0-rc.8: a portal or
 wallet on sdk-legacy 2.0.0 cannot decode the authorities and sessions it writes

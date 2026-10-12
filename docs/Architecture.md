@@ -470,6 +470,17 @@ them; a refund to the vault would reach the wallet's owner just the same; and
 refusing to close them would make a lost key unrevocable. They cannot be
 recreated in that shape, so the set under the old rule only shrinks.
 
+**Closing never depends on the payer.** A recorded payer that has since become
+executable (whoever holds its key deployed a program there) may be refused a
+credit by the runtime, which would make the account unclosable — an Admin who
+paid for a Delegate that way could keep it past the Owner's `RemoveAuthority`.
+So when the refund destination is the recorded payer and it is executable, the
+close still happens and the rent stays in the dead account (pass it read-only
+if the runtime refuses to load it writable). Only the payer's own key can put
+it in that state. And only an ordinary system account is recorded as a payer
+(`IllegalOwner` otherwise): a pre-funded PDA skips the System transfer that
+would otherwise require it.
+
 Revision 2 costs 32 bytes of rent per authority and session (222,720
 lamports), returned on close like the rest.
 

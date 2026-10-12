@@ -8,10 +8,10 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed — a closed account's rent goes back to whoever paid it (program and SDKs; layout revision 2; needs a review before the mainnet deploy)
 
-**Program** (both v2 artifacts change: devnet `f2779b66…` → `5aa27cc9…`,
-mainnet `142aad9e…` → `45b17f67…`, 153752 → 157416 bytes; both sunset
-artifacts change too: mainnet-v1 `7a86c87c…` → `1fe65139…`, devnet-v1
-`a84a234e…` → `47a48821…`, 45936 → 46704 bytes. The devnet programdata needs an
+**Program** (both v2 artifacts change: devnet `f2779b66…` → `e7930c8b…`,
+mainnet `142aad9e…` → `b242e187…`, 153752 → 158096 bytes; both sunset
+artifacts change too: mainnet-v1 `7a86c87c…` → `353dfee3…`, devnet-v1
+`a84a234e…` → `2f0fae7e…`, 45936 → 46872 bytes. The devnet programdata needs an
 extend before the upgrade.)
 
 - Every account the program creates is funded by the instruction's `payer` —
@@ -31,6 +31,14 @@ extend before the upgrade.)
   `Execute`'s session branch (which now checks the session's header) and
   `CloseExpiredSession` read the revision, and refuse one they do not know
   (4013). New `state::rent_payer`.
+- **Closing never depends on the payer.** If the recorded payer has become
+  executable (its key holder deployed a program at it), a cluster without
+  SIMD-0162 refuses to credit it, which would let whoever paid for a Delegate
+  or a session keep it past the Owner's `RemoveAuthority` or `RevokeSession`.
+  In that case the close goes ahead and the rent stays in the dead account.
+  Creation records only an ordinary system account as the payer
+  (`IllegalOwner` otherwise; a pre-funded PDA skips the System transfer that
+  would require it). Found in the review of this change.
 - **Accounts from before revision 2** (devnet's today, and v1 accounts in the
   sunset binary) record no payer and keep the old rule — the destination the
   instruction names. Closing must stay possible (it is how a lost key is cut
@@ -45,7 +53,8 @@ extend before the upgrade.)
 - Tests: `program/tests/rent_refund_tests.rs` (every close path: the recorded
   payer refunded in full, any other destination refused with the account
   intact, revision-1 accounts closing anywhere, revision-1 policies still
-  binding, an unknown revision refused), `close_expired_session_tests.rs`
+  binding, an unknown revision refused, a payer turned executable unable to
+  block a revoke, a removal or a close, a program-owned payer refused), `close_expired_session_tests.rs`
   updated (a stranger closes into the payer, not into itself), and
   `state::rent_payer` / `state::policy` unit tests.
 
