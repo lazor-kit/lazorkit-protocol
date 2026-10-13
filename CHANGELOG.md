@@ -11,8 +11,8 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 **Program** (both v2 artifacts change: devnet `f2779b66…` → `e7930c8b…`,
 mainnet `142aad9e…` → `b242e187…`, 153752 → 158096 bytes; both sunset
 artifacts change too: mainnet-v1 `7a86c87c…` → `353dfee3…`, devnet-v1
-`a84a234e…` → `2f0fae7e…`, 45936 → 46872 bytes. The devnet programdata needs an
-extend before the upgrade.)
+`a84a234e…` → `2f0fae7e…`, 45936 → 46872 bytes. Devnet's programdata was
+already 160,560 bytes, so its upgrade needed no extend.)
 
 - Every account the program creates is funded by the instruction's `payer` —
   on a sponsored flow the relayer — but `RevokeSession`, `CloseExpiredSession`,
@@ -57,6 +57,17 @@ extend before the upgrade.)
   block a revoke, a removal or a close, a program-owned payer refused), `close_expired_session_tests.rs`
   updated (a stranger closes into the payer, not into itself), and
   `state::rent_payer` / `state::policy` unit tests.
+- Devnet runs it: `57bTNW…` was upgraded from `f2779b66…` (slot
+  509,609,649) to `e7930c8b…` (`develop` @345625b) on 2026-10-13 in slot
+  510,645,372 (signature `2wi63Ex9…`), after `@lazorkit/sdk-legacy` 2.1.0,
+  `@lazorkit/sdk` 1.0.0-rc.8 and `@lazorkit/wallet` 4.0.0-next.1 were
+  published; the dump's first 158,096 bytes hash to the `devnet` line of
+  `scripts/release-hashes.txt`. Through portal-v2 #8 (devnet `lastDeploySlot`
+  510645372) and the Railway devnet Kora, new passkey authorities and
+  sessions are revision 2 with the Kora fee payer recorded, and a
+  `revokeSession` refunded the session's 1,833,880 lamports to that payer.
+  A passkey SOL transfer's Execute measured 11,672 CU there (14,469 on
+  `f2779b66…`), a session transfer 7,570 (10,345).
 
 **SDKs** (`@lazorkit/sdk-legacy` 2.1.0, `@lazorkit/sdk` 1.0.0-rc.8; additive)
 
