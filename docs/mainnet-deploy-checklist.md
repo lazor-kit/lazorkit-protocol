@@ -376,8 +376,9 @@ to the unchanged `v1-live.so`.
 | v2 — `--features devnet` | `57bTNWqt…` | 158096 | `e7930c8bf6df5964e7d25774ad2807c4ab24d1d97f9e59c076f0ff0bfb8c2d7b` |
 
 The v2 artifacts grew by 4344 bytes. Mainnet v2 deploys fresh, so that only
-sizes the deploy; **devnet's `57bTNW…` needs its programdata extended before the
-upgrade** (the devnet loader refuses an extend under 10240 bytes:
+sizes the deploy. Devnet's `57bTNW…` programdata was already 160560 bytes, so
+its 2026-10-13 upgrade needed no extend (had it, the devnet loader refuses an
+extend under 10240 bytes:
 `solana program extend 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv 10240`).
 The sunset artifacts (46872 bytes) still fit v1's 137904-byte programdata.
 
@@ -464,20 +465,21 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet does not run the current devnet artifact yet.** `e7930c8b…` (rent
-refunds to the recorded payer, stored bumps) needs the extend above and ships
-with `@lazorkit/sdk-legacy` 2.1.0 and `@lazorkit/sdk` 1.0.0-rc.8: a portal or
-wallet on sdk-legacy 2.0.0 cannot decode the authorities and sessions it writes
-(layout revision 2). Until then devnet's v2 (`57bTNW…`) runs
-`f2779b66…` (`develop` @dfae78e: the vault invariants for every non-Owner
-signer, and session and policy time in Unix seconds), upgraded on 2026-10-11
-in slot 509609649 (signature `QdXPuskx…`) after `@lazorkit/sdk-legacy` 2.0.0,
-`@lazorkit/sdk` 1.0.0-rc.7 and `@lazorkit/wallet` 4.0.0-next.0 were published;
-the dump's first 153752 bytes hash to the `devnet` line of
-`scripts/release-hashes.txt`. That upgrade expired every existing v2 session
-there (their expiries are slots, which read as long past), and wallet SDKs
-that send slots (`@lazorkit/wallet` 3.4.1 and earlier) can no longer create
-sessions there (3008). Earlier devnet builds, newest first: `30ac9bef…` (the
+**Devnet runs the current devnet artifact.** `57bTNW…` was upgraded to
+`e7930c8b…` (`develop` @345625b: rent refunds to the recorded payer, stored
+bumps) on 2026-10-13 in slot 510645372 (signature `2wi63Ex9…`), after
+`@lazorkit/sdk-legacy` 2.1.0, `@lazorkit/sdk` 1.0.0-rc.8 and
+`@lazorkit/wallet` 4.0.0-next.1 were published; the dump's first 158096 bytes
+hash to the `devnet` line of `scripts/release-hashes.txt`, the rest of the
+programdata is zero. A portal or wallet on sdk-legacy 2.0.0 cannot decode the
+authorities and sessions it now writes (layout revision 2); portal-v2 reads
+both revisions, and portal-v2 #8 lists the new deploy slot. Before
+it, devnet ran `f2779b66…` (`develop` @dfae78e: the vault invariants for every
+non-Owner signer, and session and policy time in Unix seconds), upgraded on
+2026-10-11 in slot 509609649 (signature `QdXPuskx…`); that upgrade expired
+every existing v2 session there (their expiries are slots, which read as long
+past), and wallet SDKs that send slots (`@lazorkit/wallet` 3.4.1 and earlier)
+can no longer create sessions there (3008). Earlier devnet builds, newest first: `30ac9bef…` (the
 non-Owner invariants) from slot 509521792; `d95e5c2b…` (D13 and the
 heap-capacity fix) from 2026-10-04, slot 507081509; the D13 build
 `efea949f…` from 2026-10-03, slot 507022596. A smoke run on `d95e5c2b…` and
@@ -488,7 +490,13 @@ and lazor-kit #108's devnet run (S2) passed against `d95e5c2b…`. On
 Railway devnet Kora: the decoded session screen, a session created with
 `expiresInSeconds` and spent with, 3023 over the per-payment cap, and 3037 for
 SOL from a token-only session; the playground (hook, Wallet Standard, adapter)
-and the 14 portal probes passed too.
+and the 14 portal probes passed too. On `e7930c8b…`, the same smoke with
+`@lazorkit/wallet` 4.0.0-next.1 and `@lazorkit/sdk-legacy` 2.1.0 through
+portal-v2 at the new deploy slot passed 10/10 on 2026-10-13, as did the
+playground and the 14 probes; new passkey authorities and sessions were
+revision 2 with the Kora fee payer recorded, a `revokeSession` refunded the
+session's rent to that payer, and a passkey SOL transfer's Execute took
+11,672 CU (14,469 on `f2779b66…`).
 
 Earlier runs, superseded by the one above, oldest first: on 2026-09-27 at the
 devnet ids (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain
