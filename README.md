@@ -163,7 +163,8 @@ const { instructions, sessionPda } = await client.createSession({
   walletPda,
   adminSigner: ed25519(ownerKp.publicKey),
   sessionKey: sessionKp.publicKey,
-  expiresAt: currentSlot + 216_000n,  // ~1 day
+  // Unix seconds, by the cluster clock (not slots): a day, at most 30.
+  expiresAt: (await client.getClusterTime()).unixTimestamp + 86_400n,
   actions: [
     Actions.programWhitelist(SystemProgram.programId),
     Actions.solMaxPerTx(1_000_000_000n),       // 1 SOL per tx
@@ -177,19 +178,21 @@ const { instructions, sessionPda } = await client.createSession({
 **Important scoping notes**:
 - A policy names what may leave the vault, and nothing it does not name may. With no `Sol*` action the vault's SOL may not fall (3037), rent the vault pays for a new account included; a mint with no `Token*` action may not leave the vault's token accounts (3038). The session above can move SOL but no token. Both are net over one Execute, inflows always pass, and wSOL is a mint, not SOL. A policy holds at most 16 actions, so it can name about 15 mints. For a swap, name the mint it sells, and create the output ATA in a top-level instruction the fee payer funds, before the Execute, or give the session a `SolLimit` that covers the rent.
 - What this covers is the vault's own SOL and the balances of the token accounts it owns directly. Value the vault controls any other way (stake or nonce accounts, positions in other programs, mint or upgrade authorities it holds) is bounded only by `ProgramWhitelist`; see [docs/Architecture.md](docs/Architecture.md#what-a-policy-bounds).
-- `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit enforces vault metadata and token-account invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount`, `FreezeAccount`, etc.): every vault token account the Execute passes writable must end it unchanged but for its balance.
+- `ProgramWhitelist` checks program IDs but not inner instruction discriminators. LazorKit enforces vault metadata and token-account invariants to block escape routes (`System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount`, `FreezeAccount`, etc.): every vault token account the Execute passes writable must end it unchanged but for its balance. These hold for every signer but an Owner — every session, with or without actions, every Admin and Delegate — so no non-Owner signer can hand the vault or its token accounts to anyone. Authorities the vault holds over other accounts (stake, nonce, mint, upgrade) are not checked: bound them with `ProgramWhitelist`, or keep them away from sessions and Admins.
 - Expired spending limits = **fully exhausted** (deny). Expired whitelists = **hard deny**. Expired blacklists = silently dropped.
-- Omitting `actions` creates an unrestricted session — it can do anything the wallet can until it expires.
+- Time is Unix seconds by the cluster clock (`Clock::unix_timestamp`): a session's `expiresAt`, an action's `expiresAt`, and a recurring limit's `windowSeconds` (`86_400n` is a day on any cluster). A deferred execution's `expiryOffset` is still a slot count.
+- Omitting `actions` creates an unrestricted session — it can spend anything the vault holds until it expires. Like every non-Owner signer, it cannot change who controls the vault or its token accounts (`Assign`, `SetAuthority`, `Approve`, `CloseAccount` of an existing account): those take an Owner.
 
 ## Cost
 
-Measured on devnet (November 2025):
+Measured with litesvm (October 2026; one System transfer, with the protocol
+fee and its accounts; `program/tests/execute_compute_tests.rs`):
 
 | Operation | Compute Units | Transaction fee |
 |---|---|---|
-| Execute via session key | ~4,100 | 0.000005 SOL |
-| Execute with Ed25519 authority | ~5,900 | 0.000005 SOL |
-| Execute with passkey (Secp256r1) | ~9,440 | 0.000005 SOL |
+| Execute via session key | ~5,760 | 0.000005 SOL |
+| Execute with Ed25519 authority | ~5,300 | 0.000005 SOL |
+| Execute with passkey (Secp256r1) | ~10,900 | 0.00001 SOL (precompile signature) |
 | CreateWallet | ~15,000–20,000 | 0.000005 SOL + rent |
 
 All paths fit comfortably within Solana's 200,000 CU default budget. The ~2,300 CU precompile verification is the largest fixed cost on the passkey path.
@@ -199,16 +202,21 @@ All paths fit comfortably within Solana's 200,000 CU default budget. The ~2,300 
 | Account | Size | Rent |
 |---|---|---|
 | Wallet PDA | 8 bytes | 0.000947 SOL |
-| Authority (Ed25519) | 80 bytes + policy (0–2048) | 0.001448+ SOL |
-| Authority (Secp256r1) | 145 bytes + policy (0–2048) | 0.001900+ SOL |
-| Session | 80 bytes + actions (0–2048) | 0.001448+ SOL |
+| Authority (Ed25519) | 112 bytes + policy (0–2048) | 0.001670+ SOL |
+| Authority (Secp256r1) | 177 bytes + policy (0–2048) | 0.002123+ SOL |
+| Session | 112 bytes + actions (0–2048) | 0.001670+ SOL |
+
+An authority's or a session's rent goes back to the account that paid it — on a
+sponsored flow, the relayer — whoever closes it: each records its rent payer
+(32 of the bytes above), and the program refuses any other refund destination
+(3039).
 
 A policy costs the same rent per byte as a session's action buffer, and buys the
 same limits. The choice between a policy-bearing authority and a session is about
 lifetime and key custody, not cost: a session key is ephemeral and held by
 software, an authority is durable and can be a passkey.
 
-**Total wallet creation cost**: ~0.0024 SOL (Ed25519) or ~0.0028 SOL (Secp256r1) — roughly $0.40 USD at $150/SOL.
+**Total wallet creation cost**: ~0.0026 SOL (Ed25519) or ~0.0031 SOL (Secp256r1) — roughly $0.40–0.46 USD at $150/SOL.
 
 ## Parallel execution
 
@@ -223,7 +231,7 @@ Each authority has its own PDA, so different authorities on the same wallet exec
 - Fee-eligible instructions require canonical protocol fee accounts and per-payer `FeeRecord` accounting.
 - Expired session limits treated as fully exhausted (never "unlocked").
 - `SolMaxPerTx` uses per-CPI gross-outflow tracking — DeFi round-trips can't bypass the per-tx cap by returning most lamports.
-- Vault and token-account invariants enforced for every signer with a policy (blocks `System::Assign`, `SetAuthority`, `Approve` escapes; a token account that becomes vault-owned during the Execute may carry no delegate or close authority).
+- Vault and token-account invariants enforced for every signer but an Owner — sessions with or without actions, Admins, Delegates, in Execute and ExecuteDeferred (blocks `System::Assign`, `SetAuthority`, `Approve` escapes; a token account that becomes vault-owned during the Execute may carry no delegate or close authority).
 - A policy bounds what it names: SOL and mints it does not name may not leave the vault. Balances are summed per mint over every vault token account in the Execute, each counted once (prevents dummy-account bypass).
 
 Report vulnerabilities via [SECURITY.md](SECURITY.md).

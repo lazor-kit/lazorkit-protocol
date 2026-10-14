@@ -70,8 +70,16 @@ export type AuthorityRoleName = 'owner' | 'admin' | 'spender' | 'unknown';
 export interface WalletFacts extends PasskeyWalletCandidate {
   /** Vault balance, lamports. */
   lamports: bigint;
-  /** Slot the reads were made at; expiry slots compare against it. */
+  /**
+   * Slot of the cluster clock read before the scans; deferred-execution
+   * expiries (and a v1 wallet's session expiries) compare against it.
+   */
   slot: bigint;
+  /**
+   * Unix time (seconds) of that same clock read; a v2 wallet's session
+   * expiries compare against it.
+   */
+  unixTimestamp: bigint;
   /** Every authority on the wallet except this passkey's. */
   otherAuthorities: {
     authorityPda: Address;
@@ -84,11 +92,20 @@ export interface WalletFacts extends PasskeyWalletCandidate {
     /** Ed25519 key listed in trustedKeys. Secp256r1 is never trusted. */
     trusted: boolean;
   }[];
-  /** Sessions the program still accepts: expiry at or after `slot`. */
+  /**
+   * Sessions the program still accepts: expiry at or after `unixTimestamp`
+   * (v2), or at or after `slot` (v1, whose sessions store a slot). A v2
+   * session written before time-based expiry holds a slot (any value below
+   * 2020-01-01 in seconds) and is listed while that slot has not passed.
+   */
   liveSessions: {
     sessionPda: Address;
     sessionKey: Address;
-    expiresAtSlot: bigint;
+    /**
+     * Unix seconds for a v2 wallet's session, a slot for a v1 wallet's (and
+     * for a v2 session written before time-based expiry).
+     */
+    expiresAt: bigint;
     trusted: boolean;
   }[];
   /** Deferred executions the program still accepts: expiry at or after `slot`. */

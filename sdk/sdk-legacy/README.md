@@ -17,7 +17,7 @@ Which version you need depends on which protocol version your target cluster run
 | npm | protocol | where it works |
 |---|---|---|
 | `0.3.x` (`latest`) | v1 | mainnet today |
-| `1.x` (`next`) | v2 | devnet staging today, mainnet after the upgrade |
+| `2.x` (`next`) | v2 | devnet today, mainnet after the upgrade |
 
 The two are not wire-compatible: v2 namespaces every PDA seed, so the same
 `userSeed` derives a different wallet address. See
@@ -27,7 +27,7 @@ existing user's funds across.
 
 ```bash
 npm install @lazorkit/sdk-legacy          # 0.3.x, talks to mainnet today
-npm install @lazorkit/sdk-legacy@next     # 1.x, protocol v2
+npm install @lazorkit/sdk-legacy@next     # 2.x, protocol v2
 ```
 
 ### Browser and React Native
@@ -549,7 +549,7 @@ const prepared = await client.prepareExecute({
 
 The same two options go on a signer config for the one-shot methods (`secp256r1(signer, { minContextSlot, commitment })`), on `migrateV1Wallet`, and on `readCounter`. They apply to all three reads a challenge is built from: the counter, the key and the slot. A node that has not reached `minContextSlot` answers -32016; the SDK retries with a short backoff for up to 10 s, then throws `MinContextSlotNotReachedError` (its `commitment` says which bank was behind). If one of the three reads fails for another reason (or, in `prepareExecute`, the protocol-fee read beside them), the call rejects with that error at once and the challenge reads stop retrying.
 
-With `commitment: 'finalized'`, `minContextSlot` is a slot the node must have *finalized*. How long after its confirmation that happens depends on the cluster: 31 slots (16.5 s) on a local test validator (Agave 4.2.2), and no time at all on devnet on 2026-09-30, where the finalized slot was the confirmed one. The reads wait up to 30 s for it, so where finalization lags, a floor at a just-confirmed tx1 costs that lag before the passkey prompt. The challenge's slot is read at `finalized` too, so it is already that many slots old when the prompt appears, and the program accepts a challenge only until its slot is 150 slots old (about a minute): a 31-slot lag leaves about 119 slots to approve, send and land it. It is not read at `confirmed` instead because the program also refuses a slot newer than the one it runs in, so a relayer simulating at `finalized` would refuse the challenge. Unless you need finalized reads, keep the default: `confirmed` with the floor is enough to sign the right counter.
+With `commitment: 'finalized'`, `minContextSlot` is a slot the node must have *finalized*. How long after its confirmation that happens depends on the cluster: 31 slots (16.5 s) on a local test validator (Agave 4.2.2), and no time at all on devnet on 2026-09-30, where the finalized slot was the confirmed one. The reads wait up to 30 s for it, so where finalization lags, a floor at a just-confirmed tx1 costs that lag before the passkey prompt. The challenge's slot is read at `finalized` too, so it is already that many slots old when the prompt appears, and the program accepts a challenge only until its slot is 150 slots old (about 33–34 s at today's slot times): a 31-slot lag leaves about 119 slots to approve, send and land it. It is not read at `confirmed` instead because the program also refuses a slot newer than the one it runs in, so a relayer simulating at `finalized` would refuse the challenge. Unless you need finalized reads, keep the default: `confirmed` with the floor is enough to sign the right counter.
 
 Without `minContextSlot` the reads are at `confirmed`, or at `processed` when the Connection itself is at `processed` (never staler than the Connection, as in 1.2.0). That is enough only when the node that answers the reads has itself executed the previous transaction. Behind a load-balanced RPC endpoint the confirmation and the next reads can reach different nodes, and the one that answers may still be behind: pass the floor even after confirming.
 
@@ -597,6 +597,62 @@ async function getWebAuthnResponse(
   };
 }
 ```
+
+### Typed approval requests (`@lazorkit/sdk-legacy/approval`)
+
+A passkey challenge is a hash: a page that shows only the challenge cannot say
+what it approves. For `CreateSession`, `RevokeSession` and `RemoveAuthority`
+the SDK can also hand over the request the challenge is computed from, so the
+page that asks for the passkey shows exactly what it signs and computes the
+challenge itself. Pass the credential id to the prepare call and forward
+`prepared.request`:
+
+```typescript
+import {
+  withApprovalFragment,
+  parseTypedReply,
+  verifyApprovalReply,
+} from '@lazorkit/sdk-legacy/approval';
+
+const prepared = await client.prepareCreateSession({
+  payer, walletPda, sessionKey, expiresAt, actions,
+  secp256r1: { credentialIdHash, credentialId, authorityPda }, // credentialId: the raw id bytes
+});
+
+// The request travels in the URL fragment: #/?lk1=<base64url JSON>. Over the
+// size cap this throws TypedRequestTooLargeError; it never truncates.
+const url = withApprovalFragment(portalUrl, prepared.request!);
+
+// The portal signs at the slot and counter it reads when the user approves,
+// and says which in its reply. Check the reply before sending anything:
+const { binding } = verifyApprovalReply(prepared.request!, {
+  clientDataJson: response.clientDataJson,
+  typed: parseTypedReply(reply.typed), // undefined from a portal without typed requests
+});
+const { instructions } = client.finalizeCreateSession(prepared, response, binding);
+```
+
+`verifyApprovalReply` throws `PortalReplyMismatchError` when the passkey signed
+anything but this request (at the portal's slot and a counter no lower than
+the request's), and `finalizeX(..., binding)` checks the same again. A reply
+without a `typed` block must carry the SDK's own challenge, as today.
+
+`prepared.request` is set when `secp256r1.credentialId` is given (its SHA-256
+must be `credentialIdHash`) and the client's program is the devnet or mainnet
+v2 deployment. With a credential id, `prepareCreateSession` throws
+`TransactionTooLargeError` before asking for anything when the signed
+transaction could not fit 1,232 bytes: the program receives the WebAuthn data
+whole, which leaves room for `MAX_PASSKEY_SESSION_ACTIONS_BYTES` (224) bytes
+of actions. `rebindSecp256r1(prepared, { slot, counter })` recomputes any
+prepared passkey signing at another slot and counter.
+
+The subpath also holds what the portal side needs: `readApprovalFragment`,
+`checkApprovalQuery`, `approvalReadPlan`, `describeApproval` (what the request
+approves, as data: amounts in base units, windows in seconds, a screen class,
+and the reason when it would fail on chain), `approvalChallenge` and
+`typedReplyFor`. It imports only `@noble/hashes` and `@noble/curves`: no
+`@solana/web3.js` and no `buffer`, so it bundles on its own for the browser and
+React Native.
 
 ### Messages and ownership proofs: never a transaction challenge
 
@@ -670,6 +726,25 @@ client.removeAuthority({ payer, walletPda, adminSigner, targetAuthorityPda });
 client.transferOwnership({ payer, walletPda, ownerSigner, newOwner });
 ```
 
+**Where a closed account's rent goes.** An authority's or a session's rent
+goes back to the account that paid it — on a sponsored flow, the relayer.
+From layout revision 2 each records that account (`rentPayer` on
+`AuthorityAccount` / `SessionAccount`, `recordedRentPayer(data)` on raw bytes),
+and `RemoveAuthority`, `TransferOwnership` (for the Owner it replaces),
+`RevokeSession` and `CloseExpiredSession` refuse any other refund destination
+(3039 `RefundDestinationMismatch`), whoever signs or pays for the close. Leave
+`refundDestination` out and these methods (and their `prepare*` halves) read the
+account and fill it in; another destination throws
+`RefundDestinationMismatchError` before anything is built.
+`rentRefundDestination(account, fallback)` answers the same question for a
+hand-built close. An account from before revision 2 records none and closes
+where you say (`refundDestination`, by default `payer`).
+
+```typescript
+// Anyone may close an expired session; the rent goes to whoever paid for it.
+client.closeExpiredSession({ caller, sessionPda });
+```
+
 ### Protocol fees & auto-registration
 
 When the protocol is initialized and enabled (admin-only operation), the SDK transparently appends the four fee accounts (`protocol_config`, `fee_record`, `treasury_shard`, `system_program`) to every fee-eligible instruction (`createWallet`, `execute`, `executeDeferred`). The on-chain entrypoint transfers the fee from the payer to a randomly-chosen treasury shard, then strips the accounts before dispatching to the processor.
@@ -708,11 +783,13 @@ If the protocol isn't initialized or is disabled, both resolvers return `undefin
 ```typescript
 import { Actions } from '@lazorkit/sdk-legacy';
 
+// Expiry is Unix time in seconds, by the cluster's clock (not slots).
+const { unixTimestamp } = await client.getClusterTime();
 const { instructions, sessionPda } = await client.createSession({
   payer, walletPda,
   adminSigner: ed25519(ownerKp.publicKey),
   sessionKey: sessionKp.publicKey,
-  expiresAt: currentSlot + 9000n,
+  expiresAt: unixTimestamp + 3600n, // an hour; at most MAX_SESSION_SECONDS (30 days)
   actions: [
     Actions.programWhitelist(SystemProgram.programId),
     Actions.solMaxPerTx(1_000_000_000n),
@@ -742,15 +819,28 @@ ATA in a top-level instruction the fee payer funds, before the Execute, or give
 the session a `solLimit` that covers the rent. A policy holds at most 16
 actions.
 
+**Time is Unix seconds.** A session's `expiresAt`, an action's `expiresAt`
+and a recurring limit's `windowSeconds` are read against the cluster clock
+(`Clock::unix_timestamp`, which `getClusterTime()` returns), so "an hour" or
+"a day" means that on any cluster. The session lives through its `expiresAt`
+second and is refused from the next (3009). `createSession` throws on a value
+that looks like a slot, which is what these fields held before, and
+`serializeActions` throws on an action expiry that looks like one (a Delegate
+policy included); a session
+created with a slot by an older SDK is refused on chain (3008), and one stored
+by an older program reads as long expired. A deferred execution's
+`expiryOffset` is still a slot count (it bounds when tx2 lands, like a
+blockhash).
+
 Action builders (via `Actions`):
 
 | Builder | Notes |
 |---|---|
 | `Actions.solLimit(remaining, expiresAt?)` | Lifetime SOL cap |
-| `Actions.solRecurringLimit({ limit, window, expiresAt? })` | Per-window SOL cap |
+| `Actions.solRecurringLimit({ limit, windowSeconds, expiresAt? })` | Per-window SOL cap (`windowSeconds: 86_400n` = a day) |
 | `Actions.solMaxPerTx(max, expiresAt?)` | Max SOL per execute (gross outflow, not net) |
 | `Actions.tokenLimit({ mint, remaining, expiresAt? })` | Lifetime token cap |
-| `Actions.tokenRecurringLimit({ mint, limit, window, expiresAt? })` | Per-window token cap |
+| `Actions.tokenRecurringLimit({ mint, limit, windowSeconds, expiresAt? })` | Per-window token cap |
 | `Actions.tokenMaxPerTx({ mint, max, expiresAt? })` | Max tokens per execute |
 | `Actions.programWhitelist(programId, expiresAt?)` | Only allow these programs (repeatable) |
 | `Actions.programBlacklist(programId, expiresAt?)` | Block these programs (repeatable) |
@@ -983,15 +1073,16 @@ An authority that carries a policy itself may not add authorities at all.
 | 3015 | DeferredHashMismatch |
 | 3016 | InvalidExpiryWindow |
 | 3020–3029 | Action errors (buffer invalid, whitelist/blacklist, spending limits exceeded) |
-| 3030 | SessionVaultOwnerChanged (H1 fix) |
-| 3031 | SessionVaultDataLenChanged (H1 fix) |
-| 3032 | SessionTokenAuthorityChanged: a vault token account changed other than its balance, or one that became vault-owned during the Execute carries a delegate or close authority |
+| 3030 | SessionVaultOwnerChanged: the vault's owner changed during an Execute signed by anyone but an Owner |
+| 3031 | SessionVaultDataLenChanged: the vault's data length changed during an Execute signed by anyone but an Owner |
+| 3032 | SessionTokenAuthorityChanged: during an Execute signed by anyone but an Owner, a vault token account changed other than its balance, or one that became vault-owned carries a delegate or close authority |
 | 3033 | DelegateRequiresPolicy |
 | 3034 | PolicyBearingAuthorityCannotDelegate |
 | 3035 | PolicyRankMismatch |
 | 3036 | SessionNotExpired |
 | 3037 | ActionUnlistedSolOutflow: the vault's SOL fell and the policy has no `Sol*` action (rent the vault pays for a new account counts) |
 | 3038 | ActionUnlistedTokenOutflow: the vault's balance of a mint fell and no `Token*` action names it (wSOL is a mint) |
+| 3039 | RefundDestinationMismatch: a close named a refund destination other than the account that paid the rent (an authority's or session's recorded payer, a DeferredExec's stored payer) |
 | 4001–4007 | Protocol fee errors (4003 retired) |
 | 4008–4011 | Fee suffix errors: FeeAccountsRequired, ProtocolNotInitialized, InvalidTreasuryShard, InvalidFeeRecord (4012 retired) |
 | 4013 | AccountVersionMismatch |

@@ -30,10 +30,10 @@ import {
   sendTxExpectError,
   airdrop,
   getBalance,
-  getSlot,
   systemTransferFromPda,
   type TestContext,
   makeClient,
+  getUnixTime,
 } from './common.js';
 
 /** Raw `System::Assign { new_owner }` targeting `target` (which must sign). */
@@ -96,13 +96,13 @@ describe('H1 — Session vault invariants', () => {
     sessionPda: Address;
   }> {
     const sessionSigner = await generateKeyPairSigner();
-    const currentSlot = await getSlot(ctx);
+    const now = await getUnixTime(ctx);
     const { instructions, sessionPda } = await client.createSession({
       payer: ctx.payer.address,
       walletPda,
       adminSigner: ed25519(ownerSigner.address, ownerAuthPda),
       sessionKey: sessionSigner.address,
-      expiresAt: currentSlot + 9000n,
+      expiresAt: now + 3_600n,
       actions: [
         Actions.programWhitelist(SYSTEM_PROGRAM_ADDRESS),
         Actions.solMaxPerTx(100_000_000n),

@@ -390,7 +390,7 @@ async function main() {
       walletPda: wEdRes.walletPda,
       adminSigner: ed25519(newOwner.publicKey),
       sessionKey: sessionKey.publicKey,
-      expiresAt: BigInt(await c.getSlot('confirmed')) + 1000n,
+      expiresAt: (await sharedClient.getClusterTime()).unixTimestamp + 3_600n,
       actions: [],
     });
     const r = await sendAndMeasure(c, dev, instructions, [newOwner], lut);
@@ -406,7 +406,7 @@ async function main() {
       walletPda: wSecpRes.walletPda,
       adminSigner: secp256r1(sSigner),
       sessionKey: sessionKey2.publicKey,
-      expiresAt: BigInt(await c.getSlot('confirmed')) + 1000n,
+      expiresAt: (await sharedClient.getClusterTime()).unixTimestamp + 3_600n,
       actions: [],
     });
     const r = await sendAndMeasure(c, dev, instructions, [], lut);

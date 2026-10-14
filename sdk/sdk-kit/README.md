@@ -6,10 +6,12 @@ This is the tree-shakable counterpart to [`@lazorkit/sdk-legacy`](../sdk-legacy/
 
 ## Status
 
-**Release candidate** (`1.0.0-rc.1`), published under the `next` dist-tag. The
+**Release candidate** (`1.0.0-rc.8`), published under the `next` dist-tag. The
 surface is complete for protocol v2 and covered by unit tests plus a
-local-validator suite, with three public paths still untested
-(`revokeSession`, the one-shot `transferOwnership`, `signWithSecp256r1`).
+local-validator suite (`revokeSession` and `closeExpiredSession` in
+`tests-sdk-kit/tests/19-revoke-session.test.ts`, the one-shot
+`transferOwnership` in `17-ownership`), with one public path still untested:
+`signWithSecp256r1`.
 
 **For mainnet today, use [`@lazorkit/sdk-legacy`](https://www.npmjs.com/package/@lazorkit/sdk-legacy) 0.3.x.** Mainnet
 still runs protocol v1, and everything in this package targets v2.
@@ -57,7 +59,28 @@ This SDK targets protocol v2, which is **not wire-compatible with v1**:
   sells, and create its output ATA in a top-level instruction the fee payer
   funds, before the Execute, or give the policy a `SolLimit` that covers the
   rent.
+- Only an Owner may change who controls the vault or its token accounts
+  (`System::Assign`/`Allocate`, `SetAuthority`, `Approve`, `Revoke`,
+  `CloseAccount` of an existing account): every other signer — any session, an
+  Admin, a Delegate — is refused with 3030–3032, policy or not.
+- Time is Unix seconds, by the cluster clock (`getClusterTime()`): a session's
+  `expiresAt` (at most `MAX_SESSION_SECONDS`, 30 days, ahead), an action's
+  `expiresAt`, and a recurring limit's `windowSeconds`. `createSession` throws
+  on a value that looks like a slot (the program refuses such a session, 3008),
+  and `serializeActions` throws on an action expiry that looks like one, so a
+  Delegate policy is checked too.
+  A deferred execution's `expiryOffset` is still a slot count.
 - `AddAuthority`/`RemoveAuthority` need the wallet account **writable**.
+- An authority's or a session's rent goes back to the account that paid it.
+  From layout revision 2 each records that account (`rentPayer` on the
+  decoded account), and `RevokeSession`, `CloseExpiredSession`,
+  `RemoveAuthority` and `TransferOwnership` refuse any other refund destination
+  (3039). `revokeSession`, `removeAuthority`, `transferOwnership` and
+  `closeExpiredSession` read it and fill it in when `refundDestination` is left
+  out, and throw `RefundDestinationMismatchError` for another one;
+  `rentRefundDestination(account, fallback)` answers the same question for a
+  hand-built close. An account from before revision 2 records none and closes
+  where you say (`refundDestination`, by default `payer`).
 - Serialized `DeferredPayload`s carry a version and are rejected across the
   boundary — re-authorize rather than replaying one.
 
@@ -429,8 +452,8 @@ The reads wait up to 30 s for it, so where finalization lags, a floor at a
 just-confirmed tx1 costs that lag before the passkey prompt. The challenge's
 slot is read at `finalized` too, so it is already that many slots old when the
 prompt appears, and the program accepts a challenge only until its slot is 150
-slots old (about a minute): a 31-slot lag leaves about 119 slots to approve,
-send and land it. It is not read at `confirmed` instead because the program
+slots old (about 33–34 s at today's slot times): a 31-slot lag leaves about
+119 slots to approve, send and land it. It is not read at `confirmed` instead because the program
 also refuses a slot newer than the one it runs in, so a relayer simulating at
 `finalized` would refuse the challenge. Unless you need finalized reads, keep
 the default: `confirmed` with the floor is enough to sign the right counter.

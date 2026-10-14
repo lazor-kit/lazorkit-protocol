@@ -174,13 +174,13 @@ async function main() {
 
   step('7. Create Session Key');
   const sessionKp = Keypair.generate();
-  const currentSlot = BigInt(await connection.getSlot());
+  const { unixTimestamp } = await client.getClusterTime();
   const { instructions: sessIxs, sessionPda } = await client.createSession({
     payer: payer.publicKey,
     walletPda,
     adminSigner: ed25519(ownerKp.publicKey, authorityPda),
     sessionKey: sessionKp.publicKey,
-    expiresAt: currentSlot + 10_000n,
+    expiresAt: unixTimestamp + 3_600n, // an hour, by the cluster clock
     actions: [
       { type: SessionActionType.SolMaxPerTx, max: BigInt(0.05 * LAMPORTS_PER_SOL) },
       { type: SessionActionType.SolLimit, remaining: BigInt(0.1 * LAMPORTS_PER_SOL) },

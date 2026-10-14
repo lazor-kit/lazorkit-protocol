@@ -55,6 +55,7 @@ pub fn init_authority() -> Keypair {
 pub fn setup_uninitialized() -> TestContext {
     let payer = Keypair::new();
     let mut svm = LiteSVM::new();
+    start_the_clock(&mut svm);
     svm.airdrop(&payer.pubkey(), 10_000_000_000)
         .expect("Failed to airdrop");
     let program_id = load_program(&mut svm);
@@ -221,6 +222,37 @@ pub fn fee_suffix_for(program_id: Pubkey, fee_payer: Pubkey) -> Vec<AccountMeta>
         AccountMeta::new(shard_pda, false),
         AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
     ]
+}
+
+// ─── Time ────────────────────────────────────────────────────────────────
+//
+// Session expiries, action expiries and recurring windows are Unix seconds
+// (`Clock::unix_timestamp`). litesvm starts its clock at zero, where a slot
+// passed in place of a time would look just as plausible as a time; every
+// suite starts at a real date instead, from which any slot is decades past.
+
+/// The Unix time every suite starts at: 2026-10-04 00:00 UTC, the day devnet
+/// reached slot 507,081,509.
+pub const TEST_UNIX_TIME: i64 = 1_791_072_000;
+
+fn start_the_clock(svm: &mut LiteSVM) {
+    let mut clock = svm.get_sysvar::<solana_sdk::clock::Clock>();
+    clock.unix_timestamp = TEST_UNIX_TIME;
+    svm.set_sysvar(&clock);
+}
+
+/// The cluster's Unix time, as the program reads it.
+pub fn unix_now(svm: &LiteSVM) -> u64 {
+    svm.get_sysvar::<solana_sdk::clock::Clock>().unix_timestamp as u64
+}
+
+/// Move the clock's Unix time to `unix` (the slot stays), and the blockhash
+/// on, so the same transaction can be sent again at the new time.
+pub fn set_unix_time(svm: &mut LiteSVM, unix: u64) {
+    let mut clock = svm.get_sysvar::<solana_sdk::clock::Clock>();
+    clock.unix_timestamp = unix as i64;
+    svm.set_sysvar(&clock);
+    advance(svm);
 }
 
 /// Advance the blockhash so a byte-identical transaction can be sent again.
@@ -463,8 +495,8 @@ pub fn create_session_with_actions(
     let session = Keypair::new();
     let session_pda = session_pda_for(context.program_id, wallet, &session);
 
-    let clock: solana_sdk::clock::Clock = context.svm.get_sysvar();
-    let expires_at = clock.slot + 100_000;
+    // A little over a day, in seconds.
+    let expires_at = unix_now(&context.svm) + 100_000;
 
     let mut data = vec![5u8]; // CreateSession
     data.extend_from_slice(session.pubkey().as_ref());
@@ -506,11 +538,39 @@ pub fn session_pda_for(program_id: Pubkey, wallet: &WalletFixture, session: &Key
     .0
 }
 
-/// Read the raw action buffer stored after the 80-byte session header.
+/// Where an account's policy (a session's actions, an authority's policy)
+/// starts, written out independently of the program's own `PolicyLocation`:
+///
+/// - session (0x23): after the 80-byte header in layout revision 1, after the
+///   header and the 32-byte rent payer from revision 2;
+/// - authority (0x22): after the key material (80 Ed25519, 145 Secp256r1) in
+///   revision 1, after the key material and the rent payer from revision 2.
+pub fn policy_offset(data: &[u8]) -> usize {
+    match (data[0], data[1], data[2], data[4]) {
+        (0x23, _, 1, _) => 80,
+        (0x23, _, 2, _) => 112,
+        (0x22, 0, _, 1) => 80,
+        (0x22, 0, _, 2) => 112,
+        (0x22, 1, _, 1) => 145,
+        (0x22, 1, _, 2) => 177,
+        other => panic!("no policy offset for (disc, type, session rev, authority rev) {other:?}"),
+    }
+}
+
+/// The rent payer an authority or a session records (layout revision 2), at
+/// the offset its policy would otherwise start at minus 32.
+pub fn recorded_rent_payer(svm: &LiteSVM, account: Pubkey) -> Pubkey {
+    let data = svm.get_account(&account).expect("account exists").data;
+    let at = policy_offset(&data) - 32;
+    Pubkey::try_from(&data[at..at + 32]).unwrap()
+}
+
+/// Read the raw action buffer of a session, or the policy of an authority.
 pub fn session_actions(svm: &LiteSVM, session_pda: Pubkey) -> Vec<u8> {
     let data = svm.get_account(&session_pda).expect("session exists").data;
-    if data.len() > 80 {
-        data[80..].to_vec()
+    let start = policy_offset(&data);
+    if data.len() > start {
+        data[start..].to_vec()
     } else {
         Vec::new()
     }
@@ -519,7 +579,7 @@ pub fn session_actions(svm: &LiteSVM, session_pda: Pubkey) -> Vec<u8> {
 // ─── Action buffer encoding (see state/action.rs) ────────────────────────
 //
 // Each action is `[type u8][data_len u16 LE][expires_at u64 LE][data...]`.
-// `expires_at = 0` means "never expires".
+// `expires_at` is Unix seconds; 0 means "never expires".
 
 fn action(action_type: u8, data: &[u8]) -> Vec<u8> {
     let mut out = vec![action_type];
@@ -547,7 +607,7 @@ pub fn action_token_limit(mint: Pubkey, remaining: u64) -> Vec<u8> {
     action(4, &data)
 }
 
-/// `SolRecurringLimit` — lamport cap per window of `window` slots.
+/// `SolRecurringLimit` — lamport cap per window of `window` seconds.
 /// Data: `[limit u64][spent u64][window u64][last_reset u64]`.
 pub fn action_sol_recurring_limit(limit: u64, window: u64) -> Vec<u8> {
     let mut data = Vec::with_capacity(32);
@@ -563,7 +623,7 @@ pub fn action_sol_max_per_tx(max: u64) -> Vec<u8> {
     action(3, &max.to_le_bytes())
 }
 
-/// `TokenRecurringLimit` — cap per window for one mint.
+/// `TokenRecurringLimit` — cap per window of `window` seconds for one mint.
 /// Data: `[mint 32][limit u64][spent u64][window u64][last_reset u64]`.
 pub fn action_token_recurring_limit(mint: Pubkey, limit: u64, window: u64) -> Vec<u8> {
     let mut data = Vec::with_capacity(64);
@@ -588,8 +648,8 @@ pub fn action_program_blacklist(program: Pubkey) -> Vec<u8> {
     action(11, program.as_ref())
 }
 
-/// A `u64` field of action `action_idx` in a policy buffer stored from byte 80:
-/// a session's actions, or an Ed25519 authority's policy. `field_off` is
+/// A `u64` field of action `action_idx` in a policy buffer: a session's
+/// actions, or an authority's policy (see [`policy_offset`]). `field_off` is
 /// relative to the action's data (`SolLimit.remaining` is 0,
 /// `TokenLimit.remaining` 32).
 pub fn session_action_u64(
@@ -1047,6 +1107,7 @@ pub fn load_fixture_program(svm: &mut LiteSVM, crate_name: &str) -> Pubkey {
 pub fn setup_test() -> TestContext {
     let payer = Keypair::new();
     let mut svm = LiteSVM::new();
+    start_the_clock(&mut svm);
 
     // Airdrop to payer
     svm.airdrop(&payer.pubkey(), 10_000_000_000)
@@ -1379,7 +1440,8 @@ pub fn remove_authority_ix(
             AccountMeta::new(wallet.wallet_pda, false),
             AccountMeta::new(authorizer_pda, false),
             AccountMeta::new(target_pda, false),
-            AccountMeta::new(Pubkey::new_unique(), false), // refund destination
+            // Refund destination: whoever the target records as its rent payer.
+            AccountMeta::new(recorded_rent_payer(&context.svm, target_pda), false),
             AccountMeta::new_readonly(authorizer_key.pubkey(), true),
         ],
         data: vec![2u8], // RemoveAuthority, empty Ed25519 payload

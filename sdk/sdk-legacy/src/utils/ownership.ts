@@ -5,12 +5,14 @@ import {
   PublicKey,
   SolanaJSONRPCErrorCode,
   SystemProgram,
+  SYSVAR_CLOCK_PUBKEY,
 } from '@solana/web3.js';
 import { p256 } from '@noble/curves/nist.js';
 import { sha256 } from '@noble/hashes/sha2';
 import { randomBytes } from '@noble/hashes/utils';
 import { ACCOUNT_DISCRIMINATOR, legacyProgramIdFor } from '../constants';
 import { concatBytes } from './bytes';
+import { MIN_UNIX_SECONDS } from './time';
 import { findVaultPda } from './pdas';
 import { getAssociatedTokenAddress, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from './spl';
 import {
@@ -80,8 +82,16 @@ export type AuthorityRoleName = 'owner' | 'admin' | 'spender' | 'unknown';
 export interface WalletFacts extends PasskeyWalletCandidate {
   /** Vault balance, lamports. */
   lamports: number;
-  /** Slot the reads were made at; expiry slots compare against it. */
+  /**
+   * Slot of the cluster clock read before the scans; deferred-execution
+   * expiries (and a v1 wallet's session expiries) compare against it.
+   */
   slot: bigint;
+  /**
+   * Unix time (seconds) of that same clock read; a v2 wallet's session
+   * expiries compare against it.
+   */
+  unixTimestamp: bigint;
   /** Every authority on the wallet except this passkey's. */
   otherAuthorities: {
     authorityPda: PublicKey;
@@ -94,11 +104,20 @@ export interface WalletFacts extends PasskeyWalletCandidate {
     /** Ed25519 key listed in trustedKeys. Secp256r1 is never trusted. */
     trusted: boolean;
   }[];
-  /** Sessions the program still accepts: expiry at or after `slot`. */
+  /**
+   * Sessions the program still accepts: expiry at or after `unixTimestamp`
+   * (v2), or at or after `slot` (v1, whose sessions store a slot). A v2
+   * session written before time-based expiry holds a slot (any value below
+   * 2020-01-01 in seconds) and is listed while that slot has not passed.
+   */
   liveSessions: {
     sessionPda: PublicKey;
     sessionKey: PublicKey;
-    expiresAtSlot: bigint;
+    /**
+     * Unix seconds for a v2 wallet's session, a slot for a v1 wallet's (and
+     * for a v2 session written before time-based expiry).
+     */
+    expiresAt: bigint;
     trusted: boolean;
   }[];
   /** Deferred executions the program still accepts: expiry at or after `slot`. */
@@ -588,15 +607,16 @@ export async function describePasskeyWallets(
   const mints = watchedMints(options.watchMints);
   if (candidates.length === 0) return [];
 
-  // The slot first: one older than the reads can only count more things live.
-  const slot = BigInt(await connection.getSlot());
+  // The clock first: a slot and a time older than the reads can only count
+  // more things live.
+  const clock = await readClusterClock(connection);
 
   // Drop candidates whose wallet is gone before scanning anything for them.
   // Each survivor's wallet is read again, in order with the rest.
   const { infos: wallets } = await readAccounts(connection, candidates.map((c) => c.walletPda));
   const live = candidates.filter((c, i) => isLiveWallet(c, wallets[i]));
   const described = await mapBounded(live, DESCRIBE_CONCURRENCY, (c) =>
-    describeCandidate(connection, c, slot, trusted, mints),
+    describeCandidate(connection, c, clock, trusted, mints),
   );
   return described.filter((f): f is WalletFacts => f !== null);
 }
@@ -617,7 +637,7 @@ function isLiveWallet(
 async function describeCandidate(
   connection: Connection,
   c: PasskeyWalletCandidate,
-  slot: bigint,
+  clock: ClusterClock,
   trusted: ReadonlySet<string>,
   mints: PublicKey[],
 ): Promise<WalletFacts | null> {
@@ -680,12 +700,14 @@ async function describeCandidate(
     }
   }
 
-  // Live through the expiry slot itself: see sessionExpiry.
+  // Live through the expiry itself: see sessionExpiry. A v2 session expires
+  // by Unix time (a slot-valued one by its slot: see sessionLive), a v1
+  // session by the slot v1 wrote.
   const liveSessions: WalletFacts['liveSessions'] = [];
   for (const { pubkey, account } of sessions) {
     const data = account.data;
-    const expiresAtSlot = sessionExpiry(data);
-    if (expiresAtSlot < slot) continue;
+    const expiresAt = sessionExpiry(data);
+    if (!sessionLive(c.version, expiresAt, clock)) continue;
     const readable = data.length >= SESSION_EXPIRES_AT + 8;
     const sessionKey = readable
       ? new PublicKey(data.subarray(SESSION_KEY, SESSION_KEY + 32))
@@ -693,7 +715,7 @@ async function describeCandidate(
     liveSessions.push({
       sessionPda: pubkey,
       sessionKey,
-      expiresAtSlot,
+      expiresAt,
       trusted: readable && trusted.has(sessionKey.toBase58()),
     });
   }
@@ -705,7 +727,7 @@ async function describeCandidate(
   for (const { pubkey, account } of deferred) {
     const data = account.data;
     const expiresAtSlot = deferredExpiry(data);
-    if (expiresAtSlot < slot) continue;
+    if (expiresAtSlot < clock.slot) continue;
     const authorizedBy =
       data.length >= DEFERRED_EXPIRES_AT + 8
         ? new PublicKey(data.subarray(DEFERRED_AUTHORITY, DEFERRED_AUTHORITY + 32))
@@ -721,7 +743,8 @@ async function describeCandidate(
     authorityPda: c.authorityPda,
     publicKey: c.publicKey,
     lamports,
-    slot,
+    slot: clock.slot,
+    unixTimestamp: clock.unixTimestamp,
     otherAuthorities,
     liveSessions,
     pendingDeferred,
@@ -757,17 +780,53 @@ export function isPlainSystemAccount(info: AccountInfo<Buffer> | null | undefine
 }
 
 /**
- * The slot through which the program still accepts a session (it refuses only
- * once `current_slot > expires_at`), or a never-passing slot when the account
- * is too short to read.
+ * The last moment the program still accepts a session (it refuses only once
+ * the clock is past `expires_at`): Unix seconds for a v2 session, the slot v1
+ * wrote for a v1 one. A never-passing value when the account is too short to
+ * read.
  */
 export function sessionExpiry(data: Uint8Array): bigint {
   return data.length >= SESSION_EXPIRES_AT + 8 ? readU64LE(data, SESSION_EXPIRES_AT) : UNREADABLE_EXPIRY;
 }
 
-/** As {@link sessionExpiry}, for a deferred execution. */
+/**
+ * Whether the program may still accept a session of protocol `version` that
+ * expires at `expiresAt` ({@link sessionExpiry}).
+ *
+ * A v1 session stores the slot v1 wrote, and the sunset program still reads it
+ * as one. A v2 session stores a Unix time, except one written before
+ * time-based expiry, which holds a slot. Such a session counts while its slot
+ * has not passed. A cluster still running a slot-based build accepts it until
+ * then and a time-based build never does, so counting it keeps an ownership
+ * check from missing a session in either case.
+ */
+export function sessionLive(version: 1 | 2, expiresAt: bigint, clock: ClusterClock): boolean {
+  if (version === 1 || expiresAt < MIN_UNIX_SECONDS) return expiresAt >= clock.slot;
+  return expiresAt >= clock.unixTimestamp;
+}
+
+/** As {@link sessionExpiry}, for a deferred execution, whose expiry is always a slot. */
 export function deferredExpiry(data: Uint8Array): bigint {
   return data.length >= DEFERRED_EXPIRES_AT + 8 ? readU64LE(data, DEFERRED_EXPIRES_AT) : UNREADABLE_EXPIRY;
+}
+
+/** The cluster clock as the program reads it. */
+export interface ClusterClock {
+  slot: bigint;
+  /** Unix time in seconds: what session and action expiries are measured in. */
+  unixTimestamp: bigint;
+}
+
+/**
+ * Read the Clock sysvar: the slot, and the Unix time the program compares
+ * session expiries, action expiries and recurring windows against. This is the
+ * cluster's clock, which can differ from the local one by seconds to minutes.
+ */
+export async function readClusterClock(connection: Connection): Promise<ClusterClock> {
+  const info = await connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY);
+  if (!info || info.data.length < 40) throw new Error('the Clock sysvar is missing or too short');
+  const view = new DataView(info.data.buffer, info.data.byteOffset, info.data.byteLength);
+  return { slot: view.getBigUint64(0, true), unixTimestamp: view.getBigInt64(32, true) };
 }
 
 /** `WATCHED_MINTS`, then each of `extra` not already there. A malformed mint throws. */

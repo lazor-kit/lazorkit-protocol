@@ -29,7 +29,7 @@ import {
   mintBlocker,
   buildSecp256r1Challenge,
 } from '../../sdk/sdk-legacy/src';
-import { contextual, STUB_CONTEXT_SLOT, type AccountsRead } from './contextReads';
+import { contextual, STUB_CONTEXT_SLOT, STUB_UNIX_TIME, type AccountsRead } from './contextReads';
 
 // v2 and v1 at different program ids, as on the real clusters: the migration
 // executes against the v1 program and delivers to a v2 vault at the v2 program.
@@ -247,16 +247,17 @@ describe('migrateV1Wallet by address', () => {
     } = {},
   ): Connection {
     const authType = opts.ownerType === 'ed25519' ? 0 : 1;
+    // A session expires by Unix time (STUB_UNIX_TIME), a deferred execution
+    // by slot (1_000). The program refuses either only once the clock is past
+    // its expiry: `lastSlot` still works for one more second, or slot.
     const live = Buffer.alloc(176);
-    live.writeBigUInt64LE(5_000n, 72);
+    live.writeBigUInt64LE(STUB_UNIX_TIME + 4_000n, 72);
     live.writeBigUInt64LE(5_000n, 168);
-    // The program refuses a session or deferred execution only once the slot
-    // (1_000 here) is past its expiry: this one still works for one slot.
     const lastSlot = Buffer.alloc(176);
-    lastSlot.writeBigUInt64LE(1_000n, 72);
+    lastSlot.writeBigUInt64LE(STUB_UNIX_TIME, 72);
     lastSlot.writeBigUInt64LE(1_000n, 168);
     const expired = Buffer.alloc(176);
-    expired.writeBigUInt64LE(999n, 72);
+    expired.writeBigUInt64LE(STUB_UNIX_TIME - 1n, 72);
     expired.writeBigUInt64LE(999n, 168);
     const authorityData = (role: number) => {
       const data = v1AuthorityData(existing, role, authType);

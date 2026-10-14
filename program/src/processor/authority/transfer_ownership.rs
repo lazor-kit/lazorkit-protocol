@@ -14,7 +14,13 @@ use crate::{
         ed25519::Ed25519Authenticator, secp256r1::Secp256r1Authenticator, traits::Authenticator,
     },
     error::AuthError,
-    state::{authority::AuthorityAccountHeader, AccountDiscriminator},
+    state::{
+        authority::AuthorityAccountHeader,
+        layout_version,
+        policy::authority_key_end,
+        rent_payer::{check_new_payer, refund_disposition, write_payer, Refund, RENT_PAYER_LEN},
+        AccountDiscriminator,
+    },
     utils::is_all_zero,
 };
 
@@ -33,14 +39,17 @@ use crate::{
 /// 2. **Authorization**: strictly enforced to only work if `current_owner` has `Role::Owner` (0).
 /// 3. **Atomic Swap**:
 ///    - Creates the `new_owner` account.
-///    - Closes the `current_owner` account and refunds rent to `refund_dest`.
+///    - Closes the `current_owner` account and refunds its rent to `refund_dest`,
+///      which must be the account that paid that rent (recorded from layout
+///      revision 2; see `state::rent_payer`).
 ///
 /// # Accounts:
 /// 1. `[signer, writable]` Payer.
 /// 2. `[]` Wallet PDA.
 /// 3. `[signer, writable]` Current Owner Authority.
 /// 4. `[writable]` New Owner Authority.
-/// 5. `[writable]` Refund Destination (receives closed current_owner rent).
+/// 5. `[writable]` Refund Destination (receives closed current_owner rent; its
+///    recorded rent payer).
 /// 6. `[]` System Program.
 /// 7. `[]` Rent Sysvar.
 ///
@@ -170,7 +179,7 @@ pub fn process(
     }
 
     // Scope to borrow current owner data
-    {
+    let refund = {
         let data = unsafe { current_owner.borrow_mut_data_unchecked() };
         if (data.as_ptr() as usize) % 8 != 0 {
             return Err(ProgramError::InvalidAccountData);
@@ -192,6 +201,10 @@ pub fn process(
         if auth.policy_len != 0 {
             return Err(AuthError::PermissionDenied.into());
         }
+        // The current Owner's rent goes back to whoever paid it, recorded at
+        // creation; an Owner from before layout revision 2 records nobody
+        // (state::rent_payer).
+        let refund = refund_disposition(data, refund_dest)?;
 
         // Authenticate Current Owner.
         // Sign over payer + new_owner + refund_dest to prevent substitution attacks.
@@ -234,7 +247,8 @@ pub fn process(
             },
             _ => return Err(AuthError::InvalidAuthenticationKind.into()),
         }
-    }
+        refund
+    };
 
     let (new_key, bump) = find_program_address(
         &[crate::seeds::AUTHORITY, wallet_pda.key().as_ref(), id_seed],
@@ -245,13 +259,11 @@ pub fn process(
     }
     check_zero_data(new_owner, ProgramError::AccountAlreadyInitialized)?;
 
-    // Fixed sizes per auth type (see wallet/create.rs for layout).
+    // Layout revision 2 (see wallet/create.rs and state::rent_payer): key
+    // material, then the rent payer. A new Owner carries no policy.
     let header_size = std::mem::size_of::<AuthorityAccountHeader>();
-    let space = match args.auth_type {
-        0 => header_size + 32,           // Ed25519: pubkey
-        1 => header_size + 32 + 33 + 32, // Secp256r1: cred ∥ pubkey ∥ rpIdHash
-        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
-    };
+    let key_end = authority_key_end(args.auth_type).ok_or(AuthError::InvalidAuthenticationKind)?;
+    let space = key_end + RENT_PAYER_LEN;
     let rent = rent_obj.minimum_balance(space);
 
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
@@ -262,6 +274,9 @@ pub fn process(
         Seed::from(id_seed),
         Seed::from(&bump_arr),
     ];
+
+    // The new Owner records `payer` as its rent payer: an ordinary account only.
+    check_new_payer(payer)?;
 
     crate::utils::initialize_pda_account(
         payer,
@@ -282,7 +297,7 @@ pub fn process(
         authority_type: args.auth_type,
         role: 0,
         bump,
-        version: crate::state::CURRENT_ACCOUNT_VERSION,
+        version: layout_version::AUTHORITY,
         _padding1: [0; 3],
         counter: 0,
         policy_len: 0,
@@ -326,13 +341,19 @@ pub fn process(
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
 
-    let current_lamports = unsafe { *current_owner.borrow_mut_lamports_unchecked() };
-    let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
-    unsafe {
-        *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
-            .checked_add(current_lamports)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-        *current_owner.borrow_mut_lamports_unchecked() = 0;
+    // Who paid the new Owner's rent: the only account a later RemoveAuthority
+    // or TransferOwnership will return it to.
+    write_payer(data, key_end, payer.key())?;
+
+    if refund == Refund::Credit {
+        let current_lamports = unsafe { *current_owner.borrow_mut_lamports_unchecked() };
+        let refund_lamports = unsafe { *refund_dest.borrow_mut_lamports_unchecked() };
+        unsafe {
+            *refund_dest.borrow_mut_lamports_unchecked() = refund_lamports
+                .checked_add(current_lamports)
+                .ok_or(ProgramError::ArithmeticOverflow)?;
+            *current_owner.borrow_mut_lamports_unchecked() = 0;
+        }
     }
     let current_data = unsafe { current_owner.borrow_mut_data_unchecked() };
     current_data.fill(0);

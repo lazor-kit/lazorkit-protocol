@@ -3,7 +3,10 @@ use pinocchio::pubkey::Pubkey;
 
 /// Header for all Authority accounts.
 ///
-/// This header is followed by variable-length data depending on the `authority_type`.
+/// This header is followed by the key material, whose length depends on the
+/// `authority_type` (32 bytes Ed25519, 97 Secp256r1); from layout revision 2 by
+/// the 32-byte rent payer (`state::rent_payer`); then `policy_len` bytes of
+/// policy.
 #[repr(C, align(8))]
 #[derive(NoPadding, Debug, Clone, Copy)]
 pub struct AuthorityAccountHeader {
@@ -51,6 +54,7 @@ impl AuthorityAccountHeader {
             data,
             crate::state::AccountDiscriminator::Authority,
             crate::state::version_offset::AUTHORITY,
+            crate::state::layout_version::AUTHORITY,
             Self::MIN_LEN,
         )
     }

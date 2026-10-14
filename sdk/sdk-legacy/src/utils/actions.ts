@@ -5,6 +5,10 @@
  * They are immutable — once set, they cannot be changed. To change permissions,
  * revoke the session and create a new one.
  *
+ * Times are Unix seconds: an action's `expiresAt` (0 = none of its own) and a
+ * recurring limit's `windowSeconds`. The program reads both against the
+ * cluster clock (`Clock::unix_timestamp`), not slots.
+ *
  * A policy names what may leave the vault, and nothing it does not name may
  * (protocol v2): with no `Sol*` action the vault's SOL may not fall, rent the
  * vault pays for a new account included, and a mint with no `Token*` action
@@ -21,7 +25,7 @@
  * import { Actions, serializeActions } from '@lazorkit/sdk-legacy';
  *
  * const actions = [
- *   Actions.solRecurringLimit({ limit: 1_000_000_000n, window: 216_000n }),
+ *   Actions.solRecurringLimit({ limit: 1_000_000_000n, windowSeconds: 86_400n }), // 1 SOL a day
  *   Actions.programWhitelist(JUPITER_PROGRAM_ID),
  *   Actions.solMaxPerTx(500_000_000n),
  *   // Without a Token* action no token may leave, so name each one a swap sells.
@@ -30,6 +34,7 @@
  * ```
  */
 import { PublicKey } from '@solana/web3.js';
+import { MIN_UNIX_SECONDS } from './time';
 
 // ─── Action Type IDs (must match program/src/state/action.rs) ────────
 
@@ -50,7 +55,7 @@ export interface SolLimitAction {
   type: SessionActionType.SolLimit;
   /** Lifetime SOL spending cap in lamports */
   remaining: bigint;
-  /** Optional per-action expiry (slot). 0 = inherit session expiry. */
+  /** Optional expiry of this action alone, Unix seconds. 0 / unset = none of its own. */
   expiresAt?: bigint;
 }
 
@@ -58,9 +63,9 @@ export interface SolRecurringLimitAction {
   type: SessionActionType.SolRecurringLimit;
   /** Max lamports per window */
   limit: bigint;
-  /** Window size in slots */
-  window: bigint;
-  /** Optional per-action expiry (slot). 0 = inherit session expiry. */
+  /** Window length in seconds (86_400n = a day) */
+  windowSeconds: bigint;
+  /** Optional expiry of this action alone, Unix seconds. 0 / unset = none of its own. */
   expiresAt?: bigint;
 }
 
@@ -85,8 +90,8 @@ export interface TokenRecurringLimitAction {
   mint: PublicKey;
   /** Max tokens per window */
   limit: bigint;
-  /** Window size in slots */
-  window: bigint;
+  /** Window length in seconds (86_400n = a day) */
+  windowSeconds: bigint;
   expiresAt?: bigint;
 }
 
@@ -141,7 +146,7 @@ export const Actions = {
   /** SOL spending cap per time window */
   solRecurringLimit: (params: {
     limit: bigint;
-    window: bigint;
+    windowSeconds: bigint;
     expiresAt?: bigint;
   }): SolRecurringLimitAction => ({
     type: SessionActionType.SolRecurringLimit,
@@ -169,7 +174,7 @@ export const Actions = {
   tokenRecurringLimit: (params: {
     mint: PublicKey;
     limit: bigint;
-    window: bigint;
+    windowSeconds: bigint;
     expiresAt?: bigint;
   }): TokenRecurringLimitAction => ({
     type: SessionActionType.TokenRecurringLimit,
@@ -233,7 +238,7 @@ function serializeActionData(action: SessionAction): Uint8Array {
       const buf = new Uint8Array(32);
       writeU64LE(buf, 0, action.limit);
       writeU64LE(buf, 8, 0n); // spent = 0
-      writeU64LE(buf, 16, action.window);
+      writeU64LE(buf, 16, action.windowSeconds);
       writeU64LE(buf, 24, 0n); // last_reset = 0
       return buf;
     }
@@ -253,7 +258,7 @@ function serializeActionData(action: SessionAction): Uint8Array {
       buf.set(action.mint.toBytes(), 0);
       writeU64LE(buf, 32, action.limit);
       writeU64LE(buf, 40, 0n); // spent = 0
-      writeU64LE(buf, 48, action.window);
+      writeU64LE(buf, 48, action.windowSeconds);
       writeU64LE(buf, 56, 0n); // last_reset = 0
       return buf;
     }
@@ -273,8 +278,34 @@ function serializeActionData(action: SessionAction): Uint8Array {
 }
 
 /**
+ * Throws when an action's times are plainly not seconds: an `expiresAt` other
+ * than 0 below 2020-01-01 (a slot, what the field held before time-based
+ * expiry), or a recurring window of 0. The program would store such a slot as
+ * a time long past: a limit or a whitelist then denies everything, and a
+ * blacklist entry stops blocking its program. Every policy goes through here,
+ * a session's and a Delegate's alike.
+ */
+function assertActionTimes(action: SessionAction): void {
+  const at = action.expiresAt ?? 0n;
+  if (at !== 0n && at < MIN_UNIX_SECONDS) {
+    throw new Error(
+      `an action's expiresAt ${at} is not a Unix time in seconds (it looks like a slot); ` +
+        'use 0 / leave it unset for no expiry of its own',
+    );
+  }
+  if (
+    (action.type === SessionActionType.SolRecurringLimit ||
+      action.type === SessionActionType.TokenRecurringLimit) &&
+    action.windowSeconds <= 0n
+  ) {
+    throw new Error('a recurring limit needs windowSeconds > 0');
+  }
+}
+
+/**
  * Serialize an array of SessionActions into the flat byte buffer format
- * expected by the program.
+ * expected by the program. Throws on an expiry that is plainly a slot, or a
+ * recurring window of zero.
  *
  * Each action: [type: u8][data_len: u16 LE][expires_at: u64 LE][data...]
  */
@@ -283,6 +314,7 @@ export function serializeActions(actions: SessionAction[]): Uint8Array {
 
   const parts: Uint8Array[] = [];
   for (const action of actions) {
+    assertActionTimes(action);
     const data = serializeActionData(action);
     const header = new Uint8Array(ACTION_HEADER_SIZE);
     header[0] = action.type;
@@ -323,15 +355,16 @@ function readU16LE(buf: Uint8Array, offset: number): number {
 /** One action as it currently stands on chain, including its live counters. */
 export interface ParsedAction {
   type: SessionActionType;
-  /** Per-action expiry slot. 0 = inherit the session/authority expiry. */
+  /** Per-action expiry, Unix seconds. 0 = none of its own. */
   expiresAt: bigint;
   /** Lifetime or per-window cap, in lamports or token base units. */
   limit?: bigint;
   /** Consumed so far in the current window (recurring actions only). */
   spent?: bigint;
-  /** Window length in slots (recurring actions only). */
-  window?: bigint;
-  /** Slot the current window was last reset to (recurring actions only). */
+  /** Window length in seconds (recurring actions only). */
+  windowSeconds?: bigint;
+  /** Unix time (seconds) of the spend that opened the current window, 0
+   *  before the first (recurring actions only). */
   lastReset?: bigint;
   /** The mint a Token* action applies to. */
   mint?: PublicKey;
@@ -381,7 +414,7 @@ export function parseActions(buffer: Uint8Array): ParsedAction[] {
       case SessionActionType.SolRecurringLimit:
         parsed.limit = readU64LE(data, 0);
         parsed.spent = readU64LE(data, 8);
-        parsed.window = readU64LE(data, 16);
+        parsed.windowSeconds = readU64LE(data, 16);
         parsed.lastReset = readU64LE(data, 24);
         break;
       case SessionActionType.TokenLimit:
@@ -393,7 +426,7 @@ export function parseActions(buffer: Uint8Array): ParsedAction[] {
         parsed.mint = new PublicKey(data.subarray(0, 32));
         parsed.limit = readU64LE(data, 32);
         parsed.spent = readU64LE(data, 40);
-        parsed.window = readU64LE(data, 48);
+        parsed.windowSeconds = readU64LE(data, 48);
         parsed.lastReset = readU64LE(data, 56);
         break;
       case SessionActionType.ProgramWhitelist:

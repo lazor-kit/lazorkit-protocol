@@ -53,6 +53,7 @@ erDiagram
     WALLET {
         bytes32 user_seed PK
         u8 bump
+        u8 vault_bump "0 = not recorded"
     }
     VAULT {
         pubkey wallet PK
@@ -65,11 +66,13 @@ erDiagram
         u8 role "rank: 0=Owner | 1=Admin | 2=Delegate"
         u16 policy_len "spending policy bytes, 0 = unbounded"
         u32 counter "Secp256r1 odometer"
+        pubkey rent_payer "rent refund target (layout revision 2)"
     }
     SESSION {
         pubkey wallet PK
         pubkey session_key PK
-        u64 expires_at "absolute slot"
+        u64 expires_at "Unix seconds"
+        pubkey rent_payer "rent refund target (layout revision 2)"
         bytes actions "optional spending limits"
     }
     DEFERRED_EXEC {
@@ -78,7 +81,7 @@ erDiagram
         u32 counter PK
         bytes32 instructions_hash
         bytes32 accounts_hash
-        u64 expires_at
+        u64 expires_at "absolute slot"
         pubkey payer "rent refund target"
     }
 ```
@@ -101,7 +104,7 @@ Three things worth committing to memory before reading further:
 - **Anti-CPI check** — `get_stack_height() > 1` rejects authentication via CPI.
 - **Signature binding** — challenge hash includes discriminator, payer, the authority's wallet, counter, and program_id. The wallet stops an assertion made for one wallet verifying on another where the same passkey sits at the same counter. The accounts_hash binds the set of inner accounts, preventing recipient-reordering attacks.
 - **Ed25519** — standard Solana runtime signer check. No counter (Ed25519 signatures can't replay because they sign over the tx recent blockhash).
-- **Sessions** — absolute slot-based expiry, max ~30 days.
+- **Sessions** — absolute expiry in Unix seconds (`Clock::unix_timestamp`), at most 30 days ahead; a v1 session, like a deferred execution, expires by slot.
 
 ### Challenge hash (Secp256r1)
 
@@ -211,11 +214,19 @@ Seeds: `["lk2:wallet", user_seed]`
 pub struct WalletAccount {
     pub discriminator: u8,   // 0x21
     pub bump: u8,
-    pub version: u8,
-    pub _padding: [u8; 1],
+    pub version: u8,         // layout revision: 1
+    pub vault_bump: u8,      // the vault's canonical bump; 0 = not recorded
     pub owner_count: u32,    // authorities on this wallet holding rank Owner
 }
 ```
+
+`vault_bump` was padding. `CreateWallet` now writes the bump its own search
+found for `["lk2:vault", wallet]`, and `Execute` and `ExecuteDeferred` check the
+vault's address with one hash of the seeds and that bump instead of searching
+for it on every call (see [Stored bumps](#stored-bumps)). A wallet created
+before holds 0 there and is searched for, as before; 0 is also what the one
+wallet in 2^255 whose canonical bump really is 0 would hold, and the search is
+right for it too. So the wallet's layout revision stays 1.
 
 `owner_count` is what refuses the removal of the last Owner. A wallet with no
 Owner is not frozen — its Admins and Delegates keep spending — but nothing can
@@ -225,7 +236,8 @@ ever be added or revoked again, so a lost device would stay valid forever.
 
 Seeds: `["lk2:authority", wallet_pubkey, id_hash]`
 
-48-byte fixed header + auth-type-specific data + an optional policy:
+48-byte fixed header + auth-type-specific data + (from layout revision 2) the
+rent payer + an optional policy:
 
 ```rust
 #[repr(C, align(8))]
@@ -245,9 +257,15 @@ pub struct AuthorityAccountHeader {
 
 Variable data after header:
 
-- **Ed25519**: `[pubkey(32)]` — 80 bytes, plus `policy_len` bytes of policy.
+- **Ed25519**: `[pubkey(32)]` — 80 bytes of fixed part.
 - **Secp256r1**: `[credential_id_hash(32)][compressed_pubkey(33)][rpIdHash(32)]` —
-  145 bytes, plus `policy_len` bytes of policy.
+  145 bytes of fixed part.
+
+Then, from layout revision 2 (`version` 2, every authority created from this
+build on), the 32-byte **rent payer**: the account that paid the authority's
+rent. Then `policy_len` bytes of policy. So an Ed25519 authority is 112 bytes
+plus its policy, a Secp256r1 one 177 (80 and 145 in revision 1). See
+[Rent refunds](#rent-refunds).
 
 `role` is a **rank**: what this authority may *manage*. The policy is what it may
 *spend*. They are independent, and conflating them is what made "Spender" a name
@@ -268,7 +286,7 @@ authority seed.
 
 `rpIdHash` is pre-computed at authority creation (SHA-256 of the rpId string) and stored directly, eliminating one `sol_sha256` syscall per Execute.
 
-### Session PDA — 80+ bytes
+### Session PDA — 80+ bytes (112+ from layout revision 2)
 
 Seeds: `["lk2:session", wallet_pubkey, session_key]`
 
@@ -281,35 +299,71 @@ pub struct SessionAccount {
     pub _padding: [u8; 5],
     pub wallet: Pubkey,
     pub session_key: Pubkey,
-    pub expires_at: u64,     // Absolute slot
+    pub expires_at: u64,     // Unix time, seconds
 }
 ```
 
-Optional **actions** buffer appended after the header (variable length, max 2048 bytes). Each action: 11-byte header `[type(1)][data_len(2 LE)][expires_at(8 LE)]` + type-specific data. Max 16 actions per session or policy, whitelist and blacklist entries included; naming a mint takes one.
+`expires_at` is Unix time in seconds, read against `Clock::unix_timestamp`:
+the session is live through that second and refused from the next (3009).
+`CreateSession` takes an `expires_at` after the cluster's time and at most 30
+days (2,592,000 s) ahead of it (3008 otherwise). Builds before time-based
+expiry stored a slot here; read as a time, any slot a cluster has reached is
+decades past, so such a session is expired: refused by `Execute`, closable by
+anyone through `CloseExpiredSession`. A v1 session, which `CloseExpiredSession`
+also accepts, stores a slot and is still read as one.
+
+From layout revision 2 the 32-byte **rent payer** follows the header (80..112),
+the account that paid the session's rent ([Rent refunds](#rent-refunds)).
+
+Optional **actions** buffer appended after the header and the rent payer
+(variable length, max 2048 bytes; at 80 in a revision-1 session, at 112 from
+revision 2). Each action: 11-byte header `[type(1)][data_len(2 LE)][expires_at(8 LE)]` + type-specific data; an action's `expires_at` is Unix seconds, 0 for none of its own. Max 16 actions per session or policy, whitelist and blacklist entries included; naming a mint takes one.
 
 | Type | ID | Data | Description |
 |---|---|---|---|
 | SolLimit | 1 | remaining(8) | Lifetime SOL cap |
-| SolRecurringLimit | 2 | limit∥spent∥window∥last_reset(32) | Per-window SOL cap |
+| SolRecurringLimit | 2 | limit∥spent∥window∥last_reset(32) | Per-window SOL cap; `window` in seconds, `last_reset` the Unix time of the spend that opened the window |
 | SolMaxPerTx | 3 | max(8) | Max SOL gross outflow per execute |
 | TokenLimit | 4 | mint(32)∥remaining(8) | Lifetime token cap per mint |
-| TokenRecurringLimit | 5 | mint∥limit∥spent∥window∥last_reset(64) | Per-window token cap |
+| TokenRecurringLimit | 5 | mint∥limit∥spent∥window∥last_reset(64) | Per-window token cap; `window` and `last_reset` as above |
 | TokenMaxPerTx | 6 | mint(32)∥max(8) | Max tokens per execute per mint |
 | ProgramWhitelist | 10 | program_id(32) | Allow-list a CPI target (repeatable) |
 | ProgramBlacklist | 11 | program_id(32) | Block-list a CPI target (repeatable) |
 
 **Expired-action policy**: expired spending limits are treated as **fully exhausted** (any spend denied); expired whitelists are **hard deny**; expired blacklist entries are silently dropped.
 
-**Vault invariants**: during any policy-bearing Execute — a session with actions,
-or an authority with a policy — the program records the vault's owner and data
-length, and copies every writable vault-owned token account in the Execute,
-before the CPI loop. Afterwards the vault's owner and data length must be
-unchanged (3030 / 3031), every copied token account unchanged but for its
-balance (3032), and no SOL or mint the policy does not name may have left
-(3037 / 3038). This prevents escape via `System::Assign`, SPL Token
-`SetAuthority`, `Approve`, `CloseAccount` or `FreezeAccount`, and spending an
-asset the granter never listed. The full rule set is in
-[What a policy bounds](#what-a-policy-bounds).
+**Time is Unix seconds; transaction landing stays in slots.** Session expiry,
+action expiry and recurring windows are durations a person reads ("until 6:50
+PM", "1 SOL a day"), so they are measured with `Clock::unix_timestamp`, the
+stake-weighted median of the validators' clocks, held within a bounded drift
+of the PoH estimate. Slots run at whatever pace a cluster manages (about 400
+ms on mainnet, faster on devnet), so a duration in slots is only ever "about"
+one in time. Two things stay in slots because they bound how a transaction
+lands, not how long a grant lasts: the Secp256r1 signature's age (150 slots,
+the same horizon as a recent blockhash, and the slot is part of the signed
+challenge) and the deferred-execution window (`Authorize`'s `expiry_offset`, a
+signed slot count, 10–9,000). A policy written by a slot-based build reads
+fail-closed or near it: an action `expires_at` that was a slot is long past
+(the limit is exhausted, a whitelist denies all — but an expiring blacklist
+entry lifts, so a blacklist entry with an expiry should be re-issued); a
+recurring `window` that was slots is read as that many seconds, a longer
+window on any cluster; and a `last_reset` that was a slot reads as long ago,
+so the first spend after the upgrade opens a fresh window, once.
+
+**Vault invariants**: during any Execute or ExecuteDeferred whose signer is not
+an Owner — a session of any kind, with actions or without, an Admin, a
+Delegate — the program records the vault's owner and data length, and copies
+every writable vault-owned token account in the Execute, before the CPI loop.
+Afterwards the vault's owner and data length must be unchanged (3030 / 3031),
+every copied token account unchanged but for its balance, and a token account
+that became vault-owned during the Execute must carry no delegate and no close
+authority (3032). When the signer carries a policy, no SOL or mint the policy
+does not name may have left either (3037 / 3038). This prevents escape via
+`System::Assign`, SPL Token `SetAuthority`, `Approve`, `CloseAccount` or
+`FreezeAccount` — grants that would outlive the session or the key — and
+spending an asset the granter never listed. An Owner is not held to them. The
+full rule set is in [What a policy bounds](#what-a-policy-bounds); who is held
+to it, in [Who the vault invariants bind](#who-the-vault-invariants-bind).
 
 ### DeferredExec PDA — 176 bytes
 
@@ -321,7 +375,8 @@ pub struct DeferredExecAccount {
     pub discriminator: u8,           // 4
     pub version: u8,
     pub bump: u8,
-    pub _padding: [u8; 5],
+    pub flags: u8,                   // bit 0: an Owner signed Authorize
+    pub _padding: [u8; 4],
     pub instructions_hash: [u8; 32], // SHA256 of compact instructions
     pub accounts_hash: [u8; 32],     // SHA256 of referenced account pubkeys
     pub wallet: Pubkey,
@@ -332,6 +387,13 @@ pub struct DeferredExecAccount {
 ```
 
 Temporary account created during `Authorize` (tx1), closed during `ExecuteDeferred` (tx2). The authority's odometer counter is used as a seed nonce, so each authorization gets a unique PDA. Expired authorizations can be reclaimed via `ReclaimDeferred`.
+
+`flags` took the first padding byte, so no other field moved. Bit 0
+(`DEFERRED_FLAG_OWNER`) records that an Owner signed the `Authorize`; without
+it — an Admin's authorization, or any account written before the field existed,
+which holds zero there — `ExecuteDeferred` holds the vault to the invariants
+every non-Owner signer is held to. A pending authorization from before the field
+can therefore only lose power across the upgrade, never gain it.
 
 ### Vault PDA
 
@@ -374,6 +436,53 @@ paths that move funds out of a vault: a single admin write froze every user's
 funds, and nothing in the protocol could undo it. Skipping is safe because the
 config PDA address is pinned first, so "not configured" cannot be spoofed by
 passing a different account.
+
+### Rent refunds
+
+Every account the program creates is funded by the instruction's `payer`,
+which on a sponsored flow is the relayer, not the wallet's owner. From layout
+revision 2 an **authority** and a **session** record that account (32 bytes
+after the fixed part, before the policy), and every instruction that closes
+one refunds only to it, whoever signs or pays for the close; any other
+destination fails with **3039 `RefundDestinationMismatch`**:
+
+| Closes | Instruction | Refunds to |
+|---|---|---|
+| a session | `RevokeSession` (9), `CloseExpiredSession` (18, anyone may call it) | the session's recorded payer |
+| an authority | `RemoveAuthority` (2), `TransferOwnership` (3, the Owner it replaces) | the authority's recorded payer |
+| a DeferredExec | `ExecuteDeferred` (7), `ReclaimDeferred` (8) | its stored payer, as it always did (now reported as 3039 too) |
+| v1 wallet + authority | `MigrateWallet` (17, sunset binary) | the destination the v1 Owner signs |
+
+A wallet, a `FeeRecord` (the payer's own), the `ProtocolConfig` and the
+treasury shards are never closed.
+
+The signed payloads are unchanged — `RevokeSession` and `RemoveAuthority` still
+sign `account ‖ refund`, `TransferOwnership` `… ‖ payer ‖ refund` — so a
+client names the recorded payer as the refund and the passkey signs that. Both
+SDKs read it from the account and fill it in (`rentRefundDestination`), and
+refuse another destination before building anything.
+
+**Accounts written before revision 2** — revision-1 authorities and sessions
+(devnet's, today), and v1 accounts in the sunset binary — record no payer and
+keep the old rule: the destination the closing instruction names (for
+`CloseExpiredSession`, the caller's choice). Nothing on chain says who paid
+them; a refund to the vault would reach the wallet's owner just the same; and
+refusing to close them would make a lost key unrevocable. They cannot be
+recreated in that shape, so the set under the old rule only shrinks.
+
+**Closing never depends on the payer.** A recorded payer that has since become
+executable (whoever holds its key deployed a program there) may be refused a
+credit by the runtime, which would make the account unclosable — an Admin who
+paid for a Delegate that way could keep it past the Owner's `RemoveAuthority`.
+So when the refund destination is the recorded payer and it is executable, the
+close still happens and the rent stays in the dead account (pass it read-only
+if the runtime refuses to load it writable). Only the payer's own key can put
+it in that state. And only an ordinary system account is recorded as a payer
+(`IllegalOwner` otherwise): a pre-funded PDA skips the System transfer that
+would otherwise require it.
+
+Revision 2 costs 32 bytes of rent per authority and session (222,720
+lamports), returned on close like the rest.
 
 ## Auth payload layout (Secp256r1)
 
@@ -482,14 +591,56 @@ vault deltas and the vault's token accounts. The action types are shared — `So
 `SolRecurringLimit`, `SolMaxPerTx`, the `Token*` equivalents,
 `ProgramWhitelist`/`ProgramBlacklist`.
 
-An authority with `policy_len == 0` is unbounded and spends like an Owner. That
-is intended for Owner and Admin; it is refused for Delegate.
+An authority with `policy_len == 0` has no spending limit. That is intended for
+Owner and Admin; it is refused for Delegate.
 
-**A session with zero actions is likewise unbounded** — no actions means no
-policy engine runs, so the session key can spend the vault freely until
-expiry. Creating one still requires Owner/Admin authorization, but "session"
-does not imply "limited": attach actions, and the SDK should refuse to build
-a zero-action session without an explicit opt-in.
+**A session with zero actions likewise has no spending limit** — no actions
+means no policy engine runs, so the session key can spend the vault freely
+until expiry. Creating one still requires Owner/Admin authorization, but
+"session" does not imply "limited": attach actions, and the SDK should refuse
+to build a zero-action session without an explicit opt-in.
+
+#### Who the vault invariants bind
+
+Spending and control are separate. An Admin and a session without actions may
+spend any amount while they are live, but neither may hand the vault, or a
+vault token account, to anyone: I-0, I-2 and I-3 below hold for **every signer
+but an Owner**, policy or not, in `Execute` and in `ExecuteDeferred`. Such a
+grant would outlive the signer — it survives the session's expiry,
+`RevokeSession` and `RemoveAuthority` — so a limit on how long a key lives would
+not limit what it leaves behind.
+
+| Signer | I-0, I-2, I-3 (3030 / 3031 / 3032) | Policy rules I-4 to I-6 |
+|---|---|---|
+| Owner (any key type) | no | — (an Owner carries no policy) |
+| Admin, in Execute or through Authorize + ExecuteDeferred | yes | — (an Admin carries no policy) |
+| Delegate | yes | yes |
+| Session with actions | yes | yes |
+| Session without actions | yes | no |
+
+What this refuses a non-Owner, whatever its policy (each is still open to an
+Owner):
+
+- any change to the vault's owner or data length (`System::Assign`,
+  `System::Allocate`);
+- on a vault token account the Execute passes writable: `SetAuthority` (any
+  type), `Approve` / `ApproveChecked` (or raising an existing allowance),
+  `Revoke`, `CloseAccount` — which includes unwrapping a wSOL account the vault
+  already had — `FreezeAccount` / `ThawAccount`, Token-2022 `Reallocate` and
+  `WithdrawExcessLamports`;
+- handing the vault a token account that still carries a delegate or a close
+  authority.
+
+What stays open to every signer, within its policy: SOL and token transfers out
+of the vault, creating vault token accounts (an ATA the vault funds included),
+and a temporary wSOL account created, synced and closed back to the vault within
+one Execute, as a swap does. An integration that needs one of the refused
+operations — tidying up empty token accounts, unwrapping a standing wSOL
+balance, approving a third party — signs it with an Owner.
+
+`ExecuteDeferred` has no authority account to read, so `Authorize` records in
+the DeferredExec's `flags` whether an Owner signed it (see
+[DeferredExec PDA](#deferredexec-pda--176-bytes)).
 
 #### What a policy bounds
 
@@ -546,8 +697,10 @@ Consequences worth stating:
 
 **No opt-out.** There is no action that lifts the rule, and none is reserved:
 an escape hatch is the first thing a malicious app would ask for. A signer that
-must move arbitrary assets is an unbounded one — an Owner, an Admin, or a
-session created with no actions, which both SDKs make an explicit opt-in. A
+must move arbitrary assets is one without a policy — an Owner, an Admin, or a
+session created with no actions, which both SDKs make an explicit opt-in. Of
+those, only an Owner may also change who controls the vault or its token
+accounts (I-0, I-2, I-3). A
 future opt-out would be a new action type; today's `from_u8` refuses unknown
 types with 3020, so no stored buffer could change meaning.
 
@@ -671,14 +824,15 @@ Wallet operations:
 |---|---|---|
 | 0 | CreateWallet | Create wallet + vault + first authority |
 | 1 | AddAuthority | Add Ed25519/Secp256r1 authority at a rank, with an optional policy. **Wallet account writable** |
-| 2 | RemoveAuthority | Remove authority; refund rent. **Wallet account writable** |
-| 3 | TransferOwnership | Atomic owner swap |
+| 2 | RemoveAuthority | Remove authority; refund its rent to its recorded payer. **Wallet account writable** |
+| 3 | TransferOwnership | Atomic owner swap; the old Owner's rent goes to its recorded payer |
 | 4 | Execute | Execute compact instructions via CPI with vault signing |
 | 5 | CreateSession | Create session key (optional actions) |
 | 6 | Authorize | Deferred TX1 — store instruction/account hashes |
 | 7 | ExecuteDeferred | Deferred TX2 — execute and close |
-| 8 | ReclaimDeferred | Close an expired DeferredExec, refund rent |
-| 9 | RevokeSession | Close a session early, refund rent |
+| 8 | ReclaimDeferred | Close an expired DeferredExec, refund rent to its stored payer |
+| 9 | RevokeSession | Close a session early, refund its rent to its recorded payer |
+| 18 | CloseExpiredSession | Anyone closes an expired session; its rent goes to its recorded payer |
 
 Protocol admin instructions (admin-only):
 
@@ -739,7 +893,8 @@ Execute and ExecuteDeferred add two limits that real payloads rarely reached in
   ```text
     40k                       the parsed inner instructions
   + ⌈33(k + M) + C + 76⌉₈     passkey only: accounts-hash preimage, signed payload (C + 32), challenge (44)
-  + 32a + 192t                policy only: the actions; a copy of each vault token account
+  + 32a                       policy only: the actions
+  + 192t                      every signer but an Owner: a copy of each vault token account
   + 72w                       account metas (16) and CPI accounts (56), reused across the CPIs
   + Σ (8nᵢ + ⌈nᵢ⌉₈)           each inner instruction's account list and signer flags
   + 48t + 32a                 policy only: the mint list; the actions, parsed again
@@ -750,9 +905,13 @@ Execute and ExecuteDeferred add two limits that real payloads rarely reached in
   the last allocation of all is not rounded, which without a policy is the last
   instruction's flags. ExecuteDeferred's preimage term is `⌈33(k + M)⌉₈`, with
   no payload or challenge, and it has no policy terms (a policy-bound signer
-  cannot reach it). An Ed25519 or session Execute has no preimage term. The
-  policy terms count for a session with actions and for a Delegate, and a zero
-  count allocates nothing. The sum is exact: a scratch build that logs the
+  cannot reach it); its `192t` counts when an Admin signed the `Authorize`. An
+  Ed25519 or session Execute has no preimage term. The policy terms count for a
+  session with actions and for a Delegate, `192t` for every signer but an Owner
+  (an Admin, a Delegate, a session with or without actions), and a zero count
+  allocates nothing. From this build on `192t` counts for every signer but an
+  Owner; a guard sized for an earlier build counted it only for a signer with a
+  policy. The sum is exact: a scratch build that logs the
   allocator's cursor at the end of Execute and ExecuteDeferred agreed with it to
   the byte on 112 payloads (passkey, ExecuteDeferred, Ed25519, a session and a
   passkey Delegate with sixteen actions), and every payload it put over 32,760
@@ -827,7 +986,7 @@ This means admins, spenders, and session keys can all operate on the same wallet
 Under [transaction v1](#transaction-v1-simd-0385) (4096 bytes, 64 addresses) this is no longer a size workaround. tx2 is held to the same 64-address cap as a direct Execute, and addresses run out before bytes, so deferring buys almost no room there (BONK→WIF: 58 addresses as tx2, 59 as a direct Execute); the measured Jupiter routes fit a direct Execute. What deferring still gives is the separation of signing from sending — in time, within the expiry window, or to another sender such as a relayer or a second device.
 
 1. **TX1 (Authorize)** — signer computes `instructions_hash = SHA256(compact_instructions)` and `accounts_hash = SHA256(referenced_pubkeys)`. These are signed via Secp256r1 and stored in a `DeferredExec` PDA. Odometer counter is incremented.
-2. **TX2 (ExecuteDeferred)** — any payer submits the full compact instructions. Program verifies both hashes, consumes the `DeferredExec` authorization (zeroes its data before any CPI, so nothing reached from the inner instructions can replay it), executes via CPI with vault signing, and only then moves its rent to the original payer. The rent moves last because the runtime syncs a caller's lamport writes into a CPI only for the accounts that CPI is handed: credited earlier, the refund would cross into any inner instruction that names the payer — a paymaster being repaid — without the matching debit, and the CPI would fail with `UnbalancedInstruction`.
+2. **TX2 (ExecuteDeferred)** — any payer submits the full compact instructions. Program verifies both hashes, consumes the `DeferredExec` authorization (zeroes its data before any CPI, so nothing reached from the inner instructions can replay it), executes via CPI with vault signing, holds the vault to the [vault invariants](#who-the-vault-invariants-bind) unless an Owner signed TX1, and only then moves its rent to the original payer. The rent moves last because the runtime syncs a caller's lamport writes into a CPI only for the accounts that CPI is handed: credited earlier, the refund would cross into any inner instruction that names the payer — a paymaster being repaid — without the matching debit, and the CPI would fail with `UnbalancedInstruction`.
 
 ```mermaid
 sequenceDiagram
@@ -994,16 +1153,21 @@ fail the transaction:
   by it before asking for a signature. By that sum the measured route replays
   need 8,756 bytes (SOL→USDC), 15,976 (JUP→POPCAT) and 25,456 (BONK→WIF, 83 +
   7 metas) on a passkey Execute; by the exact one 4,596, 7,153 and 10,155.
-  Without a policy the old guard is safe against a build with the exact
-  sizing, only stricter than it needs to be. With one it is safe against
-  neither build: it leaves out the `64a + 240t` a session with actions or a
-  Delegate allocates, and passes payloads that run out of memory. Beside a
+  For an Owner the old guard is safe against a build with the exact sizing,
+  only stricter than it needs to be. With a policy it is safe against neither
+  build: it leaves out the `64a + 240t` a session with actions or a Delegate
+  allocates, and passes payloads that run out of memory. Since the vault
+  invariants apply to every signer but an Owner, a session without actions
+  and an Admin allocate the `192t` copy too, which the guard also leaves out:
+  by the sum, one inner instruction naming 128 writable vault token accounts
+  (an address lookup table can supply them) needs 34,984 bytes beside such a
+  signer, and passes the guard. Beside a
   passkey Delegate with sixteen actions and 49 vault token accounts, a listed
   transfer and twelve System transfers of 32 accounts come to 32,728 bytes by
   the guard and need 32,968 (twelve of 31 need 32,392 and run;
   `policy_passkey_delegate_past_a_check_without_the_policy_terms`). The guard
-  should compute the exact sum, the policy terms included, for the build the
-  cluster runs.
+  should compute the exact sum, the policy terms and `192t` included, for the
+  build the cluster runs.
 
 **Config.**
 
@@ -1040,33 +1204,48 @@ fail the transaction:
 
 ## Compute cost
 
-See `docs/` for benchmarks. Top-line numbers on hot paths:
+Measured with litesvm over 24 fixed wallets and payers, whole transaction, one
+inner System transfer, the fee suffix and the protocol fee charged
+(`program/tests/execute_compute_tests.rs`, which pins each mean):
 
-| Path | CU | Notes |
+| Path | develop `f2779b66…`: mean (min–max) | stored bumps |
 |---|---|---|
-| Normal SOL Transfer (baseline) | 150 | Solana runtime minimum |
-| Execute (Session key) | ~4,100 | No precompile, no auth payload |
-| Execute (Secp256r1 passkey) | ~9,440 | Includes ~2,300 CU Secp256r1 precompile |
-| Execute (Ed25519 authority) | ~5,900 | No precompile |
-| CreateWallet (Ed25519 or Secp256r1) | ~15-20K | One-time |
+| Execute, Ed25519 Owner, fee charged | 17,809 (14,997–26,997) | 5,302 |
+| Execute, Ed25519 Owner, fees disabled | 8,929 (7,429–16,429) | 3,325 |
+| Execute, session (no actions) | 18,243 (15,431–27,431) | 5,757 |
+| Execute, passkey Owner | 24,106 (20,606–32,606) | 10,907 |
+| ExecuteDeferred (passkey Owner) | 18,848 (15,348–27,348) | 5,620 |
+| CreateWallet (Ed25519 or Secp256r1) | ~15–20K | unchanged: creation still searches |
 
-All paths fit comfortably within Solana's 200K CU default budget.
+All paths fit comfortably within Solana's 200K CU default budget. A normal SOL
+transfer costs 150. The passkey path carries the Secp256r1 precompile and the
+challenge and clientDataJSON work on top.
 
-The precompile alone is a 2,300 CU floor on Secp256r1 Execute; the remaining
-~7,100 CU covers account validation, odometer counter, challenge hashing,
-clientDataJSON validation, accounts_hash computation, inner CPI, and state
-bookkeeping.
+### Stored bumps
 
-Two v2 changes move these numbers and are not yet reflected above:
+Before, every Execute searched for up to four bumps with
+`find_program_address` (the protocol config, the treasury shard, the payer's
+fee record, the vault), 1,500 CU for every bump it tried, so a wallet's cost
+depended on where its bumps fell (the spread above). Each address is now
+checked with one `sol_sha256` of `seeds ‖ bump ‖ program_id ‖
+"ProgramDerivedAddress"` and the bump the program stored when it created the
+account (`utils::is_program_address`), and compared with the account passed:
 
-- An authority carrying a policy now runs the same pre/post action engine a
-  session does. Expect a policy-bearing Execute to cost roughly what a session
-  Execute costs on top of its own authentication, rather than the
-  unbounded-authority number.
-- The accounts hash preimage grew one byte per referenced account. Negligible
-  against the syscall itself, but the numbers above predate it.
+- the config, the shard and the fee record store their own bump, written from
+  the search their creating instruction ran;
+- a wallet stores its vault's (`vault_bump` above); a wallet created before
+  holds 0 and is searched for.
 
-Re-benchmark before quoting these in anything that matters.
+Leaving out the runtime's on-curve check is sound only for a bump found by that
+search for the same seeds, and that is the only kind used: the bumps come from
+program-written accounts, never from instruction data. The fee record's bump
+was found for its own payer, so hashed with another payer it matches the
+address only through a SHA-256 collision. A system-owned config (before
+`InitializeProtocol`) and a config this binary cannot read are still pinned by
+a search; a first-time payer's fee record is still created by one.
+`program/tests/stored_bump_tests.rs` tries the substitutions: another wallet's
+vault, a corrupted vault bump, another payer's fee record, copies of the config
+and the shard at other addresses.
 
 **A policy-bound Execute, measured** (litesvm, whole transaction including the
 inner SPL Token or System call, the fee suffix and the protocol fee;
@@ -1080,6 +1259,9 @@ vault-owned token accounts in the Execute:
 | `TokenLimit`, one listed transfer, t = 1 | 30,083 | 29,072 |
 | the same, t = 8 | 32,974 | 32,836 |
 | the same, t = 24 | 41,195 | 45,861 |
+
+With stored bumps (above) the same four measure 6,660, 11,942, 15,706 and
+28,731 (develop `f2779b66…`: about 17.5k more each, the four bump searches).
 
 D13 copies each vault token account once and reads it back by position, where
 develop scanned the whole account list once per listed mint before the loop and

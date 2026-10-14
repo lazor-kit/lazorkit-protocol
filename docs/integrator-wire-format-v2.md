@@ -60,18 +60,30 @@ Byte 0 of every account is its discriminator. Full `#[repr(C)]` structs are in
 reads most:
 
 ```
-Wallet         0x21  disc(1) bump(1) version(1) _pad(1) owner_count(u32)             = 8
+Wallet         0x21  disc(1) bump(1) version(1) vault_bump(1) owner_count(u32)        = 8
 Authority      0x22  disc(1) type(1) role(1) bump(1) version(1) _pad(3)
                      counter(u32) policy_len(u16) _pad(2) wallet(32)                 = 48 header
-                       + Ed25519:  pubkey(32)                                        -> 80  (+policy)
-                       + Secp256r1: cred_id_hash(32) compressed_pubkey(33) rpIdHash(32) -> 145 (+policy)
-Session        0x23  header(80) + optional actions buffer (len>80 => actions present)
+                       + Ed25519:  pubkey(32)                                        -> 80
+                       + Secp256r1: cred_id_hash(32) compressed_pubkey(33) rpIdHash(32) -> 145
+                       + version 2: rent_payer(32)                                   -> 112 / 177
+                       + policy(policy_len)
+Session        0x23  header(80) + version 2: rent_payer(32) + optional actions buffer
+                     (actions at 80 in version 1, at 112 in version 2)
 DeferredExec   0x24
 ProtocolConfig 0x25  disc(1) version(1) bump(1) enabled(u8) num_shards(u8) _pad(3)
                      admin(32) treasury(32) creation_fee(u64) execution_fee(u64) …
 FeeRecord      0x26  disc(1) bump(1) version(1) _pad(5) total_fees_paid(u64) … tx_count(u32) wallet_count(u32)
 TreasuryShard  0x27
 ```
+
+`version` (layout revision) 2 — every authority and session created from the
+build after `f2779b66…` on — records `rent_payer`, the account that paid the
+rent, and every instruction that closes the account refunds only to it (3039
+`RefundDestinationMismatch` otherwise): name it as `refund_dest` in
+`RevokeSession`, `CloseExpiredSession`, `RemoveAuthority` and
+`TransferOwnership`, and in their signed payloads below. Version 1 records none
+and closes where the instruction says. A wallet's `vault_bump` is the vault's
+canonical bump, or 0 in a wallet created before it was recorded.
 
 `type`: 0 = Ed25519, 1 = Secp256r1. `role` (rank): 0 = Owner, 1 = Admin, 2 =
 Delegate. `policy_len`: bytes of spend policy after the key material; `0` =
@@ -157,6 +169,12 @@ the fixed vector they and the program's `wallet_binding_tests` pin, write
 | 5 CreateSession | `session_key(32) ‖ expires_at(8) ‖ actions ‖ payer(32)` |
 | 9 RevokeSession | `session_pubkey(32) ‖ refund_dest(32)` |
 | 17 MigrateWallet | `destination(32) ‖ v1_wallet(32) ‖ num_tokens(1) ‖ refund_dest(32) ‖ source_ata[0..num_tokens]` |
+
+CreateSession's `expires_at` is Unix time in seconds (u64 LE), at most 30 days
+after the cluster's `Clock::unix_timestamp`; an action's `expires_at` and a
+recurring limit's `window` and `last_reset` are seconds too. Authorize's
+`expiry_offset` is a slot count (10–9,000), and the auth payload's `slot` is a
+slot.
 
 **`accounts_hash`** (used by Execute and Authorize) binds the inner CPI accounts
 *with their privileges*:

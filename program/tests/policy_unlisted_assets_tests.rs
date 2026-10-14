@@ -21,8 +21,8 @@
 //!   account that became vault-owned during the Execute carries no delegate
 //!   and no close authority (3032).
 //!
-//! Positive flows `p*`, negative flows `n*`, regressions `r*` (unbounded
-//! signers, the deferred path, the program check), heap shapes `h1_*`, the
+//! Positive flows `p*`, negative flows `n*`, regressions `r*` (signers
+//! without a policy, the deferred path, the program check), heap shapes `h1_*`, the
 //! runtime's 255-account limit `h2_*`, and compute units `c1_*`. On develop
 //! every `n*` test but `n18` lands. Accounts are written by hand, at the
 //! offsets the program reads; the SPL programs are the ones litesvm 0.6 loads
@@ -1417,9 +1417,11 @@ fn n21_sol_recurring_limit_alone_names_sol_only() {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Everything D13 refuses a policy-bound signer, done by a signer with no
-/// policy: an unlisted token transfer, a SOL transfer, an Approve, a
-/// CloseAccount and a vault-funded ATA.
-fn unbounded_signer_does_everything(fx: &mut Fx, actor: &Actor, what: &str) {
+/// policy: an unlisted token transfer, a SOL transfer and a vault-funded ATA.
+/// An Owner also lands an Approve and a CloseAccount in the same Execute; any
+/// other signer is refused both, by the vault invariants every non-Owner is
+/// held to (non_owner_invariants_tests), and lands the rest without them.
+fn unbounded_signer_does_everything(fx: &mut Fx, actor: &Actor, is_owner: bool, what: &str) {
     let mint = fx.mint();
     let vault = fx.vault();
     let vault_ata = fx.token_account(mint, vault, 5_000);
@@ -1427,48 +1429,66 @@ fn unbounded_signer_does_everything(fx: &mut Fx, actor: &Actor, what: &str) {
     let dest = fx.token_account(mint, Pubkey::new_unique(), 0);
     let new_ata = ata_address(vault, mint, spl_token_id());
     let recipient = Pubkey::new_unique();
+    let delegate = Pubkey::new_unique();
 
-    let mut exec = Exec::new(actor);
-    let token = exec.readonly(spl_token_id());
-    let system = exec.readonly(solana_sdk::system_program::id());
-    let ata = exec.readonly(ata_program_id());
-    let m = exec.readonly(mint);
-    let src = exec.writable(vault_ata);
-    let dst = exec.writable(dest);
-    let e = exec.writable(empty);
-    let n = exec.writable(new_ata);
-    let r = exec.writable(recipient);
-    let d = exec.readonly(Pubkey::new_unique());
-    transfer(&mut exec, token, src, dst, IDX_VAULT, 4_000);
-    exec.call(system, &[IDX_VAULT, r], system_transfer_data(1_000_000));
-    exec.call(token, &[src, d, IDX_VAULT], spl_approve_data(1_000));
-    exec.call(token, &[e, IDX_VAULT, IDX_VAULT], spl_close_account_data());
-    exec.call(
-        ata,
-        &[IDX_VAULT, n, IDX_VAULT, m, system, token],
-        ata_create_idempotent_data(),
-    );
-    fx.execute_ok(actor, exec, what);
+    let exec_with = |authority_changes: bool| {
+        let mut exec = Exec::new(actor);
+        let token = exec.readonly(spl_token_id());
+        let system = exec.readonly(solana_sdk::system_program::id());
+        let ata = exec.readonly(ata_program_id());
+        let m = exec.readonly(mint);
+        let src = exec.writable(vault_ata);
+        let dst = exec.writable(dest);
+        let e = exec.writable(empty);
+        let n = exec.writable(new_ata);
+        let r = exec.writable(recipient);
+        let d = exec.readonly(delegate);
+        transfer(&mut exec, token, src, dst, IDX_VAULT, 4_000);
+        exec.call(system, &[IDX_VAULT, r], system_transfer_data(1_000_000));
+        if authority_changes {
+            exec.call(token, &[src, d, IDX_VAULT], spl_approve_data(1_000));
+            exec.call(token, &[e, IDX_VAULT, IDX_VAULT], spl_close_account_data());
+        }
+        exec.call(
+            ata,
+            &[IDX_VAULT, n, IDX_VAULT, m, system, token],
+            ata_create_idempotent_data(),
+        );
+        exec
+    };
+
+    if is_owner {
+        fx.execute_ok(actor, exec_with(true), what);
+        assert!(token_account_delegate(&fx.context.svm, vault_ata).is_some());
+        assert_eq!(fx.lamports(&empty), 0);
+    } else {
+        assert_custom_error(
+            fx.execute(actor, exec_with(true)),
+            ERR_TOKEN_AUTHORITY_CHANGED,
+            what,
+        );
+        fx.execute_ok(actor, exec_with(false), what);
+        assert_eq!(token_account_delegate(&fx.context.svm, vault_ata), None);
+        assert!(fx.lamports(&empty) > 0);
+    }
 
     assert_eq!(fx.amount(dest), 4_000);
     assert_eq!(fx.lamports(&recipient), 1_000_000);
-    assert!(token_account_delegate(&fx.context.svm, vault_ata).is_some());
-    assert_eq!(fx.lamports(&empty), 0);
     assert_eq!(token_account_owner(&fx.context.svm, new_ata), vault);
 }
 
 #[test]
-fn r1_unrestricted_session_is_unchanged() {
+fn r1_unrestricted_session_spends_but_cannot_change_authorities() {
     let mut fx = Fx::new();
     let actor = fx.session(&[]);
-    unbounded_signer_does_everything(&mut fx, &actor, "R1");
+    unbounded_signer_does_everything(&mut fx, &actor, false, "R1");
 }
 
 #[test]
 fn r2_owner_is_unchanged() {
     let mut fx = Fx::new();
     let actor = fx.owner();
-    unbounded_signer_does_everything(&mut fx, &actor, "R2");
+    unbounded_signer_does_everything(&mut fx, &actor, true, "R2");
 }
 
 /// A policy-bound signer cannot reach ExecuteDeferred, which runs no policy:

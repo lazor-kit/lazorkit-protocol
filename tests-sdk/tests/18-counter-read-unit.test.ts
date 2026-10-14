@@ -235,7 +235,7 @@ describe('challenge reads — options reach every read', () => {
         walletPda,
         adminSigner: signer,
         sessionKey: Keypair.generate().publicKey,
-        expiresAt: 10_000n,
+        expiresAt: 1_791_075_600n, // Unix seconds
         unrestricted: true,
       })],
     ['revokeSession', (c, signer) =>
@@ -252,8 +252,11 @@ describe('challenge reads — options reach every read', () => {
       const signer = secp256r1(signerThatStops(credentialIdHash), floor);
       await expect(call(client, signer)).rejects.toBeInstanceOf(Prompted);
 
-      // The signer carries its key, so only the counter and the slot are read.
-      expect(reads.map((r) => r.method).sort()).toEqual(['account', 'slot']);
+      // The signer carries its key, so only the counter and the slot are read
+      // — and for transferOwnership the signer's own account once more, for
+      // the rent payer it records (the Owner it replaces is closed into it).
+      const expected = name === 'transferOwnership' ? ['account', 'account', 'slot'] : ['account', 'slot'];
+      expect(reads.map((r) => r.method).sort()).toEqual(expected);
       for (const r of reads) expect(r.config).toEqual(floor);
     });
   }

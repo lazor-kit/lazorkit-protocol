@@ -47,6 +47,8 @@ import {
   legacyProgramIdFor,
 } from './constants.js';
 import { serializeActions, type SessionAction } from './codecs/actions.js';
+import { RefundDestinationMismatchError, recordedRentPayer } from './codecs/accounts.js';
+import { MIN_UNIX_SECONDS } from './time.js';
 import {
   AUTH_TYPE_ED25519,
   AUTH_TYPE_SECP256R1,
@@ -73,6 +75,7 @@ import {
   createRegisterPayerIx,
   createRemoveAuthorityIx,
   createRevokeSessionIx,
+  createCloseExpiredSessionIx,
   createTransferOwnershipIx,
   createUpdateProtocolIx,
   createWithdrawTreasuryIx,
@@ -136,7 +139,12 @@ import {
   readAuthorityCounter,
   type ChallengeReadOptions,
 } from './secp256r1/secp256r1.js';
-import { ChallengeReadGroup, readChallengeInputs } from './secp256r1/challengeReads.js';
+import {
+  ChallengeReadGroup,
+  atOrAfterContextSlot,
+  challengeReadConfig,
+  readChallengeInputs,
+} from './secp256r1/challengeReads.js';
 import {
   buildCompactLayout,
   computeAccountsHash,
@@ -391,14 +399,15 @@ function assertAddAuthorityRole(
   }
 }
 
-/// A session with no actions is not "a session with no limits" — it is a key
-/// with *more* power over the vault than a bounded Delegate. The action buffer
-/// is what switches on the vault invariants the program checks after the CPI
-/// (owner and data length; every vault token account unchanged but for its
-/// balance; no SOL and no mint the actions do not name leaving the vault), so
-/// an empty buffer disables all of them: such a key can reassign the vault,
-/// seize its token accounts, or move any asset it holds. That is a deliberate
-/// capability, never a default, so it has to be asked for by name.
+/// A session with no actions is not "a session with no limits" in name only —
+/// it has no spending limit at all. The action buffer is what switches on the
+/// policy rules (no SOL and no mint the actions do not name leaving the
+/// vault, and the limits on those they do), so an empty buffer lets the key
+/// move any asset the vault holds until it expires: more than a bounded
+/// Delegate can. It still cannot change who controls the vault or its token
+/// accounts — the program holds every signer but an Owner to that — but
+/// spending without a limit is a deliberate capability, never a default, so
+/// it has to be asked for by name.
 function assertSessionActions(
   actions: SessionAction[] | undefined,
   unrestricted = false,
@@ -406,9 +415,26 @@ function assertSessionActions(
   if ((!actions || actions.length === 0) && !unrestricted) {
     throw new Error(
       'createSession with no actions grants an UNRESTRICTED session key — it can ' +
-        'move the whole vault and even reassign it, which is more power than a ' +
-        'bounded Delegate has. Pass actions: [Actions.solLimit(...), ...] to bound ' +
-        'it, or unrestricted: true to say you meant it.',
+        'move everything the vault holds, which is more than a bounded Delegate ' +
+        'can. Pass actions: [Actions.solLimit(...), ...] to bound it, or ' +
+        'unrestricted: true to say you meant it.',
+    );
+  }
+}
+
+/** The longest a session may live, as the program enforces: 30 days. */
+export const MAX_SESSION_SECONDS = 30n * 24n * 60n * 60n;
+
+/**
+ * Throws when a session's expiry is plainly not a time in seconds. Its actions'
+ * times are checked where every policy is built, in `serializeActions`.
+ */
+function assertSessionTimes(expiresAt: bigint): void {
+  if (expiresAt < MIN_UNIX_SECONDS) {
+    throw new Error(
+      `expiresAt ${expiresAt} is not a Unix time in seconds (it looks like a slot). ` +
+        'Sessions expire by the cluster clock: pass e.g. ' +
+        '(await lazorkit.getClusterTime()).unixTimestamp + 3600n.',
     );
   }
 }
@@ -811,6 +837,26 @@ export class LazorKit {
 
   // ─── Protocol fee resolution ─────────────────────────────────────
 
+  /**
+   * The cluster's clock as the program reads it: the slot, and the Unix time
+   * (seconds) that session expiries, action expiries and recurring windows are
+   * measured against. Read from the Clock sysvar, so it is the time the
+   * program will see at that slot, which can differ from this machine's clock
+   * by seconds to minutes. Use it to set `expiresAt`:
+   *
+   * ```ts
+   * const { unixTimestamp } = await lazorkit.getClusterTime();
+   * await lazorkit.createSession({ ..., expiresAt: unixTimestamp + 3600n });
+   * ```
+   */
+  async getClusterTime(): Promise<{ slot: bigint; unixTimestamp: bigint }> {
+    const { value } = await this.rpc
+      .getAccountInfo(SYSVAR_CLOCK_ADDRESS, { encoding: 'base64' })
+      .send();
+    if (!value) throw new Error('the Clock sysvar is missing');
+    return decodeClock(new Uint8Array(base64Encoder.encode(value.data[0])));
+  }
+
   async getProtocolConfig(): Promise<{ numShards: number; enabled: boolean } | null> {
     if (this._protocolConfig !== undefined) return this._protocolConfig;
     const [configPda] = await this.findProtocolConfig();
@@ -1206,13 +1252,14 @@ export class LazorKit {
     const trusted = new Set<string>((options.trustedKeys ?? []).map((k) => address(k)));
     const mints = watchedMints(options.watchMints);
     if (candidates.length === 0) return [];
-    // The slot first: one older than the scans can only count more things live.
-    const slot = BigInt(await this.rpc.getSlot().send());
+    // The clock first: a slot and a time older than the scans can only count
+    // more things live.
+    const clock = await this.getClusterTime();
     // Drop candidates whose wallet is gone before scanning anything for them.
     // Each survivor's wallet is read again, in order with the rest.
     const { infos: wallets } = await this.readAccounts(candidates.map((c) => c.walletPda));
     const live = candidates.filter((c, i) => isLiveWallet(c, wallets[i] ?? null));
-    const described = await mapBounded(live, 4, (c) => this.describeCandidate(c, slot, trusted, mints));
+    const described = await mapBounded(live, 4, (c) => this.describeCandidate(c, clock, trusted, mints));
     return described.filter((f): f is WalletFacts => f !== null);
   }
 
@@ -1391,9 +1438,9 @@ export class LazorKit {
    *
    * Anything that can still spend at the last step either existed at the
    * step that reads its kind, or was made later by something an earlier step
-   * saw. Expiries are compared against a slot read before any of this: no
-   * newer than the slot the program will check them at, it only counts more
-   * things live.
+   * saw. Expiries are compared against a clock read before any of this: no
+   * newer than the slot and time the program will check them at, it only
+   * counts more things live.
    */
   private async readSpendingState(
     programId: Address,
@@ -1428,7 +1475,7 @@ export class LazorKit {
 
   private async describeCandidate(
     c: PasskeyWalletCandidate,
-    slot: bigint,
+    clock: { slot: bigint; unixTimestamp: bigint },
     trustedKeys: ReadonlySet<string>,
     mints: ReadonlyArray<Address>,
   ): Promise<WalletFacts | null> {
@@ -1490,18 +1537,21 @@ export class LazorKit {
       }
     }
 
-    // The program refuses a session or deferred execution only once the slot is
-    // past `expires_at`, so one expiring at `slot` still works.
+    // The program refuses a session or deferred execution only once the clock
+    // is past `expires_at`, so one expiring at the clock still works. A v2
+    // session's expiry is Unix time (or a slot, if written before time-based
+    // expiry: see sessionLive); a v1 session's, like every deferred
+    // execution's, is a slot.
     const liveSessions: WalletFacts['liveSessions'] = [];
     for (const { pubkey, data } of sessions) {
       const readable = data.length >= 80;
-      const expiresAtSlot = readable ? readU64(data, 72) : U64_MAX;
-      if (expiresAtSlot < slot) continue;
+      const expiresAt = readable ? readU64(data, 72) : U64_MAX;
+      if (!sessionLive(c.version, expiresAt, clock)) continue;
       const sessionKey = readable ? addressFromBytes(data.slice(40, 72)) : ZERO_ADDRESS;
       liveSessions.push({
         sessionPda: pubkey,
         sessionKey,
-        expiresAtSlot,
+        expiresAt,
         trusted: readable && trustedKeys.has(sessionKey),
       });
     }
@@ -1516,7 +1566,7 @@ export class LazorKit {
     for (const { pubkey, data } of deferred) {
       const readable = data.length >= 176;
       const expiresAtSlot = readable ? readU64(data, 168) : U64_MAX;
-      if (expiresAtSlot < slot) continue;
+      if (expiresAtSlot < clock.slot) continue;
       const authorizedBy = readable ? addressFromBytes(data.slice(104, 136)) : ZERO_ADDRESS;
       pendingDeferred.push({ deferredPda: pubkey, authorizedBy, expiresAtSlot, trusted: false });
     }
@@ -1536,7 +1586,8 @@ export class LazorKit {
       authorityPda: c.authorityPda,
       publicKey: c.publicKey,
       lamports,
-      slot,
+      slot: clock.slot,
+      unixTimestamp: clock.unixTimestamp,
       otherAuthorities,
       liveSessions,
       pendingDeferred,
@@ -1640,8 +1691,8 @@ export class LazorKit {
   ): Promise<{ problem: string | null; slot: bigint; signatureCount: number }> {
     const { authType, credentialOrPubkey: credential, secp256r1Pubkey, rpId } =
       resolveOwnerFields(owner);
-    // The slot first: one older than the scans can only count more things live.
-    const slot = BigInt(await this.rpc.getSlot().send());
+    // The clock first: one older than the scans can only count more things live.
+    const clock = await this.getClusterTime();
     const [vault] = await this.findVault(wallet);
     const watchedAtas = await watchedAtasOf(vault, mints);
     const read = await this.readSpendingState(
@@ -1676,12 +1727,14 @@ export class LazorKit {
         `wallet ${wallet} lists this passkey's credential with another public key or relying party`,
       );
     }
-    // The program refuses a session or deferred execution only once the slot
-    // is past `expires_at`, so one expiring at `slot` still works.
-    if (sessions.some((x) => expiryAt(x.data, 72) >= slot)) {
+    // The program refuses a session or deferred execution only once the clock
+    // is past `expires_at`, so one expiring at the clock still works. This is
+    // a v2 wallet: its sessions expire by Unix time (a slot-valued one by its
+    // slot, see sessionLive), deferred executions by slot.
+    if (sessions.some((x) => sessionLive(2, expiryAt(x.data, 72), clock))) {
       return refuse(`wallet ${wallet} has a live session`);
     }
-    if (deferred.some((x) => expiryAt(x.data, 168) >= slot)) {
+    if (deferred.some((x) => expiryAt(x.data, 168) >= clock.slot)) {
       return refuse(`wallet ${wallet} has a pending deferred execution`);
     }
     if (!isSystemAccount(vaultInfo ?? null)) {
@@ -1954,11 +2007,15 @@ export class LazorKit {
     targetAuthorityPda: Address;
     refundDestination?: Address;
   }): Promise<{ instructions: Instruction[] }> {
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.adminSigner;
 
     if (s.type === 'ed25519') {
       const adminAuthorityPda = await this.resolveEd25519AuthorityPda(s, params.walletPda);
+      const refundDest = await this.rentRefundDestination(
+        params.targetAuthorityPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createRemoveAuthorityIx({
         payer: params.payer,
         walletPda: params.walletPda,
@@ -1989,7 +2046,12 @@ export class LazorKit {
     targetAuthorityPda: Address;
     refundDestination?: Address;
   }): Promise<PreparedRemoveAuthority> {
-    const refundDest = params.refundDestination ?? params.payer;
+    const refundDest = await this.rentRefundDestination(
+      params.targetAuthorityPda,
+      params.payer,
+      params.refundDestination,
+      params.secp256r1,
+    );
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
@@ -2056,11 +2118,15 @@ export class LazorKit {
       params.newOwner,
     );
     const [newOwnerAuthorityPda] = await this.findAuthority(params.walletPda, credentialOrPubkey);
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.ownerSigner;
 
     if (s.type === 'ed25519') {
       const currentOwnerAuthorityPda = await this.resolveEd25519AuthorityPda(s, params.walletPda);
+      const refundDest = await this.rentRefundDestination(
+        currentOwnerAuthorityPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createTransferOwnershipIx({
         payer: params.payer,
         walletPda: params.walletPda,
@@ -2099,9 +2165,14 @@ export class LazorKit {
       params.newOwner,
     );
     const [newOwnerAuthorityPda] = await this.findAuthority(params.walletPda, credentialOrPubkey);
-    const refundDest = params.refundDestination ?? params.payer;
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
+      params.secp256r1,
+    );
+    const refundDest = await this.rentRefundDestination(
+      authorityPda,
+      params.payer,
+      params.refundDestination,
       params.secp256r1,
     );
 
@@ -2179,6 +2250,9 @@ export class LazorKit {
     walletPda: Address;
     adminSigner: AdminSigner;
     sessionKey: Address;
+    /** Unix time (seconds) after which the program refuses the session, at
+     *  most {@link MAX_SESSION_SECONDS} after the cluster clock — read it with
+     *  {@link LazorKit.getClusterTime}. Not a slot. */
     expiresAt: bigint;
     /** Actions bounding what this session may spend. An asset they do not
      *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
@@ -2189,6 +2263,7 @@ export class LazorKit {
     unrestricted?: boolean;
   }): Promise<{ instructions: Instruction[]; sessionPda: Address }> {
     assertSessionActions(params.actions, params.unrestricted);
+    assertSessionTimes(params.expiresAt);
     const sessionKeyBytes = addressEncoder.encode(params.sessionKey) as Uint8Array;
     const [sessionPda] = await this.findSession(params.walletPda, sessionKeyBytes);
     const s = params.adminSigner;
@@ -2229,6 +2304,9 @@ export class LazorKit {
     walletPda: Address;
     secp256r1: Secp256r1Params;
     sessionKey: Address;
+    /** Unix time (seconds) after which the program refuses the session, at
+     *  most {@link MAX_SESSION_SECONDS} after the cluster clock — read it with
+     *  {@link LazorKit.getClusterTime}. Not a slot. */
     expiresAt: bigint;
     /** Actions bounding what this session may spend. An asset they do not
      *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
@@ -2239,6 +2317,7 @@ export class LazorKit {
     unrestricted?: boolean;
   }): Promise<PreparedCreateSession> {
     assertSessionActions(params.actions, params.unrestricted);
+    assertSessionTimes(params.expiresAt);
     const sessionKeyBytes = addressEncoder.encode(params.sessionKey) as Uint8Array;
     const [sessionPda] = await this.findSession(params.walletPda, sessionKeyBytes);
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
@@ -2306,6 +2385,71 @@ export class LazorKit {
     return { instructions: [precompileIx, ix], sessionPda: i.sessionPda };
   }
 
+  // ─── Rent refunds ────────────────────────────────────────────────
+
+  /**
+   * Where closing `account` (an authority or a session) must send its rent.
+   *
+   * From layout revision 2 both record the account that paid their rent, and
+   * every instruction that closes one refunds only to it (error 3039 for any
+   * other destination), whoever signs or pays for the close. This reads the
+   * account and returns that payer. For an account that records none (written
+   * before revision 2, or not found) it returns `requested ?? fallback`, as
+   * before. Read at `opts`' commitment and floor (default `'confirmed'`): an
+   * account created by a transaction a lagging node has not seen reads as
+   * not found.
+   *
+   * @throws {RefundDestinationMismatchError} `requested` is not the recorded
+   *   payer: the program would refuse the transaction.
+   */
+  async rentRefundDestination(
+    account: Address,
+    fallback: Address,
+    requested?: Address,
+    /** The read's commitment and floor; a passkey flow passes its own. */
+    opts?: ChallengeReadOptions,
+  ): Promise<Address> {
+    const config = challengeReadConfig(opts);
+    const { value } = await atOrAfterContextSlot(
+      () => this.rpc.getAccountInfo(account, { encoding: 'base64', ...config }).send(),
+      config,
+      `the rent payer of ${account}`,
+    );
+    const rentPayer = value
+      ? recordedRentPayer(new Uint8Array(base64Encoder.encode(value.data[0])))
+      : null;
+    if (!rentPayer) return requested ?? fallback;
+    if (requested && requested !== rentPayer) {
+      throw new RefundDestinationMismatchError({ account, rentPayer, requested });
+    }
+    return rentPayer;
+  }
+
+  /**
+   * Close a session past its expiry. Anyone may: `caller` signs and pays the
+   * fee. The rent goes to the session's recorded rent payer (layout revision
+   * 2); for a session that records none, to `refundDestination`, by default
+   * `caller`.
+   */
+  async closeExpiredSession(params: {
+    caller: Address;
+    sessionPda: Address;
+    refundDestination?: Address;
+  }): Promise<{ instructions: Instruction[] }> {
+    const refundDestination = await this.rentRefundDestination(
+      params.sessionPda,
+      params.caller,
+      params.refundDestination,
+    );
+    const ix = createCloseExpiredSessionIx({
+      caller: params.caller,
+      sessionPda: params.sessionPda,
+      refundDestination,
+      programId: this.programId,
+    });
+    return { instructions: [ix] };
+  }
+
   // ─── RevokeSession (unified) ─────────────────────────────────────
 
   async revokeSession(params: {
@@ -2315,11 +2459,15 @@ export class LazorKit {
     sessionPda: Address;
     refundDestination?: Address;
   }): Promise<{ instructions: Instruction[] }> {
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.adminSigner;
 
     if (s.type === 'ed25519') {
       const adminAuthorityPda = await this.resolveEd25519AuthorityPda(s, params.walletPda);
+      const refundDest = await this.rentRefundDestination(
+        params.sessionPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createRevokeSessionIx({
         payer: params.payer,
         walletPda: params.walletPda,
@@ -2350,7 +2498,12 @@ export class LazorKit {
     sessionPda: Address;
     refundDestination?: Address;
   }): Promise<PreparedRevokeSession> {
-    const refundDest = params.refundDestination ?? params.payer;
+    const refundDest = await this.rentRefundDestination(
+      params.sessionPda,
+      params.payer,
+      params.refundDestination,
+      params.secp256r1,
+    );
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
@@ -3390,10 +3543,40 @@ function readU64(data: Uint8Array, offset: number): bigint {
   return new DataView(data.buffer, data.byteOffset, data.byteLength).getBigUint64(offset, true);
 }
 
-/** The u64 expiry slot at `offset`, or `U64_MAX` — never expiring — when the account is too short to hold it. */
+/** The u64 expiry (a slot or a Unix time) at `offset`, or `U64_MAX` — never expiring — when the account is too short to hold it. */
 function expiryAt(data: Uint8Array, offset: number): bigint {
   return data.length >= offset + 8 ? readU64(data, offset) : U64_MAX;
 }
+
+/**
+ * Whether the program may still accept a session of protocol `version` that
+ * expires at `expiresAt` (it refuses one only once the clock is past it).
+ *
+ * A v1 session stores the slot v1 wrote, and the sunset program still reads it
+ * as one. A v2 session stores a Unix time, except one written before
+ * time-based expiry, which holds a slot: every value below
+ * {@link MIN_UNIX_SECONDS} is one. Such a session counts while its slot has
+ * not passed. A cluster still running a slot-based build accepts it until then
+ * and a time-based build never does, so counting it keeps an ownership check
+ * from missing a session in either case.
+ */
+function sessionLive(
+  version: 1 | 2,
+  expiresAt: bigint,
+  clock: { slot: bigint; unixTimestamp: bigint },
+): boolean {
+  if (version === 1 || expiresAt < MIN_UNIX_SECONDS) return expiresAt >= clock.slot;
+  return expiresAt >= clock.unixTimestamp;
+}
+
+/** The Clock sysvar's slot (u64 at 0) and Unix time (i64 at 32). */
+function decodeClock(data: Uint8Array): { slot: bigint; unixTimestamp: bigint } {
+  if (data.length < 40) throw new Error('the Clock sysvar is too short to read');
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  return { slot: view.getBigUint64(0, true), unixTimestamp: view.getBigInt64(32, true) };
+}
+
+const SYSVAR_CLOCK_ADDRESS = 'SysvarC1ock11111111111111111111111111111111' as Address;
 
 function readU32(data: Uint8Array, offset: number): number {
   return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(offset, true);

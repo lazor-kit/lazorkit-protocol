@@ -4,9 +4,11 @@ use crate::{
     },
     compact::{compute_accounts_hash, max_inner_accounts, parse_compact_instructions_ref_with_len},
     error::AuthError,
-    processor::execute::actions::{
-        evaluate_post_actions, evaluate_pre_actions, mint_flows, snapshot_vault_token_accounts,
-        verify_vault_token_accounts,
+    processor::{
+        authority::manage::RANK_OWNER,
+        execute::actions::{
+            evaluate_post_actions, evaluate_pre_actions, guards_vault, mint_flows, VaultGuard,
+        },
     },
     state::{authority::AuthorityAccountHeader, policy::PolicyLocation, AccountDiscriminator},
     utils::get_stack_height,
@@ -16,7 +18,7 @@ use pinocchio::{
     instruction::{Account, AccountMeta, Instruction, Seed, Signer},
     program::invoke_signed_unchecked,
     program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
+    pubkey::Pubkey,
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
@@ -27,9 +29,12 @@ use pinocchio::{
 ///
 /// # Logic:
 /// 1. **Authentication**: Verifies that the signer is a valid `Authority` or `Session` for this wallet.
-/// 2. **Session Checks**: If authenticated via Session, enforces slot expiry and action permissions.
+/// 2. **Session Checks**: If authenticated via Session, enforces expiry (Unix time) and action permissions.
 /// 3. **Decompression**: Expands `CompactInstructions` (index-based references) into full Solana instructions.
 /// 4. **Execution**: Invokes the Instructions via CPI, signing with the Vault PDA.
+/// 5. **Vault invariants**: unless the signer is an Owner, the vault and its
+///    token accounts must end the Execute owned and shaped as they began it
+///    (see [`VaultGuard`]); a policy, if any, is then enforced.
 ///
 /// # Accounts:
 /// 1. `[signer]` Payer.
@@ -125,9 +130,15 @@ pub fn process(
     // which is what an authority-authenticated Execute wants.
     let mut session_key: Option<Pubkey> = None;
 
-    // One clock read for both branches — policy evaluation needs the slot
-    // whether the caller is a session or a policy-bearing authority.
-    let current_slot = Clock::get()?.slot;
+    // Set on the authority branch for rank Owner, and only there. Every other
+    // signer — a session of any kind, an Admin, a Delegate, a rank no rule
+    // knows — is held to the vault invariants below.
+    let mut signer_is_owner = false;
+
+    // One clock read for both branches — session expiry and policy evaluation
+    // both need the time, whether the caller is a session or a policy-bearing
+    // authority. Unix seconds, not slots: see `utils::unix_now`.
+    let now = crate::utils::unix_now(&Clock::get()?)?;
 
     // Bound to the enum rather than to numeric literals. The v1 code matched on
     // bare `2` and `3`, which silently stopped matching anything the moment the
@@ -147,6 +158,7 @@ pub fn process(
             if authority_header.wallet != *wallet_pda.key() {
                 return Err(ProgramError::InvalidAccountData);
             }
+            signer_is_owner = authority_header.role == RANK_OWNER;
             match authority_header.authority_type {
                 0 => {
                     // Ed25519
@@ -191,9 +203,11 @@ pub fn process(
                 return Err(AuthError::PermissionDenied.into());
             }
 
-            if authority_data.len() < std::mem::size_of::<crate::state::session::SessionAccount>() {
-                return Err(ProgramError::InvalidAccountData);
-            }
+            // Length, discriminator and layout revision. The revision decides
+            // where the session's actions start (`PolicyLocation::of`), so one
+            // this binary does not know is refused here rather than read as a
+            // session without actions.
+            crate::state::session::SessionAccount::check(authority_data)?;
 
             let session = unsafe {
                 std::ptr::read_unaligned(
@@ -206,8 +220,9 @@ pub fn process(
                 return Err(ProgramError::InvalidAccountData);
             }
 
-            // Verify Expiry
-            if current_slot > session.expires_at {
+            // Verify Expiry. A session written before time-based expiry holds
+            // a slot here, which as a time is long past: refused.
+            if !crate::state::session::is_live(session.expires_at, now) {
                 return Err(AuthError::SessionExpired.into());
             }
 
@@ -233,25 +248,13 @@ pub fn process(
     // Pre-CPI policy checks (program whitelist/blacklist), for a session with
     // actions or an authority with a policy alike.
     if let Some(loc) = policy {
-        evaluate_pre_actions(
-            authority_data,
-            loc,
-            &compact_instructions,
-            accounts,
-            current_slot,
-        )?;
+        evaluate_pre_actions(authority_data, loc, &compact_instructions, accounts, now)?;
     }
 
-    // Get vault bump for signing
-    let (vault_key, vault_bump) = find_program_address(
-        &[crate::seeds::VAULT, wallet_pda.key().as_ref()],
-        program_id,
-    );
-
-    // Verify vault PDA.
-    if vault_pda.key() != &vault_key {
-        return Err(ProgramError::InvalidSeeds);
-    }
+    // Verify the vault PDA and get the bump to sign for it with: the bump the
+    // wallet stores, checked with one hash, or for a revision-1 wallet a search.
+    let vault_bump =
+        crate::utils::vault_signer_bump(wallet_pda, wallet_data, vault_pda, program_id)?;
 
     // Snapshot balances before CPI, for policy enforcement afterwards.
     let vault_lamports_before = if policy.is_some() {
@@ -260,22 +263,25 @@ pub fn process(
         0
     };
 
-    // ── Session invariants (defense against System::Assign / SetAuthority escapes) ──
-    // A session that whitelists System Program (a common pattern for SOL transfers)
-    // could otherwise craft `System::Assign(vault, attacker)` — the lamport-based
-    // limits see no outflow, but ownership of the vault silently transfers to the
-    // attacker, who then drains it in a follow-up tx. Same class of attack via
-    // SPL Token's `SetAuthority` / `Approve` on vault-owned token accounts.
+    // ── Vault invariants (defense against System::Assign / SetAuthority escapes) ──
+    // A signer that may CPI to System Program could otherwise craft
+    // `System::Assign(vault, attacker)`: no lamport moves, so no limit sees it,
+    // but ownership of the vault silently transfers to the attacker, who then
+    // drains it in a follow-up tx. Same class of attack via SPL Token's
+    // `SetAuthority` / `Approve` on vault-owned token accounts.
+    //
+    // Every signer but an Owner is held to this, policy or not. A session
+    // without actions and an Admin may spend without limit while they are live,
+    // but a grant like these would outlive them: it survives the session's
+    // expiry, `RevokeSession` and `RemoveAuthority`. A policy-bearing signer is
+    // never an Owner (only a Delegate carries one), so it is always guarded;
+    // `guards_vault` says so rather than relying on it.
     //
     // Snapshot the vault's metadata, and every writable vault-owned token account
     // whole, BEFORE the CPI loop. Afterwards each must be unchanged but for its
     // balance, and each mint's balance is measured over these same accounts.
-    let vault_owner_before = policy.map(|_| *vault_pda.owner());
-    let vault_data_len_before = policy.map(|_| unsafe { vault_pda.borrow_data_unchecked().len() });
-    let token_accounts_before = match policy {
-        Some(_) => snapshot_vault_token_accounts(accounts, vault_pda.key()),
-        None => Vec::new(),
-    };
+    let guard = guards_vault(signer_is_owner, policy.is_some())
+        .then(|| VaultGuard::snapshot(vault_pda, accounts));
 
     // Track gross SOL outflow across all CPIs (for SolMaxPerTx check)
     let mut vault_lamports_gross_out: u64 = 0;
@@ -372,31 +378,21 @@ pub fn process(
         }
     }
 
-    // ── Post-CPI session invariants ────────────────────────────────────
-    // Verify vault's ownership and data layout were not tampered with. Any
-    // change (System::Assign, Allocate, AllocateWithSeed, AssignWithSeed) is
-    // rejected. This complements the balance-based limits below.
-    if let Some(owner_before) = vault_owner_before {
-        if *vault_pda.owner() != owner_before {
-            return Err(AuthError::SessionVaultOwnerChanged.into());
-        }
-    }
-    if let Some(len_before) = vault_data_len_before {
-        let len_after = unsafe { vault_pda.borrow_data_unchecked().len() };
-        if len_after != len_before {
-            return Err(AuthError::SessionVaultDataLenChanged.into());
-        }
-    }
-    // Every vault-owned token account kept everything but its balance, and none
-    // that became vault-owned here carries a delegate or close authority.
-    if policy.is_some() {
-        verify_vault_token_accounts(&token_accounts_before, accounts, vault_pda.key())?;
+    // ── Post-CPI vault invariants ──────────────────────────────────────
+    // The vault's ownership and data layout were not tampered with — any change
+    // (System::Assign, Allocate, AllocateWithSeed, AssignWithSeed) is rejected —
+    // and every vault-owned token account kept everything but its balance, and
+    // none that became vault-owned here carries a delegate or close authority.
+    // This complements the balance-based limits below.
+    if let Some(guard) = &guard {
+        guard.verify(vault_pda, accounts)?;
     }
 
     // Post-CPI action checks (spending limits, and assets the policy does not name)
     // Reuse the existing `authority_data` borrow — no additional borrow of authority_pda.
-    if let Some(loc) = policy {
-        let flows = mint_flows(&token_accounts_before, accounts);
+    // `guard` is always `Some` when `policy` is (it is taken for any policy).
+    if let (Some(loc), Some(guard)) = (policy, &guard) {
+        let flows = mint_flows(&guard.token_accounts, accounts);
         evaluate_post_actions(
             authority_data,
             loc,
@@ -404,7 +400,7 @@ pub fn process(
             vault_pda.lamports(),
             vault_lamports_gross_out,
             &flows,
-            current_slot,
+            now,
         )?;
     }
 

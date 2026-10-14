@@ -101,6 +101,17 @@ function account(data: Uint8Array, lamports = 1n, owner?: Address) {
 /** The slot every stubbed read is answered at (and getSlot returns). */
 const STUB_SLOT = 1_000n;
 
+/** The Unix time the stubbed Clock sysvar holds (2026-10-04); session expiries compare against it. */
+const STUB_UNIX = 1_791_072_000n;
+
+/** The Clock sysvar's data: slot at 0, Unix time at 32. */
+function clockAccount() {
+  const data = new Uint8Array(40);
+  new DataView(data.buffer).setBigUint64(0, STUB_SLOT, true);
+  new DataView(data.buffer).setBigInt64(32, STUB_UNIX, true);
+  return account(data);
+}
+
 /** A getProgramAccounts answer: wrapped with its context slot when the call asked `withContext`. */
 async function programAccounts(config: { withContext?: boolean }, rows: () => Promise<unknown[]>) {
   const value = await rows();
@@ -181,6 +192,9 @@ const HOSTILE = {
   'session-expiring-now': 'live session',
   'deferred-expiring-now': 'pending deferred execution',
   'unreadable-session': 'live session',
+  // Written before time-based expiry, its expiry is a slot; a cluster still on
+  // a slot-based build accepts it until that slot passes.
+  'slot-valued-session': 'live session',
   'vault-assigned': 'is owned by program Vote111111111111111111111111111111111111111, not the System Program',
   'vault-allocated': 'carries data',
   'token-delegate': 'has a delegate, Vote111111111111111111111111111111111111111',
@@ -192,7 +206,11 @@ const HOSTILE = {
 type Hostile = keyof typeof HOSTILE;
 
 /** Vault states that look odd but leave nobody else a way in. */
-type Harmless = 'expired-session' | 'vault-missing' | 'close-authority-is-vault';
+type Harmless =
+  | 'expired-session'
+  | 'expired-slot-valued-session'
+  | 'vault-missing'
+  | 'close-authority-is-vault';
 
 const WSOL = address('So11111111111111111111111111111111111111112');
 
@@ -291,6 +309,9 @@ describe('migrateV1Wallet by address', () => {
       // v2 wallet exists only when the test says so.
       getAccountInfo: (key: Address) => ({
         send: async () => {
+          if (key === 'SysvarC1ock11111111111111111111111111111111') {
+            return { context: { slot: STUB_SLOT }, value: clockAccount() };
+          }
           if (key === v1Authority) return { value: account(v1AuthorityData(v1Wallet, 0, 1)) };
           if (options.v2Wallet && key === options.v2Wallet) {
             return { value: account(v2WalletData(), 1_000_000n, PROGRAM_ID) };
@@ -333,11 +354,14 @@ describe('migrateV1Wallet by address', () => {
               return options.hostile === 'second-authority'
                 ? [owner, { pubkey: STRANGER, account: account(v1AuthorityData(v2)) }]
                 : [owner];
-            // The slot is 1_000.
+            // A v2 session expires by Unix time (STUB_UNIX), a deferred
+            // execution by slot (1_000).
             case tag(ACCOUNT_DISCRIMINATOR.SESSION):
-              if (options.hostile === 'session') return expiring(5_000n);
-              if (options.hostile === 'session-expiring-now') return expiring(1_000n);
-              if (options.harmless === 'expired-session') return expiring(999n);
+              if (options.hostile === 'session') return expiring(STUB_UNIX + 4_000n);
+              if (options.hostile === 'session-expiring-now') return expiring(STUB_UNIX);
+              if (options.harmless === 'expired-session') return expiring(STUB_UNIX - 1n);
+              if (options.hostile === 'slot-valued-session') return expiring(STUB_SLOT + 50_000n);
+              if (options.harmless === 'expired-slot-valued-session') return expiring(STUB_SLOT - 1n);
               if (options.hostile === 'unreadable-session') {
                 return [{ pubkey: STRANGER, account: account(new Uint8Array(40)) }];
               }
@@ -572,7 +596,12 @@ describe('migrateV1Wallet by address', () => {
     });
   }
 
-  for (const harmless of ['expired-session', 'vault-missing', 'close-authority-is-vault'] as const) {
+  for (const harmless of [
+    'expired-session',
+    'expired-slot-valued-session',
+    'vault-missing',
+    'close-authority-is-vault',
+  ] as const) {
     it(`still reuses a wallet with ${harmless}`, async () => {
       const existing = (await new LazorKit({} as never, PROGRAM_ID).findWallet(
         new Uint8Array(32).fill(0x12),

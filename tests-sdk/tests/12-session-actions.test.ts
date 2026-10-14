@@ -30,8 +30,8 @@ import {
   setupTest,
   sendTx,
   sendTxExpectError,
-  getSlot,
   type TestContext,
+  getUnixTime,
 } from './common';
 import {
   LazorKitClient,
@@ -92,8 +92,8 @@ describe('Session Actions', () => {
 
   async function createSessionWith(actions: SessionAction[]) {
     const sessionKp = Keypair.generate();
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 50_000n;
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 21_600n;
 
     const { instructions: createIxs, sessionPda } = await client.createSession({
       payer: ctx.payer.publicKey,
@@ -153,7 +153,7 @@ describe('Session Actions', () => {
 
     it('undefined actions — same as no actions', async () => {
       const sessionKp = Keypair.generate();
-      const currentSlot = await getSlot(ctx);
+      const now = await getUnixTime(ctx);
 
       const { instructions: createIxs, sessionPda } =
         await client.createSession({
@@ -161,7 +161,7 @@ describe('Session Actions', () => {
           walletPda,
           adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
           sessionKey: sessionKp.publicKey,
-          expiresAt: currentSlot + 50_000n,
+          expiresAt: now + 21_600n,
           // no actions field at all
           // Deliberately unrestricted: this test exercises the actionless session.
           unrestricted: true,
@@ -476,7 +476,7 @@ describe('Session Actions', () => {
       const { sessionKp, sessionPda } = await createSessionWith([
         Actions.solRecurringLimit({
           limit: BigInt(2 * LAMPORTS_PER_SOL),
-          window: 50_000n,
+          windowSeconds: 21_600n, // 6 hours: longer than the test
         }),
       ]);
       const r1 = Keypair.generate().publicKey;
@@ -588,14 +588,14 @@ describe('Session Actions', () => {
   describe('Creation Validation', () => {
     it('whitelist + blacklist conflict rejected at creation', async () => {
       const sessionKp = Keypair.generate();
-      const currentSlot = await getSlot(ctx);
+      const now = await getUnixTime(ctx);
 
       const { instructions: createIxs } = await client.createSession({
         payer: ctx.payer.publicKey,
         walletPda,
         adminSigner: ed25519(ownerKp.publicKey, ownerAuthPda),
         sessionKey: sessionKp.publicKey,
-        expiresAt: currentSlot + 50_000n,
+        expiresAt: now + 21_600n,
         actions: [
           Actions.programWhitelist(SystemProgram.programId),
           Actions.programBlacklist(Keypair.generate().publicKey),

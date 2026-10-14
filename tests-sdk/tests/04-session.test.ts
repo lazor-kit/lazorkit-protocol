@@ -5,8 +5,8 @@ import {
   setupTest,
   sendTx,
   sendTxExpectError,
-  getSlot,
   type TestContext,
+  getUnixTime,
 } from './common';
 import { LazorKitClient, ed25519 } from '../../sdk/sdk-legacy/src';
 import { SessionAccount } from '../../sdk/sdk-legacy/src/utils/accounts';
@@ -39,9 +39,9 @@ describe('CreateSession', () => {
   it('creates a session with Ed25519 admin', async () => {
     const sessionKp = Keypair.generate();
 
-    // Expires ~1 hour from now in slots (~2.5 slots/sec * 3600 = 9000 slots)
-    const currentSlot = await getSlot(ctx);
-    const expiresAt = currentSlot + 9000n;
+    // Expires an hour from now, by the cluster's clock
+    const now = await getUnixTime(ctx);
+    const expiresAt = now + 3_600n;
 
     const { instructions, sessionPda } = await client.createSession({
       payer: ctx.payer.publicKey,

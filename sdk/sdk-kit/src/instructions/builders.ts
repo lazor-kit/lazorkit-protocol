@@ -399,6 +399,7 @@ export function createCreateSessionIx(params: {
   adminAuthorityPda: Address;
   sessionPda: Address;
   sessionKey: Uint8Array;
+  /** Unix time (seconds) after which the session is refused. Not a slot. */
   expiresAt: bigint;
   actionsBuffer?: Uint8Array;
   authPayload?: Uint8Array;
@@ -780,16 +781,20 @@ export function createMigrateWalletIx(params: {
 // ─── CloseExpiredSession ────────────────────────────────────────────
 
 /**
- * Close a session whose `expires_at` has passed, and keep its rent.
+ * Close a session whose `expires_at` has passed.
  *
  * Permissionless: before expiry a session ends only through `RevokeSession`,
  * signed by the wallet's Owner or Admin, but afterwards it authorises nothing
  * and the only key that could free the rent belongs to a user with no reason to
- * return. Accepts a v1 session as well as a v2 one — the headers are identical
+ * return. The rent goes back to the account that paid it: a session at layout
+ * revision 2 records it (`recordedRentPayer`), and `refundDestination` must be
+ * it (RefundDestinationMismatch, 3039, otherwise); a session that records none
+ * refunds wherever the caller says. `LazorKit.closeExpiredSession` fills it
+ * in. Accepts a v1 session as well as a v2 one — the headers are identical
  * apart from the discriminator.
  */
 export function createCloseExpiredSessionIx(params: {
-  /** Any signer. Pays the fee and, by convention, receives the rent. */
+  /** Any signer. Pays the fee; need not be the rent payer. */
   caller: Address;
   sessionPda: Address;
   refundDestination: Address;

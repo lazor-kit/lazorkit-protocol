@@ -100,10 +100,9 @@ fn send(
 /// begins: `[session_key 32][expires_at u64][actions_len u16 = 0]`. The program
 /// signs over exactly these bytes followed by the payer.
 fn create_session_args(context: &TestContext, session_key: &Pubkey) -> Vec<u8> {
-    let slot = context.svm.get_sysvar::<solana_sdk::clock::Clock>().slot;
     let mut args = Vec::with_capacity(42);
     args.extend_from_slice(session_key.as_ref());
-    args.extend_from_slice(&(slot + 100_000).to_le_bytes());
+    args.extend_from_slice(&(unix_now(&context.svm) + 100_000).to_le_bytes());
     args.extend_from_slice(&0u16.to_le_bytes());
     args
 }

@@ -63,7 +63,8 @@ pub enum AuthError {
     /// expiry a session ends only through `RevokeSession`, signed by the
     /// wallet's own Owner or Admin; the permissionless path exists because an
     /// expired session can no longer authorise anything, and that is only true
-    /// once the slot is strictly past `expires_at`.
+    /// once `Clock::unix_timestamp` is strictly past `expires_at` (for a v1
+    /// session, which stores a slot, once `Clock::slot` is).
     SessionNotExpired = 3036,
     /// The vault's SOL balance fell during an Execute whose policy names no SOL
     /// action (`SolLimit`, `SolRecurringLimit` or `SolMaxPerTx`). A policy lists
@@ -74,6 +75,13 @@ pub enum AuthError {
     /// Execute, fell and no `Token*` action names that mint. wSOL is a mint like
     /// any other; a SOL action does not name it.
     ActionUnlistedTokenOutflow = 3038,
+    /// An instruction that closes an authority or a session named a refund
+    /// destination other than the account that paid its rent. From layout
+    /// revision 2 both record that payer, and the rent goes back to it and
+    /// nowhere else, whoever signs the close. An account written before
+    /// revision 2 records no payer and keeps the old rule (see
+    /// `state::rent_payer`).
+    RefundDestinationMismatch = 3039,
 }
 
 impl From<AuthError> for ProgramError {

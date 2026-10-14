@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "main": "../dist/approval/index.js",
+  "types": "../dist/approval/index.d.ts",
+  "sideEffects": false
+}

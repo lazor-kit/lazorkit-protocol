@@ -1,0 +1,15 @@
+# Kora signer for the devnet relayer (Dockerfile.devnet): one memory signer.
+#
+# KORA_PRIVATE_KEY holds the key itself, base58 or "[u8, ...]", not a path: at
+# 2.2.0-beta.8 the memory signer answers "Invalid private key format" to a file
+# path. It is a devnet-only fee payer, never the mainnet relayer key; set it in
+# the host's environment, never in this file or the image.
+#
+# round_robin over one signer just means "this one"; a weight would be ignored.
+[signer_pool]
+strategy = "round_robin"
+
+[[signers]]
+name = "lazorkit_devnet_fee_payer"
+type = "memory"
+private_key_env = "KORA_PRIVATE_KEY"

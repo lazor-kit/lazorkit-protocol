@@ -6,6 +6,407 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — a closed account's rent goes back to whoever paid it (program and SDKs; layout revision 2; needs a review before the mainnet deploy)
+
+**Program** (both v2 artifacts change: devnet `f2779b66…` → `e7930c8b…`,
+mainnet `142aad9e…` → `b242e187…`, 153752 → 158096 bytes; both sunset
+artifacts change too: mainnet-v1 `7a86c87c…` → `353dfee3…`, devnet-v1
+`a84a234e…` → `2f0fae7e…`, 45936 → 46872 bytes. Devnet's programdata was
+already 160,560 bytes, so its upgrade needed no extend.)
+
+- Every account the program creates is funded by the instruction's `payer` —
+  on a sponsored flow the relayer — but `RevokeSession`, `CloseExpiredSession`,
+  `RemoveAuthority` and `TransferOwnership` refunded the rent to a destination
+  the caller chose. An authority and a session now record the account that
+  paid their rent, and those four refund only to it: any other destination is
+  refused with the new **3039 `RefundDestinationMismatch`**, whoever signs or
+  pays for the close. `CloseExpiredSession` stays permissionless; its rent goes
+  to the recorded payer, not to the caller.
+- **Layout revision 2** (`version` 2) for authorities and sessions: the 32-byte
+  rent payer sits after the fixed part (an authority's key material, a
+  session's 80-byte header) and before the policy, so no field an existing
+  reader uses moves but the policy's start: 80 → 112 (Ed25519), 145 → 177
+  (Secp256r1), 80 → 112 (session). `check_header` now accepts every revision
+  from 1 to a type's newest (`state::layout_version`); `PolicyLocation::of`,
+  `Execute`'s session branch (which now checks the session's header) and
+  `CloseExpiredSession` read the revision, and refuse one they do not know
+  (4013). New `state::rent_payer`.
+- **Closing never depends on the payer.** If the recorded payer has become
+  executable (its key holder deployed a program at it), a cluster without
+  SIMD-0162 refuses to credit it, which would let whoever paid for a Delegate
+  or a session keep it past the Owner's `RemoveAuthority` or `RevokeSession`.
+  In that case the close goes ahead and the rent stays in the dead account.
+  Creation records only an ordinary system account as the payer
+  (`IllegalOwner` otherwise; a pre-funded PDA skips the System transfer that
+  would require it). Found in the review of this change.
+- **Accounts from before revision 2** (devnet's today, and v1 accounts in the
+  sunset binary) record no payer and keep the old rule — the destination the
+  instruction names. Closing must stay possible (it is how a lost key is cut
+  off), a refund to the vault would reach the owner just the same, and they
+  cannot be recreated in that shape. Mainnet v2 has none.
+- `ExecuteDeferred` and `ReclaimDeferred` already refunded only to the
+  DeferredExec's stored payer; a wrong destination is now reported as 3039
+  (was `InvalidAccountData` and 3017). `ReclaimDeferred` signed by anyone but
+  the stored payer is still 3017.
+- Rent per authority and session grows by 32 bytes (222,720 lamports),
+  returned on close.
+- Tests: `program/tests/rent_refund_tests.rs` (every close path: the recorded
+  payer refunded in full, any other destination refused with the account
+  intact, revision-1 accounts closing anywhere, revision-1 policies still
+  binding, an unknown revision refused, a payer turned executable unable to
+  block a revoke, a removal or a close, a program-owned payer refused), `close_expired_session_tests.rs`
+  updated (a stranger closes into the payer, not into itself), and
+  `state::rent_payer` / `state::policy` unit tests.
+- Devnet runs it: `57bTNW…` was upgraded from `f2779b66…` (slot
+  509,609,649) to `e7930c8b…` (`develop` @345625b) on 2026-10-13 in slot
+  510,645,372 (signature `2wi63Ex9…`), after `@lazorkit/sdk-legacy` 2.1.0,
+  `@lazorkit/sdk` 1.0.0-rc.8 and `@lazorkit/wallet` 4.0.0-next.1 were
+  published; the dump's first 158,096 bytes hash to the `devnet` line of
+  `scripts/release-hashes.txt`. Through portal-v2 #8 (devnet `lastDeploySlot`
+  510645372) and the Railway devnet Kora, new passkey authorities and
+  sessions are revision 2 with the Kora fee payer recorded, and a
+  `revokeSession` refunded the session's 1,833,880 lamports to that payer.
+  A passkey SOL transfer's Execute measured 11,672 CU there (14,469 on
+  `f2779b66…`), a session transfer 7,570 (10,345).
+
+**SDKs** (`@lazorkit/sdk-legacy` 2.1.0, `@lazorkit/sdk` 1.0.0-rc.8; additive)
+
+- `revokeSession`, `removeAuthority`, `transferOwnership` and their
+  `prepare*` halves read the account being closed and use its recorded payer
+  when `refundDestination` is left out (before: `payer`), and throw
+  `RefundDestinationMismatchError` for another destination. New
+  `rentRefundDestination(account, fallback, requested?, opts?)` and
+  `closeExpiredSession({ caller, sessionPda, refundDestination? })` on both
+  clients. A passkey flow reads the payer at its challenge reads' commitment
+  and floor, so `transferOwnership` reads the signer's own authority twice.
+- Decoders: `rentPayer` and `policyOffset` on authorities, `rentPayer` and
+  `actions` on sessions (`AuthorityAccount`/`SessionAccount` in sdk-legacy,
+  `decodeAuthorityAccount`/`decodeSessionAccount` in the kit SDK);
+  `recordedRentPayer`, `authorityPolicyOffset`, `sessionActionsOffset`,
+  `authorityKeyEnd`; `RENT_PAYER_LAYOUT_VERSION`, `RENT_PAYER_LEN`.
+  `findAuthoritiesByWallet` reads a revision-2 policy where it now starts.
+- `@lazorkit/sdk-legacy/approval`: the account decoders accept revision 2
+  (`rentPayer` on `AuthorityFacts`/`SessionFacts`), and `describeApproval`
+  refuses a `revokeSession` or `removeAuthority` request whose refund is not
+  the recorded payer (`request-invalid` / `refund-not-rent-payer`, a new
+  member of `ApprovalInvalidReason`); descriptions carry `rentPayer`.
+- 3039 in sdk-legacy's `ERROR_NAMES`.
+- **An SDK from before this release** still builds every instruction the same
+  way, and defaults the refund to `payer`, which is right whenever the account
+  was created by the same payer (a relayer closing what it sponsored). It does
+  not know revision 2: it reads a revision-2 Delegate's policy and a session's
+  actions 32 bytes early, and the approval decoders of sdk-legacy 2.0.0 return
+  `null` for revision-2 authorities and sessions, so a portal on 2.0.0 refuses
+  every typed request from a wallet created after the upgrade. Upgrade the
+  SDKs and the portal with the program.
+- Tests: `sdk/sdk-kit/tests/rent-refund.test.ts`,
+  `tests-sdk/tests/22-rent-refund-unit.test.ts` (no validator),
+  `tests-sdk/tests/23-rent-refund.test.ts` and
+  `tests-sdk-kit/tests/19-revoke-session.test.ts` (validator; the latter is
+  the kit SDK's first `revokeSession` test), decoder parity for revision 2 in
+  `sdk/sdk-kit/tests/accounts.test.ts`, and approval cases in
+  `20-approval-unit.test.ts`. `21-approval-e2e.test.ts` no longer refunds to
+  random accounts: its revokes and removals refund to the recorded payer while
+  the transaction payer varies, and a random refund is refused by the SDK.
+- `scripts/rehearse/close-expired-sessions.cjs` sends a recording session's
+  rent to its payer (`PAID_BY` limits a run to one payer's sessions).
+
+### Changed — Execute checks its PDAs with stored bumps (program; needs a review before the mainnet deploy)
+
+- `Execute` and `ExecuteDeferred` ran up to four `find_program_address`
+  searches (the protocol config, the treasury shard, the payer's fee record,
+  the vault), 1,500 CU for every bump tried. Each address is now checked with
+  one `sol_sha256` of its seeds and the bump the program stored when it created
+  the account (`utils::is_program_address`; the runtime's on-curve check is
+  left out, which is sound only for a bump the program's own search found for
+  the same seeds, and the stored bumps are exactly that). A wallet now records
+  its vault's bump in what was a padding byte; 0 there (every wallet created
+  before) falls back to the search, so the wallet stays at layout revision 1.
+  A system-owned config (before `InitializeProtocol`), a config this binary
+  cannot read, and a first-time payer's fee record still search.
+- Measured over 24 fixed wallets and payers (litesvm, one System transfer, fee
+  charged), mean (min–max) before → after: Ed25519 Owner Execute 17,809
+  (14,997–26,997) → 5,302; with fees disabled 8,929 → 3,325; session 18,243 →
+  5,757; passkey 24,106 → 10,907; ExecuteDeferred 18,848 → 5,620. The spread
+  across wallets is gone. `program/tests/execute_compute_tests.rs` pins each
+  mean; `program/tests/stored_bump_tests.rs` tries another wallet's vault, a
+  corrupted vault bump, another payer's fee record and look-alike config and
+  shard accounts.
+
+### Fixed — docs and comments
+
+- The Secp256r1 signature window, 150 slots, is about 33–34 s on today's
+  clusters, not 60 (`auth/secp256r1/mod.rs`, both SDK READMEs). The constant
+  is unchanged.
+- `deploy/kora/kora.{mainnet,devnet}.toml`: `ComputeBudget` is allowed for the
+  compute-budget instructions an app or wallet adds; the SDKs add none.
+- `sdk/sdk-kit/README.md` was still at rc.1 and listed `revokeSession` as
+  untested.
+
+### Added — typed approval requests: `@lazorkit/sdk-legacy/approval` (SDK only; the program is unchanged)
+
+Ships in the same `@lazorkit/sdk-legacy` 2.0.0 as the time-based expiry
+change below; the wallet SDKs that use it depend on `^2.0.0`.
+
+A passkey signs a 32-byte challenge, which says nothing to the person
+approving it. For `CreateSession`, `RevokeSession` and `RemoveAuthority` the
+SDK now also produces the request the challenge is computed from, so the page
+that asks for the passkey can show what it approves and compute the challenge
+itself, at the slot and counter it reads when the user approves.
+
+- New entry point `@lazorkit/sdk-legacy/approval`, importing only
+  `@noble/hashes` and `@noble/curves` (a build step and a bundle test refuse
+  anything else): the v1 request envelope and its single canonical encoding
+  (`encodeApprovalRequest`, `decodeApprovalRequest`, the `#/?lk1=` URL
+  fragment, an 8,192-character cap that throws `TypedRequestTooLargeError`
+  rather than truncate); `approvalChallenge(request, { slot, counter })` and
+  `signedPayloadOf`, the program's recipe; `decodeActions`, which accepts an
+  actions buffer exactly when `validate_actions_buffer` does; the portal's
+  checks (`checkApprovalQuery`, `approvalReadPlan`, `describeApproval` with
+  account decoders) and reply (`typedReplyFor`, `typedReplyParams`); the
+  SDK's reply check (`verifyApprovalReply`, `PortalReplyMismatchError`); PDA
+  helpers without `@solana/web3.js`.
+- `prepareCreateSession`, `prepareRevokeSession` and `prepareRemoveAuthority`
+  return `request` when `secp256r1.credentialId` (new, optional; its SHA-256
+  must be `credentialIdHash`) is given and the program is the devnet or
+  mainnet v2 deployment.
+- With `secp256r1.credentialId`, `prepareCreateSession` throws
+  `TransactionTooLargeError` (code `transaction-too-large`) before any read or
+  passkey prompt when the signed transaction could not fit 1,232 bytes. The
+  program receives authenticatorData and clientDataJSON whole, so a passkey
+  CreateSession has room for far fewer actions than the 2,048-byte buffer
+  cap: `MAX_PASSKEY_SESSION_ACTIONS_BYTES` (224) with the assumed lengths
+  (`ASSUMED_AUTHENTICATOR_DATA_BYTES` 37, `ASSUMED_CLIENT_DATA_JSON_BYTES`
+  320); `createSessionTransactionBytes` sizes one. `describeApproval` refuses
+  such a request as `request-invalid` / `transaction-too-large`. Without a
+  credential id nothing changes.
+- `describeApproval` reads stored times in the binary's unit: Unix seconds
+  with `time-expiry` (a slot an earlier build stored reads as ended), slots
+  without it, and judges none when the features are unknown. Policies carry
+  `timeUnit`.
+- `rebindSecp256r1(prepared, { slot, counter })`; `PreparedSecp256r1._internal`
+  keeps the challenge's other inputs. `finalizeCreateSession`,
+  `finalizeRevokeSession` and `finalizeRemoveAuthority` take an optional
+  `binding` and check that the response signed the challenge at it.
+- Tests: `tests-sdk/tests/20-approval-unit.test.ts` (10,000 seeded cases per
+  kind against the SDK's own challenge and a reference written from
+  `secp256r1/mod.rs`; codec, decoder, replies, descriptions, bundle; no
+  validator, run in CI) and `21-approval-e2e.test.ts` (on a validator: 30
+  typed requests per kind land; changing any signed field after signing is
+  refused; a request prepared more than 150 slots before approval lands; the
+  decoder against CreateSession on about 500 mutated buffers), and
+  `program/tests/typed_approval_vectors_tests.rs` (litesvm, in CI): the
+  challenge of each kind pinned as a vector, from payload builders that sign
+  a CreateSession, RevokeSession and RemoveAuthority the program accepts;
+  `20-approval-unit` checks `approvalChallenge` against the same vectors.
+
+### Changed — session expiry and policy time are Unix seconds (program and SDKs; breaking; needs a review before the mainnet deploy)
+
+**Program** (both v2 artifacts change: devnet `30ac9bef…` → `f2779b66…`,
+mainnet `96f4adc1…` → `142aad9e…`, 153752 bytes each; both sunset artifacts are
+byte-identical)
+
+- A session's `expires_at`, an action's `expires_at`, and a recurring limit's
+  `window` and `last_reset` are read against `Clock::unix_timestamp`
+  (seconds), not `Clock::slot`. These are durations a person reads ("until
+  6:50 PM", "1 SOL a day"); a slot count is only ever "about" one in time,
+  and how far it is depends on the cluster (about 400 ms per slot on mainnet,
+  faster on devnet). New `utils::unix_now` (a negative timestamp is refused
+  rather than read as 0) and `state::session::is_live`, which `Execute` and
+  `CloseExpiredSession` share.
+- `CreateSession` takes an `expires_at` after the cluster's time and at most
+  `MAX_SESSION_SECONDS` (30 days, 2,592,000 s) ahead of it; 3008 otherwise.
+  The old cap was 6,480,000 slots, "about 30 days" at 2.5 slots per second.
+  The instruction layout is unchanged (u64 LE, signed in the passkey payload
+  as before).
+- What stays in slots, because it bounds how a transaction lands rather than
+  how long a grant lasts: the Secp256r1 signature's age (150 slots, the same
+  horizon as a recent blockhash; the slot is part of the signed challenge),
+  and the deferred-execution window (`Authorize`'s `expiry_offset`, a signed
+  u16 slot count, 10–9,000, compared with `Clock::slot` by ExecuteDeferred and
+  ReclaimDeferred). `IntegratorRecord.registered_at` stays a slot too (a
+  record, not a deadline).
+- `CloseExpiredSession` reads a v2 session's expiry as Unix time and a v1
+  session's, which v1 wrote as a slot, as a slot, so a v1 session becomes
+  closable exactly when it did before. The sunset binary owns v1 sessions
+  only and reads every expiry as a slot (`assertions::SUNSET`), so both
+  sunset artifacts are unchanged.
+- Accounts written by a slot-based build fail closed: a slot read as Unix time
+  is decades past (devnet's slot on 2026-10-04, 507,081,509, is 1986). So
+  every v2 session on devnet expires at the upgrade — `Execute` refuses it
+  with 3009, and anyone may close it — and an action `expires_at` that was a
+  slot is expired (a limit is exhausted, a whitelist denies all). Two edges: an
+  expiring *blacklist* entry lifts when it expires, so one written with a slot
+  expiry no longer blocks its program; and a recurring limit's `last_reset`
+  that was a slot reads as long ago, so its first spend after the upgrade opens
+  a fresh window (once), while its `window`, written in slots, is read as that
+  many seconds (a longer window). Read on devnet on 2026-10-07: 58 v2
+  sessions, every `expires_at` a slot (505,575,001–508,163,396) and none live
+  even by slot; no v2 authority carried a policy, and no session action had
+  an expiry of its own or a recurring window, so neither edge has an instance
+  there. Mainnet has no v2 accounts yet.
+- Tests: `program/tests/time_expiry_tests.rs` (litesvm, 9 tests): the 30-day
+  cap and a slot refused at creation; a session live through its expiry second
+  whatever the slot; action expiry and a recurring window measured in seconds;
+  a slot-valued session, action expiry and `last_reset` as a slot-based build
+  left them; and the deferred window still in slots. Against `develop` 8 of the
+  9 fail (the deferred one passes on both). Every suite now starts its clock
+  at 2026-10-04 (`common::TEST_UNIX_TIME`), where a slot passed as a time is
+  decades past, and the session, close-expired, revoke and repro suites set
+  expiries in seconds; `close_expired_session_tests` adds a slot-valued v2
+  session (closable) and keeps v1 sessions on slots. Unit tests pin
+  `unix_now`, `is_live`, and the creation bounds.
+- The two v2 hashes in `scripts/release-hashes.txt` changed
+  (`check-release-hashes.sh` on the pinned toolchain, macOS arm64); both
+  sunset artifacts are byte-identical to the ones the 2026-10-04 rehearsal
+  ran. The two-id rehearsal has not been re-run on the v2 artifacts; the
+  deploy checklist says so.
+- Devnet runs it: `57bTNW…` was upgraded from `30ac9bef…` (slot 509,521,792)
+  to `f2779b66…` (`develop` @dfae78e) on 2026-10-11 in slot 509,609,649
+  (signature `QdXPuskx…`); the dump's first 153,752 bytes hash to the
+  `devnet` line of `scripts/release-hashes.txt`. Sessions created there with
+  `@lazorkit/wallet` 4.0.0-next.0 (`expiresInSeconds`) land and spend; wallet
+  SDKs that still send slots (`@lazorkit/wallet` 3.4.1 and earlier) are
+  refused with 3008.
+
+**SDKs** — breaking for both. `@lazorkit/sdk-legacy` is a stable line
+(1.4.0), so this is a new major (2.0.0); `@lazorkit/sdk` is a pre-release line
+(1.0.0-rc.6), so the next rc: `@lazorkit/sdk-legacy` 2.0.0 and `@lazorkit/sdk`
+1.0.0-rc.7.
+
+- `createSession` / `prepareCreateSession`: `expiresAt` is Unix time in
+  seconds. Both throw before any read or passkey prompt on an `expiresAt`
+  below 2020-01-01 (a slot passed by mistake). `serializeActions` throws on an
+  action's `expiresAt` below 2020-01-01 (0 still means none of its own) and on
+  a recurring window of 0, so a Delegate policy built for `addAuthority` is
+  checked as well as a session's. New `getClusterTime()` reads the Clock sysvar
+  (`{ slot, unixTimestamp }`), the time the program will compare against; new
+  export `MAX_SESSION_SECONDS` (30 days).
+- `Actions.solRecurringLimit` / `tokenRecurringLimit`: `window` is renamed
+  `windowSeconds` (`86_400n` is a day), so code written for slots fails to
+  compile instead of silently meaning something else. sdk-legacy's
+  `ParsedAction.window` is `windowSeconds`, and `lastReset` is a Unix time.
+- Ownership reads (`describeWalletCandidates`, the migration destination vet)
+  read the Clock sysvar instead of `getSlot` before scanning, and compare a v2
+  session's expiry with its Unix time, a deferred execution's (and a v1
+  session's) with its slot. A v2 session written before time-based expiry
+  holds a slot (a value below 2020-01-01) and counts as live until that slot
+  passes: a cluster still running a slot-based build accepts it until then,
+  so the ownership check never misses a session the running program accepts,
+  whichever ships first, the SDK or the program upgrade. `WalletFacts` gains `unixTimestamp`, and
+  `liveSessions[].expiresAtSlot` is renamed `expiresAt` (Unix seconds for a v2
+  wallet, the slot for a v1 one). sdk-legacy exports `type ClusterClock`.
+- Docs, READMEs and the e2e suites (`tests-sdk`, `tests-sdk-kit`, the devnet
+  scripts) set expiries in seconds from the cluster clock and wait on it.
+- Tests: sdk-kit `tests/session-time.test.ts` (the guards, `getClusterTime`,
+  the cap); the ownership and migration stubs serve the Clock sysvar, with
+  cases for a slot-valued v2 session (live until its slot passes) and a v1
+  session (live by slot); `tests/actions.test.ts` covers `serializeActions`'
+  guards in both SDKs. 346 sdk-kit tests pass; the stubbed `tests-sdk` units
+  (15, 16, 18 and the stubbed half of 17) pass.
+- An app on an older SDK cannot create a session on this program (its slot
+  `expiresAt` is refused, 3008), and lazor-kit's wallet packages compute
+  `expiresAt` from slots today: they need the new SDKs before devnet or
+  mainnet runs this build.
+
+### Changed — the vault invariants bind every signer but an Owner (program; needs a review before the mainnet deploy)
+
+**Program** (both v2 artifacts change: devnet `d95e5c2b…` → `30ac9bef…`,
+mainnet `67d47162…` → `96f4adc1…`, 153624 bytes each; both sunset artifacts are
+byte-identical)
+
+- After the CPI loop, Execute holds the vault to I-0 (owner and data length
+  unchanged, 3030 / 3031) and I-2 / I-3 (every writable vault token account
+  unchanged but for its balance, and a token account that became vault-owned
+  carries no delegate and no close authority, 3032) for **every signer that is
+  not an Owner**: sessions with and without actions, Admins, Delegates, and any
+  rank other than Owner, policy or not. Such a change would outlive the
+  signer — a session's expiry, `RevokeSession` and `RemoveAuthority` do not
+  undo it — so spending without a limit and changing who controls the vault
+  are separate powers. An Owner keeps both.
+  The policy rules (I-4 to I-6, 3023–3029, 3037, 3038) are unchanged and still
+  apply only to a signer with a policy.
+- ExecuteDeferred applies the same rule. It has no authority account, so
+  `Authorize` records whether an Owner signed it in `DeferredExecAccount.flags`
+  (bit 0, `DEFERRED_FLAG_OWNER`), the first of what were five padding bytes; no
+  other field moves and the account stays 176 bytes. An Admin's deferred
+  execution is guarded, an Owner's is not. A DeferredExec written before this
+  build holds zero there and is guarded, so an authorization pending across the
+  upgrade (at most 9,000 slots) can only lose power. No other execute path lets
+  a non-Owner make the vault sign: `MigrateWallet` is Owner-only, and no other
+  instruction CPIs as the vault.
+- Now refused to every non-Owner signer, policy or not (still open to an
+  Owner): any change to the vault's owner or data length (`System::Assign`,
+  `Allocate`); on a vault token account the Execute passes writable,
+  `SetAuthority` (any type), `Approve` / `ApproveChecked` and raising an
+  allowance, `Revoke`, `CloseAccount` (including unwrapping a wSOL account the
+  vault already had), `FreezeAccount` / `ThawAccount`, Token-2022 `Reallocate`
+  and `WithdrawExcessLamports`; and handing the vault a token account that still
+  has a delegate or a close authority. Still open to every signer within its
+  policy: SOL and token transfers, creating vault token accounts (vault-funded
+  ATAs included), and a temporary wSOL account created, synced and closed back
+  to the vault in one Execute. Neither SDK builds any of the refused operations
+  for a session or an Admin; an integration that needs one signs it with an
+  Owner. No new error codes: 3030–3032 keep their names and now cover every
+  non-Owner signer.
+- Heap: the copy of each vault token account (`192t` in the Execute sum,
+  `docs/Architecture.md`) is now allocated for every non-Owner signer, not only
+  a policy-bearing one, and for an Admin's ExecuteDeferred.
+- Compute, litesvm, Ed25519 Execute of one SOL transfer, before → after: an
+  Owner 22,482 → 22,498 CU; an Admin 22,482 → 23,111 and a session without
+  actions 22,426 → 23,048; with an SPL transfer and 8 writable vault token
+  accounts, an Admin 28,839 → 32,981 and an Owner 28,839 → 28,855.
+- Tests: `program/tests/non_owner_invariants_tests.rs` (litesvm), 83 tests:
+  Owner, Admin, Delegate, a session without actions and one with actions,
+  each against eleven escapes (Assign and Allocate of the vault; SetAuthority
+  of the account owner and of the close authority, Approve, Revoke,
+  CloseAccount, unwrapping an existing wSOL account, Token-2022 `Reallocate`
+  and `WithdrawExcessLamports` on a vault Token-2022 account; handing the vault
+  an account with a close authority) and four spending flows (SOL transfer, token transfer,
+  vault-funded ATA, temporary wSOL round trip); and ExecuteDeferred: the flag
+  `Authorize` writes, an Admin refused Assign, Allocate, SetAuthority and
+  Approve and allowed a transfer, an Owner allowed Assign, and an Owner's
+  authorization with the flag cleared refused. 28 of them (an Admin, a session
+  without actions, the flag) cover behaviour this build adds; all pass.
+  `policy_unlisted_assets_tests` R1 now expects a session without actions to
+  spend but not to Approve or close an account. Unit tests pin the
+  DeferredExec layout, the flag, and who is guarded for every rank byte.
+- The v2 hashes in `scripts/release-hashes.txt` changed
+  (`check-release-hashes.sh` on the pinned toolchain, macOS arm64: the two v2
+  artifacts as above, both sunset artifacts ok; the same script reproduces
+  `develop`'s recorded hashes on the same machine). The two-id rehearsal has
+  not been re-run on these artifacts; the deploy checklist says so above its
+  table, which still records the 2026-10-04 run. Devnet still runs
+  `d95e5c2b…`.
+
+**SDKs** (no API change)
+
+- `@lazorkit/sdk` and `@lazorkit/sdk-legacy`: the comment on
+  `assertSessionActions` and the error a session with no actions throws
+  without `unrestricted: true` say such a session can move everything the
+  vault holds but cannot change who controls the vault or its token accounts.
+  sdk-legacy's README
+  error table describes 3030–3032 as applying to every non-Owner signer.
+
+### Changed — Kora usage limits are off until the SDKs send a `user_id`
+
+**Relayer config** (`deploy/kora/`; no program or SDK change)
+
+- `[kora.usage_limit] enabled` is `false` in both `kora.devnet.toml` and
+  `kora.mainnet.toml`; it was the only value changed. On Kora v2.2.0-beta.8,
+  usage limits with free pricing refuse every signing request that carries no
+  `user_id`, and neither `@lazorkit/wallet` nor
+  `@lazorkit/wallet-mobile-adapter` sends one, so as written the relayer
+  would have refused every SDK transaction. With the devnet file as it now
+  stands, a local beta.8 sponsored the full guided flow on devnet (10/10).
+- The rules stay in place, so turning the limits back on is one line once the
+  SDK sends a `user_id` and Redis is attached. The comments, `deploy/kora/README.md`
+  and `docs/mainnet-deploy-checklist.md` now list what bounds the sponsor
+  without them, and note that `rate_limit` is per connection and that
+  reCAPTCHA, like the usage limits, needs a client change first.
+- `scripts/kora-check.cjs` reads beta.8's usage-limit shape and says that
+  `getConfig` on beta.8 does not report it.
+
 ### Changed — the SDKs are published from CI, with provenance
 
 **SDKs** (release process; no code change)
@@ -96,8 +497,8 @@ byte-identical)
   can pass a payload that runs out of memory, on this build and on
   `efea949f…`: it should compute the exact sum (`docs/Architecture.md`,
   Transaction v1).
-- Devnet's v2 runs the D13 build `efea949f…` (upgraded 2026-10-03) and needs
-  an upgrade to get the fix; this one is not breaking. The v2 hashes in
+- Devnet's v2 runs this build, `d95e5c2b…`, since 2026-10-04 (slot 507081509;
+  a non-breaking upgrade from the D13 build `efea949f…`). The v2 hashes in
   `scripts/release-hashes.txt` and in the deploy checklist's tables changed
   (`check-release-hashes.sh`: ok for all four). The two-id rehearsal passed
   18/18 on these artifacts on 2026-10-04, at the mainnet and the devnet ids,

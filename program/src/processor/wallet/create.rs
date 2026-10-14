@@ -11,7 +11,14 @@ use pinocchio::{
 
 use crate::{
     error::AuthError,
-    state::{authority::AuthorityAccountHeader, wallet::WalletAccount, AccountDiscriminator},
+    state::{
+        authority::AuthorityAccountHeader,
+        layout_version,
+        policy::authority_key_end,
+        rent_payer::{check_new_payer, write_payer, RENT_PAYER_LEN},
+        wallet::WalletAccount,
+        AccountDiscriminator,
+    },
     utils::is_all_zero,
 };
 
@@ -155,7 +162,7 @@ pub fn process(
     }
     check_zero_data(wallet_pda, ProgramError::AccountAlreadyInitialized)?;
 
-    let (vault_key, _vault_bump) =
+    let (vault_key, vault_bump) =
         find_program_address(&[crate::seeds::VAULT, wallet_key.as_ref()], program_id);
     if !sol_assert_bytes_eq(vault_pda.key().as_ref(), vault_key.as_ref(), 32) {
         return Err(ProgramError::InvalidSeeds);
@@ -204,8 +211,11 @@ pub fn process(
     let wallet_account = WalletAccount {
         discriminator: AccountDiscriminator::Wallet as u8,
         bump: wallet_bump,
-        version: crate::state::CURRENT_ACCOUNT_VERSION,
-        _padding: [0; 1],
+        version: layout_version::WALLET,
+        // Found by the search above, so Execute can check the vault's address
+        // with one hash (`utils::is_program_address`). 0 would read as "not
+        // recorded" and be searched for, which is still right.
+        vault_bump,
         // The authority created just below is this wallet's first Owner.
         owner_count: 1,
     };
@@ -217,18 +227,17 @@ pub fn process(
     }
 
     // --- 2. Initialize Authority Account ---
-    // Fixed sizes per auth type:
-    //   Ed25519   = header(48) + pubkey(32) = 80 bytes
-    //   Secp256r1 = header(48) + cred_hash(32) + pubkey(33) + rpIdHash(32) = 145 bytes
+    // Sizes per auth type, layout revision 2 (`state::rent_payer`):
+    //   Ed25519   = header(48) + pubkey(32) + rent payer(32) = 112 bytes
+    //   Secp256r1 = header(48) + cred_hash(32) + pubkey(33) + rpIdHash(32)
+    //               + rent payer(32) = 177 bytes
     //
     // For Secp256r1 we hash rpId once at creation and store the digest, so
     // every subsequent Execute saves one sol_sha256 syscall.
     let header_size = std::mem::size_of::<AuthorityAccountHeader>();
-    let auth_space = match args.authority_type {
-        0 => header_size + 32,           // Ed25519
-        1 => header_size + 32 + 33 + 32, // Secp256r1 fixed
-        _ => return Err(AuthError::InvalidAuthenticationKind.into()),
-    };
+    let key_end =
+        authority_key_end(args.authority_type).ok_or(AuthError::InvalidAuthenticationKind)?;
+    let auth_space = key_end + RENT_PAYER_LEN;
     let auth_rent = rent.minimum_balance(auth_space);
 
     // Use secure transfer-allocate-assign pattern to prevent DoS (Issue #4)
@@ -239,6 +248,10 @@ pub fn process(
         Seed::from(id_seed),
         Seed::from(&auth_bump_arr),
     ];
+
+    // The Owner records `payer` as its rent payer: an ordinary account only
+    // (state::rent_payer::check_new_payer).
+    check_new_payer(payer)?;
 
     crate::utils::initialize_pda_account(
         payer,
@@ -257,7 +270,7 @@ pub fn process(
         authority_type: args.authority_type,
         role: 0,
         bump: auth_bump,
-        version: crate::state::CURRENT_ACCOUNT_VERSION,
+        version: layout_version::AUTHORITY,
         _padding1: [0; 3],
         counter: 0,
         policy_len: 0,
@@ -310,6 +323,10 @@ pub fn process(
         // missed arm into a BPF panic — which costs code size to report less.
         _ => return Err(AuthError::InvalidAuthenticationKind.into()),
     }
+
+    // Who paid the authority's rent: the only account RemoveAuthority and
+    // TransferOwnership will return it to.
+    write_payer(auth_account_data, key_end, payer.key())?;
 
     Ok(())
 }

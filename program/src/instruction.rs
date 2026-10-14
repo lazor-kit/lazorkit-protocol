@@ -80,7 +80,7 @@ pub enum ProgramIx {
         4,
         writable,
         name = "refund_destination",
-        desc = "Account to receive rent refund"
+        desc = "Receives the rent: the target's recorded rent payer (any account for an authority written before layout revision 2)"
     )]
     #[account(
         5,
@@ -115,7 +115,7 @@ pub enum ProgramIx {
         4,
         writable,
         name = "refund_destination",
-        desc = "Account to receive rent refund from closed current owner"
+        desc = "Receives the closed current owner's rent: its recorded rent payer (any account for an authority written before layout revision 2)"
     )]
     #[account(5, name = "system_program", desc = "System Program")]
     #[account(6, name = "rent_sysvar", desc = "Rent Sysvar")]
@@ -181,6 +181,8 @@ pub enum ProgramIx {
     )]
     CreateSession {
         session_key: [u8; 32],
+        /// Unix time in seconds after which the session is refused; at most
+        /// 30 days ahead of the cluster clock.
         expires_at: i64,
     },
 
@@ -267,7 +269,8 @@ pub enum ProgramIx {
 
     /// Revoke a session key early (before expiry)
     ///
-    /// Only Owner or Admin can revoke. Closes the session account and refunds rent.
+    /// Only Owner or Admin can revoke. Closes the session account and refunds
+    /// its rent to the account that paid it.
     #[account(0, signer, writable, name = "payer", desc = "Transaction payer")]
     #[account(1, name = "wallet", desc = "Wallet PDA")]
     #[account(
@@ -281,7 +284,7 @@ pub enum ProgramIx {
         4,
         writable,
         name = "refund_destination",
-        desc = "Account to receive rent refund"
+        desc = "Receives the rent: the session's recorded rent payer (any account for a session written before layout revision 2)"
     )]
     #[account(
         5,
@@ -426,8 +429,10 @@ pub enum ProgramIx {
         desc = "Ed25519 owner signer (must sign for Ed25519 auth; placeholder for passkeys)"
     )]
     MigrateWallet { num_tokens: u8 },
-    /// Close a session whose `expires_at` has passed. Permissionless: the
-    /// caller keeps the rent. Accepts a v1 session as well as a v2 one.
+    /// Close a session whose `expires_at` has passed. Permissionless; the rent
+    /// goes to the session's recorded rent payer (to the caller's choice for a
+    /// session that records none: v1, or v2 before layout revision 2).
+    /// Accepts a v1 session as well as a v2 one.
     CloseExpiredSession,
 }
 

@@ -184,11 +184,10 @@ fn h2_a_control_delegate_is_blocked_from_privileged_instructions() {
             ],
             &context.program_id,
         );
-        let clock: solana_sdk::clock::Clock = context.svm.get_sysvar();
 
         let mut data = vec![5u8];
         data.extend_from_slice(session.pubkey().as_ref());
-        data.extend_from_slice(&(clock.slot + 100_000).to_le_bytes());
+        data.extend_from_slice(&(unix_now(&context.svm) + 100_000).to_le_bytes());
         data.extend_from_slice(&0u16.to_le_bytes());
 
         let ix = Instruction {
@@ -366,8 +365,8 @@ fn h2_c_a_delegate_is_bounded_by_its_policy() {
     assert!(policy_len > 0, "policy_len recorded in the header");
     assert_eq!(
         stored.len(),
-        80 + policy_len,
-        "an Ed25519 authority is 80 bytes plus its policy"
+        80 + 32 + policy_len,
+        "an Ed25519 authority is 80 bytes, its rent payer, then its policy"
     );
 
     let recipient = Pubkey::new_unique();
@@ -508,8 +507,7 @@ fn create_session_as(
 ) -> Result<Pubkey, litesvm::types::FailedTransactionMetadata> {
     let session = Keypair::new();
     let session_pda = session_pda_for(context.program_id, wallet, &session);
-    let clock: solana_sdk::clock::Clock = context.svm.get_sysvar();
-    let expires_at = clock.slot + 100_000;
+    let expires_at = unix_now(&context.svm) + 100_000;
 
     let mut data = vec![5u8]; // CreateSession
     data.extend_from_slice(session.pubkey().as_ref());

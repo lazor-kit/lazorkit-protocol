@@ -47,7 +47,12 @@ import {
   createAssociatedTokenAccountIdempotentIx,
 } from './spl';
 import { type ChallengeReadOptions, readAuthorityCounter } from './secp256r1';
-import { ChallengeReadGroup, readChallengeInputs } from './challengeReads';
+import {
+  ChallengeReadGroup,
+  atOrAfterContextSlot,
+  challengeReadConfig,
+  readChallengeInputs,
+} from './challengeReads';
 import {
   packCompactInstructions,
   computeAccountsHash,
@@ -66,6 +71,7 @@ import {
   createExecuteDeferredIx,
   createReclaimDeferredIx,
   createRevokeSessionIx,
+  createCloseExpiredSessionIx,
   createInitializeProtocolIx,
   createUpdateProtocolIx,
   createRegisterPayerIx,
@@ -88,6 +94,8 @@ import {
 import {
   prepareSecp256r1,
   finalizeSecp256r1,
+  rebindSecp256r1,
+  type ChallengeBinding,
   buildDataPayloadForAdd,
   buildDataPayloadForTransfer,
   buildDataPayloadForSession,
@@ -95,8 +103,11 @@ import {
   type PreparedSecp256r1,
 } from './signing';
 import { concatBytes } from './bytes';
+import { authorityPolicyOffset, recordedRentPayer } from './accounts';
+import { RefundDestinationMismatchError } from './errors';
 import { buildCompactLayout } from './compact';
 import { serializeActions, type SessionAction } from './actions';
+import { MIN_UNIX_SECONDS } from './time';
 import {
   deferredExpiry,
   describePasskeyWallets,
@@ -104,14 +115,17 @@ import {
   isPlainSystemAccount,
   pickOwnWallet,
   readAccounts,
+  readClusterClock,
   readSpendingState,
   scanPasskeyWalletCandidates,
   sessionExpiry,
+  sessionLive,
   tokenAccountProblem,
   vaultTokenGrants,
   verifyOwnershipProof,
   watchedMints,
   watchedTokenAccounts,
+  type ClusterClock,
   type OwnershipProof,
   type PasskeyWalletCandidate,
   type WalletFacts,
@@ -125,6 +139,19 @@ import type {
   DeferredPayload,
 } from './types';
 import type { AccountInfo, AccountMeta } from '@solana/web3.js';
+import {
+  APPROVAL_PROGRAM_ADDRESSES,
+  MAX_CREDENTIAL_ID_BYTES,
+  validateApprovalRequest,
+  type ApprovalCluster,
+  type CreateSessionRequest,
+  type RemoveAuthorityRequest,
+  type RevokeSessionRequest,
+} from '../approval';
+import { PortalReplyMismatchError, TransactionTooLargeError } from '../approval/errors';
+import { MAX_TRANSACTION_BYTES } from '../approval/constants';
+import { createSessionTransactionBytes } from '../approval/size';
+import { base64urlEncode, utf8Decode } from '../approval/bytes';
 
 // ─── Prepared operation types (for secp256r1 prepare/finalize flow) ──
 
@@ -174,6 +201,8 @@ export interface PreparedAddAuthority extends PreparedBase {
 }
 
 export interface PreparedRemoveAuthority extends PreparedBase {
+  /** The typed approval request for a portal; present when `secp256r1.credentialId` was given. */
+  request?: RemoveAuthorityRequest;
   /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
@@ -206,6 +235,8 @@ export interface PreparedTransferOwnership extends PreparedBase {
 
 export interface PreparedCreateSession extends PreparedBase {
   sessionPda: PublicKey;
+  /** The typed approval request for a portal; present when `secp256r1.credentialId` was given. */
+  request?: CreateSessionRequest;
   /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
@@ -221,6 +252,8 @@ export interface PreparedCreateSession extends PreparedBase {
 }
 
 export interface PreparedRevokeSession extends PreparedBase {
+  /** The typed approval request for a portal; present when `secp256r1.credentialId` was given. */
+  request?: RevokeSessionRequest;
   /** @internal — opaque signing state threaded to finalize(). Do not touch. */
   _internal: {
     signing: PreparedSecp256r1;
@@ -295,6 +328,91 @@ function assertNonZeroBytes(value: Uint8Array, name: string): void {
   }
 }
 
+// ─── Typed approval requests ──────────────────────────────────────────
+
+/** The cluster a typed request names for this program, if it is a known v2 deployment. */
+function approvalClusterOf(programId: PublicKey): ApprovalCluster | undefined {
+  const id = programId.toBase58();
+  for (const cluster of Object.keys(APPROVAL_PROGRAM_ADDRESSES) as ApprovalCluster[]) {
+    if (APPROVAL_PROGRAM_ADDRESSES[cluster] === id) return cluster;
+  }
+  return undefined;
+}
+
+/** Throws unless `credentialId` is 1 to 1023 bytes whose SHA-256 is `credentialIdHash`. */
+function assertCredentialId(credentialId: Uint8Array, credentialIdHash: Uint8Array): void {
+  if (credentialId.length < 1 || credentialId.length > MAX_CREDENTIAL_ID_BYTES) {
+    throw new Error(`credentialId must be 1 to ${MAX_CREDENTIAL_ID_BYTES} bytes, got ${credentialId.length}`);
+  }
+  const hash = sha256(credentialId);
+  if (!hash.every((b, i) => b === credentialIdHash[i])) {
+    throw new Error('credentialId does not hash to credentialIdHash');
+  }
+}
+
+/**
+ * The typed approval request for a prepared passkey operation, or undefined
+ * when the caller gave no credential id or the program is not a known v2
+ * deployment (a portal checks `programId` against its own configuration).
+ */
+function typedRequest<R extends CreateSessionRequest | RevokeSessionRequest | RemoveAuthorityRequest>(
+  kind: R['kind'],
+  args: R['args'],
+  ctx: {
+    programId: PublicKey;
+    payer: PublicKey;
+    walletPda: PublicKey;
+    authorityPda: PublicKey;
+    p: Secp256r1Params;
+    slot: bigint;
+    counter: number;
+  },
+): R | undefined {
+  if (!ctx.p.credentialId) return undefined;
+  const cluster = approvalClusterOf(ctx.programId);
+  if (!cluster) return undefined;
+  const request = {
+    v: 1,
+    kind,
+    cluster,
+    programId: ctx.programId.toBase58(),
+    wallet: ctx.walletPda.toBase58(),
+    authority: ctx.authorityPda.toBase58(),
+    credentialId: base64urlEncode(ctx.p.credentialId),
+    payer: ctx.payer.toBase58(),
+    counter: ctx.counter,
+    preparedSlot: ctx.slot.toString(),
+    ...(ctx.p.minContextSlot !== undefined ? { minContextSlot: ctx.p.minContextSlot } : {}),
+    args,
+  };
+  return validateApprovalRequest(request) as R;
+}
+
+/**
+ * The signing to finalize with: `signing` itself, or with a binding, the same
+ * signing at that slot and counter, once the authenticator's clientDataJSON
+ * is checked to carry its challenge.
+ */
+function boundSigning(
+  signing: PreparedSecp256r1,
+  response: WebAuthnResponse,
+  binding: ChallengeBinding | undefined,
+): PreparedSecp256r1 {
+  if (!binding) return signing;
+  const rebound = rebindSecp256r1(signing, binding);
+  const text = utf8Decode(response.clientDataJson);
+  let challenge: unknown;
+  try {
+    challenge = text === undefined ? undefined : (JSON.parse(text) as { challenge?: unknown }).challenge;
+  } catch {
+    challenge = undefined;
+  }
+  if (challenge !== base64urlEncode(rebound.challenge)) {
+    throw new PortalReplyMismatchError('clientDataJSON does not carry the challenge at this slot and counter');
+  }
+  return rebound;
+}
+
 /** Resolves a CreateWalletOwner to the low-level fields needed by IX builders */
 function resolveOwnerFields(owner: CreateWalletOwner): {
   authType: number;
@@ -366,14 +484,15 @@ function assertAddAuthorityRole(
   }
 }
 
-/// A session with no actions is not "a session with no limits" — it is a key
-/// with *more* power over the vault than a bounded Delegate. The action buffer
-/// is what switches on the vault invariants the program checks after the CPI
-/// (owner and data length; every vault token account unchanged but for its
-/// balance; no SOL and no mint the actions do not name leaving the vault), so
-/// an empty buffer disables all of them: such a key can reassign the vault,
-/// seize its token accounts, or move any asset it holds. That is a deliberate
-/// capability, never a default, so it has to be asked for by name.
+/// A session with no actions is not "a session with no limits" in name only —
+/// it has no spending limit at all. The action buffer is what switches on the
+/// policy rules (no SOL and no mint the actions do not name leaving the
+/// vault, and the limits on those they do), so an empty buffer lets the key
+/// move any asset the vault holds until it expires: more than a bounded
+/// Delegate can. It still cannot change who controls the vault or its token
+/// accounts — the program holds every signer but an Owner to that — but
+/// spending without a limit is a deliberate capability, never a default, so
+/// it has to be asked for by name.
 function assertSessionActions(
   actions: SessionAction[] | undefined,
   unrestricted = false,
@@ -381,9 +500,26 @@ function assertSessionActions(
   if ((!actions || actions.length === 0) && !unrestricted) {
     throw new Error(
       'createSession with no actions grants an UNRESTRICTED session key — it can ' +
-        'move the whole vault and even reassign it, which is more power than a ' +
-        'bounded Delegate has. Pass actions: [Actions.solLimit(...), ...] to bound ' +
-        'it, or unrestricted: true to say you meant it.',
+        'move everything the vault holds, which is more than a bounded Delegate ' +
+        'can. Pass actions: [Actions.solLimit(...), ...] to bound it, or ' +
+        'unrestricted: true to say you meant it.',
+    );
+  }
+}
+
+/** The longest a session may live, as the program enforces: 30 days. */
+export const MAX_SESSION_SECONDS = 30n * 24n * 60n * 60n;
+
+/**
+ * Throws when a session's expiry is plainly not a time in seconds. Its actions'
+ * times are checked where every policy is built, in `serializeActions`.
+ */
+function assertSessionTimes(expiresAt: bigint): void {
+  if (expiresAt < MIN_UNIX_SECONDS) {
+    throw new Error(
+      `expiresAt ${expiresAt} is not a Unix time in seconds (it looks like a slot). ` +
+        'Sessions expire by the cluster clock: pass e.g. ' +
+        '(await client.getClusterTime()).unixTimestamp + 3600n.',
     );
   }
 }
@@ -587,6 +723,22 @@ export class LazorKitClient {
   }
 
   /**
+   * The cluster's clock as the program reads it: the slot, and the Unix time
+   * (seconds) that session expiries, action expiries and recurring windows are
+   * measured against. Read from the Clock sysvar, so it is the time the
+   * program will see at that slot, which can differ from this machine's clock
+   * by seconds to minutes. Use it to set `expiresAt`:
+   *
+   * ```ts
+   * const { unixTimestamp } = await client.getClusterTime();
+   * await client.createSession({ ..., expiresAt: unixTimestamp + 3600n });
+   * ```
+   */
+  async getClusterTime(): Promise<ClusterClock> {
+    return readClusterClock(this.connection);
+  }
+
+  /**
    * Fetch and cache the on-chain ProtocolConfig. Returns null if not initialized.
    * Cached after first fetch — call `invalidateProtocolCache()` to refresh.
    */
@@ -738,6 +890,7 @@ export class LazorKitClient {
     if (p.publicKeyBytes) {
       assertByteLength(p.publicKeyBytes, 33, 'publicKeyBytes');
     }
+    if (p.credentialId) assertCredentialId(p.credentialId, p.credentialIdHash);
     const authorityPda =
       p.authorityPda ?? this.findAuthority(walletPda, p.credentialIdHash)[0];
 
@@ -1033,7 +1186,9 @@ export class LazorKitClient {
    * Phase 1 of removing an authority under a passkey admin. Computes the
    * WebAuthn challenge; finalize with the authenticator response to produce
    * the transaction instructions. The target authority's PDA is closed and
-   * its rent refunded to `refundDestination` on finalize+send.
+   * its rent refunded on finalize+send: to the rent payer it records (layout
+   * revision 2), which is also the default; for an authority that records
+   * none, to `refundDestination`, by default `payer`.
    */
   async prepareRemoveAuthority(params: {
     payer: PublicKey;
@@ -1042,7 +1197,12 @@ export class LazorKitClient {
     targetAuthorityPda: PublicKey;
     refundDestination?: PublicKey;
   }): Promise<PreparedRemoveAuthority> {
-    const refundDest = params.refundDestination ?? params.payer;
+    const refundDest = await this.rentRefundDestination(
+      params.targetAuthorityPda,
+      params.payer,
+      params.refundDestination,
+      params.secp256r1,
+    );
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
@@ -1064,8 +1224,15 @@ export class LazorKitClient {
       publicKeyBytes,
     });
 
+    const request = typedRequest<RemoveAuthorityRequest>(
+      'removeAuthority',
+      { target: params.targetAuthorityPda.toBase58(), refund: refundDest.toBase58() },
+      { programId: this.programId, payer: params.payer, walletPda: params.walletPda, authorityPda, p: params.secp256r1, slot, counter },
+    );
+
     return {
       challenge: signing.challenge,
+      ...(request ? { request } : {}),
       _internal: {
         signing,
         payer: params.payer,
@@ -1078,13 +1245,19 @@ export class LazorKitClient {
     };
   }
 
+  /**
+   * Phase 2. `binding`: the slot and counter a typed portal reply says the
+   * passkey signed at (`verifyApprovalReply(...).binding`); the challenge is
+   * recomputed at them and must be the one in `response.clientDataJson`.
+   */
   finalizeRemoveAuthority(
     prepared: PreparedRemoveAuthority,
     response: WebAuthnResponse,
+    binding?: ChallengeBinding,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
     const { authPayload, precompileIx } = finalizeSecp256r1(
-      i.signing,
+      boundSigning(i.signing, response, binding),
       response,
     );
     const ix = createRemoveAuthorityIx({
@@ -1118,9 +1291,14 @@ export class LazorKitClient {
       params.walletPda,
       credentialOrPubkey,
     );
-    const refundDest = params.refundDestination ?? params.payer;
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
+      params.secp256r1,
+    );
+    const refundDest = await this.rentRefundDestination(
+      authorityPda,
+      params.payer,
+      params.refundDestination,
       params.secp256r1,
     );
 
@@ -1210,6 +1388,9 @@ export class LazorKitClient {
     walletPda: PublicKey;
     secp256r1: Secp256r1Params;
     sessionKey: PublicKey;
+    /** Unix time (seconds) after which the program refuses the session, at
+     *  most {@link MAX_SESSION_SECONDS} after the cluster clock — read it with
+     *  {@link LazorKitClient.getClusterTime}. Not a slot. */
     expiresAt: bigint;
     /** Actions bounding what this session may spend. An asset they do not
      *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
@@ -1220,16 +1401,30 @@ export class LazorKitClient {
     unrestricted?: boolean;
   }): Promise<PreparedCreateSession> {
     assertSessionActions(params.actions, params.unrestricted);
+    assertSessionTimes(params.expiresAt);
+    const actionsBuffer =
+      params.actions && params.actions.length > 0
+        ? serializeActions(params.actions)
+        : undefined;
+    // A caller passing the credential id asks for a request to show in a
+    // portal: refuse here what could not be sent once signed, so no one is
+    // asked to approve it.
+    if (params.secp256r1.credentialId) {
+      const bytes = createSessionTransactionBytes(actionsBuffer?.length ?? 0);
+      if (bytes > MAX_TRANSACTION_BYTES) {
+        throw new TransactionTooLargeError(
+          bytes,
+          MAX_TRANSACTION_BYTES,
+          `A passkey CreateSession with ${actionsBuffer?.length ?? 0} bytes of actions`,
+        );
+      }
+    }
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
     );
-    const actionsBuffer =
-      params.actions && params.actions.length > 0
-        ? serializeActions(params.actions)
-        : undefined;
 
     const dataPayload = buildDataPayloadForSession(
       sessionKeyBytes,
@@ -1249,9 +1444,20 @@ export class LazorKitClient {
       publicKeyBytes,
     });
 
+    const request = typedRequest<CreateSessionRequest>(
+      'createSession',
+      {
+        sessionKey: params.sessionKey.toBase58(),
+        expiresAt: params.expiresAt.toString(),
+        actions: base64urlEncode(actionsBuffer ?? new Uint8Array(0)),
+      },
+      { programId: this.programId, payer: params.payer, walletPda: params.walletPda, authorityPda, p: params.secp256r1, slot, counter },
+    );
+
     return {
       challenge: signing.challenge,
       sessionPda,
+      ...(request ? { request } : {}),
       _internal: {
         signing,
         payer: params.payer,
@@ -1266,13 +1472,15 @@ export class LazorKitClient {
     };
   }
 
+  /** Phase 2. `binding`: as for {@link LazorKitClient.finalizeRemoveAuthority}. */
   finalizeCreateSession(
     prepared: PreparedCreateSession,
     response: WebAuthnResponse,
+    binding?: ChallengeBinding,
   ): { instructions: TransactionInstruction[]; sessionPda: PublicKey } {
     const i = prepared._internal;
     const { authPayload, precompileIx } = finalizeSecp256r1(
-      i.signing,
+      boundSigning(i.signing, response, binding),
       response,
     );
     const ix = createCreateSessionIx({
@@ -1294,8 +1502,9 @@ export class LazorKitClient {
   /**
    * Phase 1 of revoking a session under a passkey admin. Computes the
    * WebAuthn challenge; finalize with the authenticator response. The
-   * session PDA is closed and rent refunded to `refundDestination` on
-   * finalize+send.
+   * session PDA is closed on finalize+send and its rent refunded to the rent
+   * payer it records (layout revision 2), which is also the default; for a
+   * session that records none, to `refundDestination`, by default `payer`.
    */
   async prepareRevokeSession(params: {
     payer: PublicKey;
@@ -1304,7 +1513,12 @@ export class LazorKitClient {
     sessionPda: PublicKey;
     refundDestination?: PublicKey;
   }): Promise<PreparedRevokeSession> {
-    const refundDest = params.refundDestination ?? params.payer;
+    const refundDest = await this.rentRefundDestination(
+      params.sessionPda,
+      params.payer,
+      params.refundDestination,
+      params.secp256r1,
+    );
     const { authorityPda, publicKeyBytes, slot, counter } = await this.resolveSecp256r1(
       params.walletPda,
       params.secp256r1,
@@ -1326,8 +1540,15 @@ export class LazorKitClient {
       publicKeyBytes,
     });
 
+    const request = typedRequest<RevokeSessionRequest>(
+      'revokeSession',
+      { session: params.sessionPda.toBase58(), refund: refundDest.toBase58() },
+      { programId: this.programId, payer: params.payer, walletPda: params.walletPda, authorityPda, p: params.secp256r1, slot, counter },
+    );
+
     return {
       challenge: signing.challenge,
+      ...(request ? { request } : {}),
       _internal: {
         signing,
         payer: params.payer,
@@ -1340,13 +1561,15 @@ export class LazorKitClient {
     };
   }
 
+  /** Phase 2. `binding`: as for {@link LazorKitClient.finalizeRemoveAuthority}. */
   finalizeRevokeSession(
     prepared: PreparedRevokeSession,
     response: WebAuthnResponse,
+    binding?: ChallengeBinding,
   ): { instructions: TransactionInstruction[] } {
     const i = prepared._internal;
     const { authPayload, precompileIx } = finalizeSecp256r1(
-      i.signing,
+      boundSigning(i.signing, response, binding),
       response,
     );
     const ix = createRevokeSessionIx({
@@ -1804,8 +2027,8 @@ export class LazorKitClient {
   ): Promise<{ problem: string | null; signatureCount: number; slot: number }> {
     const { authType, credentialOrPubkey: credential, secp256r1Pubkey, rpId } =
       resolveOwnerFields(owner);
-    // The slot first: one older than the scans can only count more things live.
-    const slot = BigInt(await this.connection.getSlot());
+    // The clock first: one older than the scans can only count more things live.
+    const clock = await readClusterClock(this.connection);
     const [vault] = this.findVault(wallet);
     const watched = watchedTokenAccounts(vault, mints);
     const read = await readSpendingState(
@@ -1853,12 +2076,14 @@ export class LazorKitClient {
     ) {
       return fail(`wallet ${where} lists this passkey's credential with another public key or relying party`);
     }
-    // The program refuses a session or deferred execution only once the slot
-    // is past its expiry; one too short to read counts as live.
-    if (sessions.some((x) => sessionExpiry(x.account.data) >= slot)) {
+    // The program refuses a session or deferred execution only once the clock
+    // is past its expiry; one too short to read counts as live. This is a v2
+    // wallet: its sessions expire by Unix time (a slot-valued one by its slot:
+    // see sessionLive), deferred executions by slot.
+    if (sessions.some((x) => sessionLive(2, sessionExpiry(x.account.data), clock))) {
       return fail(`wallet ${where} has a live session`);
     }
-    if (deferred.some((x) => deferredExpiry(x.account.data) >= slot)) {
+    if (deferred.some((x) => deferredExpiry(x.account.data) >= clock.slot)) {
       return fail(`wallet ${where} has a pending deferred execution`);
     }
     if (!isPlainSystemAccount(vaultInfo)) {
@@ -1984,12 +2209,12 @@ export class LazorKitClient {
       const data = account.data;
       const authorityType = data[1];
       const policyLen = data.readUInt16LE(12);
-      // Key material length: Ed25519 pubkey (32) or credential hash + pubkey +
-      // rpIdHash (97). The policy follows it.
-      const fixedLen = authorityType === AUTH_TYPE_SECP256R1 ? 145 : 80;
+      // The policy follows the key material (Ed25519 pubkey, or credential
+      // hash + pubkey + rpIdHash) and, from layout revision 2, the rent payer.
+      const policyAt = authorityPolicyOffset(authorityType, data[4]);
       const policy =
-        policyLen > 0 && data.length >= fixedLen + policyLen
-          ? new Uint8Array(data.subarray(fixedLen, fixedLen + policyLen))
+        policyLen > 0 && policyAt !== null && data.length >= policyAt + policyLen
+          ? new Uint8Array(data.subarray(policyAt, policyAt + policyLen))
           : undefined;
       return {
         authorityPda,
@@ -2212,10 +2437,14 @@ export class LazorKitClient {
     targetAuthorityPda: PublicKey;
     refundDestination?: PublicKey;
   }): Promise<{ instructions: TransactionInstruction[] }> {
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.adminSigner;
 
     if (s.type === 'ed25519') {
+      const refundDest = await this.rentRefundDestination(
+        params.targetAuthorityPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createRemoveAuthorityIx({
         payer: params.payer,
         walletPda: params.walletPda,
@@ -2260,7 +2489,12 @@ export class LazorKitClient {
     walletPda: PublicKey;
     ownerSigner: AdminSigner;
     newOwner: CreateWalletOwner;
-    /** Where the current owner account's rent goes. Defaults to payer if omitted. */
+    /**
+     * Where the current owner account's rent goes. Leave it out: the SDK uses
+     * the rent payer the account records (layout revision 2), the only
+     * destination the program accepts, or `payer` for an account that records
+     * none. A different account throws {@link RefundDestinationMismatchError}.
+     */
     refundDestination?: PublicKey;
   }): Promise<{
     instructions: TransactionInstruction[];
@@ -2276,14 +2510,19 @@ export class LazorKitClient {
       params.walletPda,
       credentialOrPubkey,
     );
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.ownerSigner;
 
     if (s.type === 'ed25519') {
+      const currentOwnerAuthorityPda = this.resolveEd25519AuthorityPda(s, params.walletPda);
+      const refundDest = await this.rentRefundDestination(
+        currentOwnerAuthorityPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createTransferOwnershipIx({
         payer: params.payer,
         walletPda: params.walletPda,
-        currentOwnerAuthorityPda: this.resolveEd25519AuthorityPda(s, params.walletPda),
+        currentOwnerAuthorityPda,
         newOwnerAuthorityPda,
         refundDestination: refundDest,
         newType,
@@ -2320,7 +2559,7 @@ export class LazorKitClient {
    *   walletPda,
    *   adminSigner: ed25519(ownerKp.publicKey),
    *   sessionKey: sessionKp.publicKey,
-   *   expiresAt: currentSlot + 9000n,
+   *   expiresAt: (await client.getClusterTime()).unixTimestamp + 3600n, // an hour
    * });
    * ```
    */
@@ -2329,6 +2568,9 @@ export class LazorKitClient {
     walletPda: PublicKey;
     adminSigner: AdminSigner;
     sessionKey: PublicKey;
+    /** Unix time (seconds) after which the program refuses the session, at
+     *  most {@link MAX_SESSION_SECONDS} after the cluster clock — read it with
+     *  {@link LazorKitClient.getClusterTime}. Not a slot. */
     expiresAt: bigint;
     /** Actions bounding what this session may spend. An asset they do not
      *  name cannot leave the vault: with no `Sol*` action no SOL can (rent the
@@ -2342,6 +2584,7 @@ export class LazorKitClient {
     sessionPda: PublicKey;
   }> {
     assertSessionActions(params.actions, params.unrestricted);
+    assertSessionTimes(params.expiresAt);
     const sessionKeyBytes = params.sessionKey.toBytes();
     const [sessionPda] = this.findSession(params.walletPda, sessionKeyBytes);
     const s = params.adminSigner;
@@ -2656,11 +2899,77 @@ export class LazorKitClient {
     return { instructions: [ix] };
   }
 
+  // ─── Rent refunds ───────────────────────────────────────────────
+
+  /**
+   * Where closing `account` (an authority or a session) must send its rent.
+   *
+   * From layout revision 2 both record the account that paid their rent, and
+   * every instruction that closes one refunds only to it (error 3039 for any
+   * other destination), whoever signs or pays for the close. This reads the
+   * account and returns that payer. For an account that records none (written
+   * before revision 2, or not found) it returns `requested ?? fallback`, as
+   * before. Read at `opts`' commitment and floor (see
+   * {@link ChallengeReadOptions}): an account created by a transaction a
+   * lagging node has not seen reads as not found.
+   *
+   * @throws {RefundDestinationMismatchError} `requested` is not the recorded
+   *   payer: the program would refuse the transaction.
+   */
+  async rentRefundDestination(
+    account: PublicKey,
+    fallback: PublicKey,
+    requested?: PublicKey,
+    /** The read's commitment and floor; a passkey flow passes its own. */
+    opts?: ChallengeReadOptions,
+  ): Promise<PublicKey> {
+    const config = challengeReadConfig(this.connection, opts);
+    const info = await atOrAfterContextSlot(
+      () => this.connection.getAccountInfo(account, config),
+      config,
+      `the rent payer of ${account.toBase58()}`,
+    );
+    const rentPayer = info ? recordedRentPayer(info.data) : null;
+    if (!rentPayer) return requested ?? fallback;
+    if (requested && !requested.equals(rentPayer)) {
+      throw new RefundDestinationMismatchError({ account, rentPayer, requested });
+    }
+    return rentPayer;
+  }
+
+  // ─── CloseExpiredSession ───────────────────────────────────────
+
+  /**
+   * Close a session past its expiry. Anyone may: `caller` signs and pays the
+   * fee. The rent goes to the session's recorded rent payer (layout revision
+   * 2); for a session that records none, to `refundDestination`, by default
+   * `caller`.
+   */
+  async closeExpiredSession(params: {
+    caller: PublicKey;
+    sessionPda: PublicKey;
+    refundDestination?: PublicKey;
+  }): Promise<{ instructions: TransactionInstruction[] }> {
+    const refundDestination = await this.rentRefundDestination(
+      params.sessionPda,
+      params.caller,
+      params.refundDestination,
+    );
+    const ix = createCloseExpiredSessionIx({
+      caller: params.caller,
+      sessionPda: params.sessionPda,
+      refundDestination,
+      programId: this.programId,
+    });
+    return { instructions: [ix] };
+  }
+
   // ─── RevokeSession ─────────────────────────────────────────────
 
   /**
    * Revoke a session key early (before expiry).
-   * Only Owner or Admin can revoke. Refunds session rent.
+   * Only Owner or Admin can revoke. The session's rent goes back to the
+   * account that paid it ({@link LazorKitClient.rentRefundDestination}).
    *
    * @example Revoke with Ed25519 admin
    * ```typescript
@@ -2679,10 +2988,14 @@ export class LazorKitClient {
     sessionPda: PublicKey;
     refundDestination?: PublicKey;
   }): Promise<{ instructions: TransactionInstruction[] }> {
-    const refundDest = params.refundDestination ?? params.payer;
     const s = params.adminSigner;
 
     if (s.type === 'ed25519') {
+      const refundDest = await this.rentRefundDestination(
+        params.sessionPda,
+        params.payer,
+        params.refundDestination,
+      );
       const ix = createRevokeSessionIx({
         payer: params.payer,
         walletPda: params.walletPda,

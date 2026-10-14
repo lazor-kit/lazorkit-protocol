@@ -13,10 +13,10 @@ use crate::{
     error::ProtocolError,
     processor::{authority, execute, session, wallet},
     state::{
-        integrator_record::FeeRecord, protocol_config::ProtocolConfig,
-        treasury_shard::TreasuryShard, AccountDiscriminator, CURRENT_ACCOUNT_VERSION,
+        integrator_record::FeeRecord, layout_version, protocol_config::ProtocolConfig,
+        treasury_shard::TreasuryShard, AccountDiscriminator,
     },
-    utils::{initialize_pda_account, SYSTEM_PROGRAM_ID},
+    utils::{initialize_pda_account, is_program_address, SYSTEM_PROGRAM_ID},
 };
 
 entrypoint!(process_instruction);
@@ -93,8 +93,9 @@ pub fn process_instruction(
 ///   authorization. Gated on that payer's signature, as it always was.
 /// - `17` MigrateWallet — the owner moves everything to a wallet they approve,
 ///   which in practice is their v2 vault at the v2 program id.
-/// - `18` CloseExpiredSession — anyone closes a session past its expiry and
-///   keeps the rent. The session authorises nothing by then.
+/// - `18` CloseExpiredSession — anyone closes a session past its expiry; a v1
+///   session records no rent payer, so the caller names the destination. The
+///   session authorises nothing by then.
 ///
 /// Every one of them only ever takes value *out* of a v1 account, to a
 /// destination its rightful owner signed for or to nobody's loss.
@@ -161,18 +162,26 @@ fn try_collect_fee<'a>(
         return Err(ProtocolError::FeeAccountsRequired.into());
     }
 
-    // Pin the ProtocolConfig address before reading a single byte of it.
+    // Pin the ProtocolConfig address.
     //
     // This is load-bearing rather than defence in depth. Everything below treats
     // an unconfigured protocol as "charge nothing and continue", so a caller who
     // could substitute a different account for the config would be able to skip
-    // the fee at will. The shard and fee-record addresses were already pinned;
-    // the config was the one that was not.
-    let (expected_config_key, _) =
-        find_program_address(&[crate::seeds::PROTOCOL_CONFIG], program_id);
-    if maybe_config.key() != &expected_config_key {
-        return Err(ProtocolError::ProtocolNotInitialized.into());
-    }
+    // the fee at will. The shard and fee-record addresses are pinned too.
+    //
+    // An initialised config is pinned with the bump it stores, one hash
+    // (`utils::is_program_address`), rather than a bump search on every Execute:
+    // `initialize_protocol` wrote that bump from its own search. Only the
+    // bootstrap window (a system-owned config) and a config this binary cannot
+    // read search for the address.
+    let pin_by_search = || -> Result<(), ProgramError> {
+        let (expected_config_key, _) =
+            find_program_address(&[crate::seeds::PROTOCOL_CONFIG], program_id);
+        if maybe_config.key() != &expected_config_key {
+            return Err(ProtocolError::ProtocolNotInitialized.into());
+        }
+        Ok(())
+    };
 
     // Read the config if there is one. A protocol that has not been initialised
     // yet leaves this PDA system-owned; that is the bootstrap window, not an
@@ -188,11 +197,23 @@ fn try_collect_fee<'a>(
         match ProtocolConfig::check(&config_data) {
             Ok(()) => {
                 let config = unsafe { &*(config_data.as_ptr() as *const ProtocolConfig) };
+                if !is_program_address(
+                    &[crate::seeds::PROTOCOL_CONFIG],
+                    config.bump,
+                    program_id,
+                    maybe_config.key(),
+                ) {
+                    return Err(ProtocolError::ProtocolNotInitialized.into());
+                }
                 Some((config.creation_fee, config.execution_fee, config.enabled))
             },
-            Err(_) => None,
+            Err(_) => {
+                pin_by_search()?;
+                None
+            },
         }
     } else {
+        pin_by_search()?;
         None
     };
 
@@ -227,17 +248,19 @@ fn try_collect_fee<'a>(
     if maybe_shard.owner() != program_id {
         return Err(ProtocolError::InvalidTreasuryShard.into());
     }
-    let shard_id = {
+    {
         let shard_data = maybe_shard.try_borrow_data()?;
         TreasuryShard::check(&shard_data).map_err(|_| ProtocolError::InvalidTreasuryShard)?;
         let shard = unsafe { &*(shard_data.as_ptr() as *const TreasuryShard) };
-        shard.shard_id
-    };
-    let shard_id_arr = [shard_id];
-    let (expected_shard_key, _) =
-        find_program_address(&[crate::seeds::TREASURY_SHARD, &shard_id_arr], program_id);
-    if maybe_shard.key() != &expected_shard_key {
-        return Err(ProtocolError::InvalidTreasuryShard.into());
+        // Pinned with the bump `initialize_treasury_shard` stored.
+        if !is_program_address(
+            &[crate::seeds::TREASURY_SHARD, &[shard.shard_id]],
+            shard.bump,
+            program_id,
+            maybe_shard.key(),
+        ) {
+            return Err(ProtocolError::InvalidTreasuryShard.into());
+        }
     }
 
     // Payer must sign — every processor that accepts disc 0/4/7 already
@@ -250,16 +273,20 @@ fn try_collect_fee<'a>(
 
     // FeeRecord — auto-create if system-owned, accept if program-owned + valid,
     // reject otherwise. Always verify the PDA address matches the canonical
-    // seed for this payer BEFORE any state mutation.
+    // seed for this payer BEFORE any state mutation: by a bump search when the
+    // record is about to be created, and with the bump the record stores (one
+    // hash, `utils::is_program_address`) on every payment after that. The
+    // stored bump was found for the record's own payer, so it matches this
+    // payer's address only if the record is this payer's.
     let target_payer: &[u8; 32] = payer.key();
-    let (expected_record_key, record_bump) =
-        find_program_address(&[crate::seeds::FEE_RECORD, target_payer], program_id);
-    if maybe_record.key() != &expected_record_key {
-        return Err(ProtocolError::InvalidFeeRecord.into());
-    }
-
     let record_owner = maybe_record.owner();
     if record_owner == &SYSTEM_PROGRAM_ID {
+        let (expected_record_key, record_bump) =
+            find_program_address(&[crate::seeds::FEE_RECORD, target_payer], program_id);
+        if maybe_record.key() != &expected_record_key {
+            return Err(ProtocolError::InvalidFeeRecord.into());
+        }
+
         // First-time payer: create + initialize the FeeRecord PDA inline.
         // Uses Sysvar::get() syscalls (no extra account in tx layout).
         let rent = Rent::get()?;
@@ -287,7 +314,7 @@ fn try_collect_fee<'a>(
         let record = FeeRecord {
             discriminator: AccountDiscriminator::FeeRecord as u8,
             bump: record_bump,
-            version: CURRENT_ACCOUNT_VERSION,
+            version: layout_version::FEE_RECORD,
             _padding: [0; 5],
             total_fees_paid: 0,
             tx_count: 0,
@@ -304,9 +331,18 @@ fn try_collect_fee<'a>(
         return Err(ProtocolError::InvalidFeeRecord.into());
     } else {
         // Owned by us — verify it's a valid FeeRecord, not some other
-        // account that happens to live at the canonical seed.
+        // account, and that it is this payer's.
         let rec = maybe_record.try_borrow_data()?;
         FeeRecord::check(&rec).map_err(|_| ProtocolError::InvalidFeeRecord)?;
+        let record = unsafe { &*(rec.as_ptr() as *const FeeRecord) };
+        if !is_program_address(
+            &[crate::seeds::FEE_RECORD, target_payer],
+            record.bump,
+            program_id,
+            maybe_record.key(),
+        ) {
+            return Err(ProtocolError::InvalidFeeRecord.into());
+        }
     }
 
     // Transfer fee: payer → treasury_shard.

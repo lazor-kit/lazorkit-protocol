@@ -4,6 +4,7 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
   sendAndConfirmTransaction,
+  SYSVAR_CLOCK_PUBKEY,
   Transaction,
   TransactionInstruction,
   type Signer,
@@ -325,6 +326,37 @@ export async function getSlot(ctx: TestContext): Promise<bigint> {
   const slot = await ctx.connection.getSlot('confirmed');
   // Use current slot directly; Clock::get() validates slot age (< 150 slots).
   return BigInt(slot);
+}
+
+/**
+ * The cluster's Unix time (seconds), read from the Clock sysvar as the program
+ * reads it. Session and action expiries are measured in it, not in slots.
+ */
+export async function getUnixTime(ctx: TestContext): Promise<bigint> {
+  const info = await ctx.connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY, 'confirmed');
+  if (!info) throw new Error('the Clock sysvar is missing');
+  return info.data.readBigInt64LE(32);
+}
+
+/**
+ * Block until the cluster's Unix time is strictly past `target` — how a
+ * session expires. Polled, like {@link waitForSlot}: the cluster clock, not
+ * this machine's, is what the program reads.
+ */
+export async function waitForUnixTime(
+  ctx: TestContext,
+  target: bigint,
+  timeoutMs = 60_000,
+): Promise<bigint> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const now = await getUnixTime(ctx);
+    if (now > target) return now;
+    if (Date.now() > deadline) {
+      throw new Error(`Unix time ${target} not reached within ${timeoutMs}ms (still at ${now})`);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
 }
 
 /**

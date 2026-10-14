@@ -278,11 +278,13 @@ end — see [Two-id rehearsal](#two-id-rehearsal).
 - [ ] Relayer: **a new service at a new URL**, running
       `deploy/kora/kora.mainnet.toml` (v2 id only), with its own thin-funded
       signer. Pass `scripts/kora-check.cjs <new-url> --cluster mainnet` with no
-      FAIL. **Do not edit the relayer v1 apps use today.** Its config is not in
-      any repo and Seedless sponsors through it; narrowing its allowlist to the
-      v2 id refuses every v1 transaction from that moment — the flag day phase A
-      exists to avoid. Before anything else, record its current `getConfig` and
-      which apps call it, in the deploy log.
+      FAIL, with the relayer's key in `KORA_API_KEY` (an authenticated relayer
+      refuses the script's later probes without it). **Do not edit the relayer
+      v1 apps use today.** Its config is not in any repo and Seedless sponsors
+      through it; narrowing its allowlist to the v2 id refuses every v1
+      transaction from that moment — the flag day phase A exists to avoid.
+      Before anything else, record its current `getConfig` and which apps call
+      it, in the deploy log.
 - [ ] Publish the SDKs whose `PROGRAM_ID_MAINNET` is the v2 id, then move
       `latest` to them. Pinned `^0.3` users — Seedless — are not moved by that.
       Any wrapper that switches to sdk-legacy 1.x (`@lazorkit/wallet`) ships it
@@ -334,8 +336,10 @@ still a breaking change for whoever is left on v1, so announce it.
 - [ ] Turn on the migration banner in each integrator app (`migrateV1Wallet`
       with the default pairing: executes at the v1 id, delivers to the v2 id).
 - [ ] Run the session keeper after the upgrade
-      (`scripts/rehearse/close-expired-sessions.cjs`); the rent goes to whoever
-      runs it first.
+      (`scripts/rehearse/close-expired-sessions.cjs`). A v1 session records no
+      rent payer, so its rent goes to whoever closes it first; a v2 session
+      records one and its rent goes back to it, whoever runs the keeper
+      (`PAID_BY=<relayer>` limits a run to the sessions a relayer sponsored).
 
 ## 6. Post-deploy
 
@@ -351,7 +355,34 @@ still a breaking change for whoever is left on v1, so announce it.
 The rollout this checklist describes, run end to end by
 `scripts/rehearse/two-id-rehearsal.mjs`.
 
-**Latest: 2026-10-04, on `3979196`** (develop after #42), at both pairs of
+**Latest: 2026-10-12, on the rent-refund and stored-bump branch** (develop
+`6e856fd` plus the program commits `6b6a42e` and `40852aa`), at both pairs of ids, **18/18**
+each. Same procedure as the 2026-10-04 run below — the §2 build of all four
+(`OUT=<dir> ./scripts/check-release-hashes.sh`, all four the hashes now in
+`scripts/release-hashes.txt`), `v1-live.so` dumped again from mainnet that day
+(137904 bytes, still `8ad5abf5…`), solana-test-validator 4.2.2 with SIMD-0500
+deactivated on other ports with a scratch ledger, `@lazorkit/sdk` 1.0.0-rc.8
+and `@lazorkit/sdk-legacy` 2.1.0 built from the branch — and after the run the
+v1 id's programdata began with the mainnet-v1 sunset's exact bytes
+(`353dfee3…`). The phase B rollback was not repeated: it upgrades the v1 id back
+to the unchanged `v1-live.so`.
+
+| artifact | id | size | SHA-256 |
+|---|---|---|---|
+| v1 — `solana program dump` of the live program | `LazorjRF…`, `4h3XoNRe…` | 137904 | `8ad5abf5dd8a2443fea6b26b5effa9ce11477ce85ba9564f5c43663744c3255b` |
+| sunset — `--features mainnet-v1` | `LazorjRF…` | 46872 | `353dfee3fdccef241c7c996cbf2e3faaadc32c31c82cdb15d3b630d6591d2bcf` |
+| v2 — `--features mainnet` | `LazorFroi…` | 158096 | `b242e187e4f5b4a4200edea8946fbbe996255957e6835d5e416df3539518e9c7` |
+| sunset — `--features devnet-v1` | `4h3XoNRe…` | 46872 | `2f0fae7e609250d8d61c76146707f971b44cbd66aecf19a8ebac2ff9642e54bc` |
+| v2 — `--features devnet` | `57bTNWqt…` | 158096 | `e7930c8bf6df5964e7d25774ad2807c4ab24d1d97f9e59c076f0ff0bfb8c2d7b` |
+
+The v2 artifacts grew by 4344 bytes. Mainnet v2 deploys fresh, so that only
+sizes the deploy. Devnet's `57bTNW…` programdata was already 160560 bytes, so
+its 2026-10-13 upgrade needed no extend (had it, the devnet loader refuses an
+extend under 10240 bytes:
+`solana program extend 57bTNWqtYTJbWuLWASKo6GqUTAK6oFDUR5c6hEc6V8nv 10240`).
+The sunset artifacts (46872 bytes) still fit v1's 137904-byte programdata.
+
+**Previous: 2026-10-04, on `3979196`** (develop after #42), at both pairs of
 ids, **18/18** each, then the phase B rollback at the mainnet ids. These
 artifacts carry D13 (#48), pinocchio 0.9.3 and the heap-capacity fix (#42), so
 the sunset binary that ran both migrations is the one with 0.9.3's entrypoint
@@ -376,6 +407,13 @@ the sunset binary that ran both migrations is the one with 0.9.3's entrypoint
   6.10.0. The passkey leg signs the wallet-bound challenge through sdk-legacy
   on the default pairing, so a v1 passkey wallet migrating through the sunset
   binary is covered end to end.
+
+The table records the artifacts the 2026-10-04 rehearsal ran on. **None of
+them is the current build** (see the table above for that). Then: applying the vault invariants to every signer but
+an Owner, and then time-based session expiry, moved both v2 artifacts
+(`scripts/release-hashes.txt` has the current ones; the sunset artifacts did
+not change, since the sunset binary still reads every session expiry as a
+slot). Rehearse §3 again on the current four before deploying them.
 
 | artifact | id | size | SHA-256 |
 |---|---|---|---|
@@ -427,17 +465,38 @@ ok    the v1 session is closed
 18/18 checks passed
 ```
 
-**Devnet is behind this branch.** Devnet's v2 (`57bTNW…`) runs `efea949f…`,
-the D13 build (#48), upgraded on 2026-10-03 in slot 507022596 after the SDK
-release that carries the `SpendingLimits` fix (lazor-kit #117; wallet 3.4.0,
-sdk-legacy 1.4.0). A smoke run on it passed the full lifecycle and every D13
-case (3037, 3038, 3032). It has the wallet binding and D13 but not the
-heap-capacity fix: it verifies the same signatures as the artifact above, since
-the fix changes no account, instruction or challenge layout, but it runs out of
-heap on payloads a v1 transaction carries easily and on some legacy ones (a
-passkey Execute of one inner instruction of 128 accounts, or of 70 + 70;
-`program/tests/heap_capacity_tests.rs`). Upgrading it to the devnet artifact
-above is not breaking: it only lets larger payloads fit.
+**Devnet runs the current devnet artifact.** `57bTNW…` was upgraded to
+`e7930c8b…` (`develop` @345625b: rent refunds to the recorded payer, stored
+bumps) on 2026-10-13 in slot 510645372 (signature `2wi63Ex9…`), after
+`@lazorkit/sdk-legacy` 2.1.0, `@lazorkit/sdk` 1.0.0-rc.8 and
+`@lazorkit/wallet` 4.0.0-next.1 were published; the dump's first 158096 bytes
+hash to the `devnet` line of `scripts/release-hashes.txt`, the rest of the
+programdata is zero. A portal or wallet on sdk-legacy 2.0.0 cannot decode the
+authorities and sessions it now writes (layout revision 2); portal-v2 reads
+both revisions, and portal-v2 #8 lists the new deploy slot. Before
+it, devnet ran `f2779b66…` (`develop` @dfae78e: the vault invariants for every
+non-Owner signer, and session and policy time in Unix seconds), upgraded on
+2026-10-11 in slot 509609649 (signature `QdXPuskx…`); that upgrade expired
+every existing v2 session there (their expiries are slots, which read as long
+past), and wallet SDKs that send slots (`@lazorkit/wallet` 3.4.1 and earlier)
+can no longer create sessions there (3008). Earlier devnet builds, newest first: `30ac9bef…` (the
+non-Owner invariants) from slot 509521792; `d95e5c2b…` (D13 and the
+heap-capacity fix) from 2026-10-04, slot 507081509; the D13 build
+`efea949f…` from 2026-10-03, slot 507022596. A smoke run on `d95e5c2b…` and
+`efea949f…` passed the full lifecycle and every D13 case (3037, 3038, 3032),
+and lazor-kit #108's devnet run (S2) passed against `d95e5c2b…`. On
+`f2779b66…`, the local-stack smoke through portal-v2 #4 (typed requests) with
+`@lazorkit/wallet` 4.0.0-next.0 passed 10/10 on 2026-10-11, sponsored by the
+Railway devnet Kora: the decoded session screen, a session created with
+`expiresInSeconds` and spent with, 3023 over the per-payment cap, and 3037 for
+SOL from a token-only session; the playground (hook, Wallet Standard, adapter)
+and the 14 portal probes passed too. On `e7930c8b…`, the same smoke with
+`@lazorkit/wallet` 4.0.0-next.1 and `@lazorkit/sdk-legacy` 2.1.0 through
+portal-v2 at the new deploy slot passed 10/10 on 2026-10-13, as did the
+playground and the 14 probes; new passkey authorities and sessions were
+revision 2 with the Kora fee payer recorded, a `revokeSession` refunded the
+session's rent to that payer, and a passkey SOL transfer's Execute took
+11,672 CU (14,469 on `f2779b66…`).
 
 Earlier runs, superseded by the one above, oldest first: on 2026-09-27 at the
 devnet ids (14/14, v2 `8c3952a5…`, sunset `6a816c4a…`), after an on-chain
@@ -602,11 +661,12 @@ authority may end a live session — and let **anyone** close it once it has
 expired, claiming the rent. Three things checked against the code, because they
 decide the shape:
 
-- **It is safe.** `immediate.rs:210` already refuses a session with
-  `current_slot > session.expires_at`, so an expired session authorises nothing
+- **It is safe.** `Execute` refuses a session once the clock is past
+  `session.expires_at` (`state::session::is_live`: Unix seconds for a v2
+  session, the slot for a v1 one), so an expired session authorises nothing
   and closing it removes no capability. The boundary has to match that
   comparison exactly — `>`, not `>=` — or a keeper can kill a session that is
-  still valid in its final slot.
+  still valid in its final second (v2) or slot (v1).
 - **No replay window opens.** Closing and re-creating the same session PDA does
   not reset anything an attacker can use: the session key signs the transaction
   itself, so an old signature dies with its blockhash. There is no session
@@ -630,6 +690,14 @@ between recovering the 0.290408 SOL sitting on mainnet and burning it.
 change, and cleanup pays for itself — and the instruction accepts v1 sessions as
 well as v2 ones. `CloseExpiredSession` is instruction **18**; a session that is
 still live is refused with **3036**.
+
+**Revised 2026-10-12 for v2 sessions:** the "no header change" half no
+longer holds. v2 has not shipped, so the `rent_payer` the paragraph above
+calls free to add went in (layout revision 2, after the 80-byte header), and a
+v2 session's rent now goes back to its payer whoever closes it: a sponsor's
+rent stays the sponsor's (`state::rent_payer`, error 3039). A v1 session, and
+a v2 one from before revision 2, records no payer and still goes to the
+closer, as below.
 
 This flips the 0.290408 SOL of v1 sessions from *burned by the upgrade* to
 *recoverable after it, by anyone*. So there is no rush to sweep sessions before
@@ -656,11 +724,15 @@ KEEPER=<keypair.json> node scripts/rehearse/close-expired-sessions.cjs
 Run it after the upgrade, and do not count on being first: the rent goes to
 whoever gets there, which is the point of making it permissionless.
 
-Six litesvm tests cover the instruction itself: a stranger closes an expired session and keeps the
-rent; a live one is refused; the session's **final slot still belongs to it**
-(the close uses the same `>` as `execute`, so a keeper cannot end it a slot
-early); a v1-shaped session closes; a live v1 one does not; and an Authority
-account owned by the same program is not closable as a session.
+Nine litesvm tests cover the instruction itself (`close_expired_session_tests.rs`):
+a stranger closes an expired v2 session and the rent goes to its recorded payer,
+not to the stranger (3039 if it names itself); a v2 session from before layout
+revision 2 still closes to the caller's choice; one at a revision the binary
+does not know is refused (4013); a live one is refused; the session's **final second still belongs to it**
+(the close uses the same comparison as `execute`, so a keeper cannot end it
+early); a v1-shaped session closes by its slot; a live v1 one does not; a v2
+session holding a slot, written before time-based expiry, closes; and an
+Authority account owned by the same program is not closable as a session.
 
 - [ ] Before the upgrade window: reclaim the sponsor's 68 expired DeferredExec
       accounts (0.141 SOL) and drain the sixteen treasury shards (0.0056 SOL).
@@ -746,7 +818,8 @@ protocol fee through System CPIs with the payer as source, so
 `system.allow_transfer` and `system.allow_create_account` cannot simply be shut.
 What bounds a stranger is therefore authentication, `max_allowed_lamports` set
 to what a real flow costs rather than a round number, and `usage_limit`. All
-three are currently off or loose.
+three are currently off or loose. (`usage_limit` has since been left off on
+purpose in our configs — see the 2026-10-06 note below.)
 
 ### Upgrade the relayer before relying on any of these controls
 
@@ -762,7 +835,7 @@ The gap matters because beta.8 fixes the very controls we are about to lean on:
 | upstream fix | why it matters here |
 |---|---|
 | [#602](https://github.com/solana-foundation/kora/pull/602) — apply `--api-key`/`--hmac-secret`, previously parsed and **ignored** | on beta.7 an operator who sets the key on the command line gets an unauthenticated server and the key in the process table |
-| [#463](https://github.com/solana-foundation/kora/pull/463), [#571](https://github.com/solana-foundation/kora/pull/571) — atomic, all-or-nothing usage limits | the per-caller ceiling is the main bound on a public relayer; on beta.7 concurrent requests race past it |
+| [#463](https://github.com/solana-foundation/kora/pull/463), [#571](https://github.com/solana-foundation/kora/pull/571) — atomic, all-or-nothing usage limits | on beta.7 concurrent requests race past the per-caller ceiling. Usage limits are off in our configs since 2026-10-06 (note below), so this matters again when they are turned back on |
 | [#620](https://github.com/solana-foundation/kora/pull/620) — transaction-validation and fee-payer accounting hardening | inner-CPI reconstruction so fee-payer policy gates actually run, rent counted in outflow, owner allowlists on Assign/CreateAccount |
 | [#552](https://github.com/solana-foundation/kora/pull/552) — redact the URL path and query in client-facing errors | our RPC endpoint carries its credential in the query string; on beta.7 a transport error hands it to whoever made the request, and that endpoint asks for no credentials |
 | [#542](https://github.com/solana-foundation/kora/pull/542), [#541](https://github.com/solana-foundation/kora/pull/541) — loader/deploy-authority drain guards | same attack surface as the fee-payer policy above |
@@ -772,7 +845,11 @@ beta.8 also adds an auth mechanism that actually fits a public dApp:
 **`[kora.auth].recaptcha_secret`** with `recaptcha_score_threshold` (env
 `KORA_RECAPTCHA_SECRET`, header `x-recaptcha-token`). An API key shipped in a
 browser bundle is not a secret; a per-visitor reCAPTCHA token is the thing a
-bundle reader cannot mint in bulk.
+bundle reader cannot mint in bulk. It needs the client to send that header,
+though: Kora refuses a protected method that arrives without one, and neither
+`@lazorkit/wallet` nor `@lazorkit/wallet-mobile-adapter` sends it yet. Turned
+on for `signTransaction`/`signAndSendTransaction` today, it would refuse every
+SDK transaction, so it is an SDK change first.
 
 Two things worth having are only on `main`, not yet in a tag: configurable CORS
 origins ([#658](https://github.com/solana-foundation/kora/pull/658)) and
@@ -781,30 +858,71 @@ Upstream has also been fuzzing fee-payer drains specifically (#618, #640,
 #648–#651), which is a fair signal about where the risk is.
 
 - [ ] Upgrade the relayer to `ghcr.io/solana-foundation/kora:v2.2.0-beta.8`
-      (Railway image bump) **before** enabling auth and usage limits, so the
-      controls behave as documented.
+      (Railway image bump) **before** enabling auth, so the controls behave as
+      documented. The same holds for usage limits whenever they are turned
+      back on.
 - [ ] Re-run `kora-check.cjs` afterwards: `version` should read `2.2.0-beta.8`.
 - [ ] Note the one breaking change: `usage_limit.enabled = true` with no rules
-      now **fails startup** instead of silently doing nothing.
+      now **fails startup** instead of silently doing nothing. Our files keep
+      their rules while `enabled = false`, so flipping it back does not hit
+      this.
 
 The configuration itself is written out, for both clusters, in
 [`deploy/kora/`](../deploy/kora/) — `kora.mainnet.toml`, `kora.devnet.toml` and
 a README covering the env vars and the Railway steps. Every value carries its
-reasoning inline; the four things that actually bound a stranger are
+reasoning inline; the things that actually bound a stranger are
 `require_one_of_programs` (a transaction that never touches LazorKit is refused
-outright), authentication, `max_allowed_lamports` set from measured cost, and
-the usage limits.
+outright), authentication (mainnet only — the devnet relayer runs without an
+API key, by decision on 2026-10-06; see the README), `max_allowed_lamports` set
+from measured cost, and the fee payer's own balance. Not `rate_limit`: on beta.8 it is applied per
+connection, by delaying requests over it, so it is not a cap on the server's
+total rate or on how fast the sponsor can be spent.
 
-Check any relayer against all of this from the outside, with no key and no
-transaction:
+**2026-10-06: usage limits are off in both files.** On beta.8, usage limits
+with free pricing refuse any signing request that carries no `user_id` param,
+and neither `@lazorkit/wallet` nor `@lazorkit/wallet-mobile-adapter` sends
+one — so as written, the files would have refused every SDK transaction (a
+local beta.8 running the devnet file refused a wallet creation exactly this way
+on 2026-10-05). The `user_id` they would key
+on is a string the caller chooses, so even switched on they bound integrators
+who send a stable id, not a caller who varies it. Turning them back on starts
+with an SDK change; the steps are in
+[`deploy/kora/README.md`](../deploy/kora/README.md#usage-limits-are-off-decided-2026-10-06).
+Meanwhile how much SOL the sponsor holds carries more of the weight — see the
+funding item under "Config gates for v2".
+
+Check any relayer against all of this from the outside, with no transaction.
+The first probe is always anonymous; after it, a relayer with authentication on
+needs the key — on beta.8 it refuses every method but `liveness` to a stranger,
+`getVersion` included, so a keyless run against a correctly configured relayer
+FAILs with `no config readable (401)`. Give the key through the environment, not
+`--key`, which puts it in the process table:
 
 ```bash
-node scripts/kora-check.cjs https://kora.devnet.lazorkit.com --cluster devnet
+KORA_API_KEY="$(cat "$API_KEY_FILE")" node scripts/kora-check.cjs <relayer-url> --cluster mainnet
 ```
 
-It exits non-zero on a FAIL, so it can gate a deploy. Today that endpoint
-returns three: no authentication, no Secp256r1 precompile in `allowed_programs`,
-and the fee-payer policy above on an unauthenticated host.
+The devnet relayer on Railway runs without a key, by decision (2026-10-06,
+[`deploy/kora/README.md`](../deploy/kora/README.md#the-service)), so it is
+checked anonymously with `--allow-open`, which turns exactly its two
+open-relayer FAILs (`authentication`, `fee payer policy`) into WARNs — only
+while `require_one_of_programs` names nothing but the LazorKit v2 program (not
+v1: from the outside full v1 and the sunset binary look the same) — and is
+refused with `--cluster mainnet`:
+
+```bash
+node scripts/kora-check.cjs https://kora-devnet-production.up.railway.app --cluster devnet --allow-open
+```
+
+It exits non-zero on a FAIL, so it can gate a deploy. Against
+`https://kora.devnet.lazorkit.com`, while that name still points at the old
+relayer (beta.7, no authentication, so no key is needed there), the config
+recorded above (not a fresh run) FAILs on authentication, on the v2 program
+(the old relayer allows only v1), on the Secp256r1 precompile, and on the
+fee-payer policy above on an unauthenticated host, with WARNs besides for the
+version, the v1 program and the extra programs. Its `usage limit` line is a
+WARN on any beta.8 relayer: `getConfig` there does not return the usage-limit
+table, so the script cannot tell on from off.
 
 ### The key that leaked
 
@@ -832,8 +950,10 @@ Worth being honest about what an API key can do here at all: this key ships
 inside a mobile bundle and, for the web SDK, inside a browser bundle. A
 credential handed to every user is not a secret. It raises the cost of casual
 abuse and lets you cut off one client, but the controls that actually bound the
-damage are `allowed_programs`, `max_allowed_lamports`, the rate limit, usage
-limits, and how much SOL the sponsor is allowed to hold.
+damage are `allowed_programs` and `require_one_of_programs`,
+`max_allowed_lamports`, and how much SOL the sponsor is allowed to hold. (Usage
+limits are off, see the 2026-10-06 note above; `rate_limit` is per connection
+on beta.8, so it does not bound the total.)
 
 ### Rotation runbook
 
@@ -915,11 +1035,13 @@ It never reorders or inserts instructions.
       handler is mounted outside the auth layer.
 - [ ] Narrow CORS off `*` once the front ends have fixed origins.
 - [ ] Fund and monitor the sponsor, and keep the mainnet balance to what a bad
-      day may cost. Rent dominates: creating a wallet costs the payer about
-      0.00285 SOL (Wallet 8 bytes + Authority 145 bytes; the vault PDA is not
-      funded at creation), against a protocol fee measured in thousandths of
-      that. Ten thousand new wallets in a day is roughly 29 SOL, of which the
-      protocol fee is under 2 per cent.
+      day may cost — with usage limits off, that balance is the hard ceiling.
+      Alert on `signer_balance_lamports`, which `[metrics.fee_payer_balance]`
+      exports on the metrics port. Rent dominates: creating a wallet costs the
+      payer about 0.00285 SOL (Wallet 8 bytes + Authority 145 bytes; the vault
+      PDA is not funded at creation), against a protocol fee measured in
+      thousandths of that. Ten thousand new wallets in a day is roughly 29 SOL,
+      of which the protocol fee is under 2 per cent.
 - [ ] Point the client at a mainnet endpoint. There is none in the client repo,
       and the React package's default
       (`https://lazorkit-paymaster.onrender.com`, in

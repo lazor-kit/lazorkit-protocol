@@ -41,6 +41,7 @@ export {
 // need to assemble the instruction themselves (batching, a custom relayer).
 export { createMigrateWalletIx, type MigrateTokenPair } from './builders.js';
 
-// Likewise permissionless and fee-free: anyone may close an expired session, so
-// there is no high-level client method to route it through.
+// Likewise permissionless and fee-free: anyone may close an expired session.
+// `LazorKit.closeExpiredSession` fills in the refund destination the program
+// requires (the session's recorded rent payer); this is the raw builder.
 export { createCloseExpiredSessionIx } from './builders.js';

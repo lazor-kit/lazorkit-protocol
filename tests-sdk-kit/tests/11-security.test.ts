@@ -44,6 +44,7 @@ import {
   systemTransferFromPda,
   type TestContext,
   makeClient,
+  getUnixTime,
 } from './common.js';
 import { generateMockSecp256r1Key, fakeWebAuthnSign } from './secp256r1Utils.js';
 
@@ -105,7 +106,7 @@ describe('Security', () => {
     it('counter increments after createSession', async () => {
       const counterBefore = await client.readCounter(ownerAuthPda);
       const sessionSigner = await generateKeyPairSigner();
-      const currentSlot = await getSlot(ctx);
+      const now = await getUnixTime(ctx);
 
       const prepared = await client.prepareCreateSession({
         payer: ctx.payer.address,
@@ -116,7 +117,7 @@ describe('Security', () => {
           authorityPda: ownerAuthPda,
         },
         sessionKey: sessionSigner.address,
-        expiresAt: currentSlot + 9000n,
+        expiresAt: now + 3_600n,
         // Deliberately unrestricted: this test exercises the actionless session.
         unrestricted: true,
       });

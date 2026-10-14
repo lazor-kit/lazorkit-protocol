@@ -34,7 +34,8 @@
 //!   40k                       the parsed inner instructions
 //! + ⌈33(k + M) + C + 76⌉₈     passkey only: the accounts-hash preimage, in one
 //!                             piece, the signed payload (C + 32), the challenge (44)
-//! + 32a + 192t                policy only: the actions; a copy of each vault token account
+//! + 32a                       policy only: the actions
+//! + 192t                      every signer but an Owner: a copy of each vault token account
 //! + 72w                       account metas + CPI accounts, widest instruction
 //! + Σ (8nᵢ + ⌈nᵢ⌉₈)           each inner instruction's account list and flags
 //! + 48t + 32a                 policy only: the mint list; the actions again
@@ -45,8 +46,10 @@
 //! in `C` compact bytes, `a` actions and `t` unique writable vault-owned token
 //! accounts. `⌈x⌉₈` rounds up to a multiple of 8 (the next allocation's
 //! alignment), except for the last allocation of all. ExecuteDeferred's
-//! preimage term is `⌈33(k + M)⌉₈` and it has no policy; an Ed25519 or session
-//! Execute has no preimage term. As far as the heap goes, one inner
+//! preimage term is `⌈33(k + M)⌉₈` and it has no policy (its `192t` counts when
+//! an Admin authorized it); an Ed25519 or session Execute has no preimage term.
+//! The suites here put no vault token account in a payload without a policy,
+//! so `t` is zero there. As far as the heap goes, one inner
 //! instruction can now name all 255 accounts the format allows (127 before);
 //! 16 equal ones about 41 each (15 before).
 //! `the_accounts_hash_preimage_is_the_remaining_ceiling` pins the new limit,

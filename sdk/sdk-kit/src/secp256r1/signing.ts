@@ -221,6 +221,7 @@ export function buildDataPayloadForTransfer(
 /**
  * Builds the data payload portion of a CreateSession instruction:
  *   [session_key(32)][expires_at(8)][actions_len(2)][actions(N)]
+ * `expires_at` is Unix time in seconds.
  */
 export function buildDataPayloadForSession(
   sessionKey: Uint8Array,
