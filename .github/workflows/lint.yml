@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.89.0
+        uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
 
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.89.0
+        uses: dtolnay/rust-toolchain@1.120.0
 
       # The release toolchain (scripts/sbf-toolchain.sh), not the stable
       # installer, so the suite tests the bytes that ship: the stable
