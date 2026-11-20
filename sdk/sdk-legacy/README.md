@@ -79,7 +79,7 @@ the other.
 | devnet (foundation: program-v2) | `FLb7fyAtkfA4TSa2uYcAT8QKHd2pkoMHgmqfnXFXo7ao` | (built in `program-v2`) | `PROGRAM_ID_FOUNDATION_DEVNET` |
 
 The mainnet slot is shared between this repo's commercial build (with
-protocol fees) and the sibling [`program-v2`](https://github.com/lazor-kit/program-v2)
+protocol fees) and the sibling [`program-v2`](https://github.com/lazor-kit/lazorkit-public-good-program)
 foundation build (no fees). The same SDK works for both — the
 `LazorKitClient` probes the on-chain `ProtocolConfig` PDA on first use and
 appends fee accounts to fee-eligible instructions only when the PDA exists
